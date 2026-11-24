@@ -184,7 +184,7 @@ def test_estimate_uses_a_leg_already_routed_by_a_real_provider(tmp_path):
 
     c = Commute(tmp_path / "c.db", StraightLineLegSource())
     station, office = (37.4545, -122.1823), (37.4847, -122.1484)
-    guess = c.source.leg(station, office, "bike", c.depart)
+    guess = c.leg(station, office, "bike")  # a straight-line guess, now cached as an estimate row
     c._db.execute("INSERT INTO commute_legs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                   (37.4545, -122.1823, 37.4847, -122.1484, "bike", c.depart, "google", 1, 14.0, 4200.0, "[]",
                    datetime.now(timezone.utc).isoformat()))
