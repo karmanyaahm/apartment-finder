@@ -116,3 +116,13 @@ def test_static_and_sw(client):
     sw = c.get("/sw.js")
     assert sw.status_code == 200 and "javascript" in sw.headers["content-type"]
     assert c.get("/static/app.js").status_code == 200
+
+
+def test_redacted_view_replaces_strings_and_refuses_writes(tmp_path):
+    db = tmp_path / "seed.db"
+    seed_db(db, with_trips=True)
+    c = TestClient(create_app(db, redact={"Downtown Palo Alto": "Office", "Showers": "S████"}))
+    assert "commute_targets:Office" in c.get("/api/meta").text
+    body = c.get("/api/places").text
+    assert "Showers" not in body and "S████" in body and "Downtown Palo Alto" not in body
+    assert c.post("/api/annotations", json={}).status_code == 403

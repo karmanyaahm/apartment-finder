@@ -65,6 +65,12 @@ def _toml(path: Path) -> dict[str, Any]:
         return tomllib.load(f)
 
 
+def load_redactions(config_dir: Path | None = None) -> dict[str, str]:
+    """config/redact.toml `[replace]`: real string -> what a redacted dashboard shows instead."""
+    path = (config_dir or settings.CONFIG_DIR) / "redact.toml"
+    return {str(k): str(v) for k, v in _toml(path).get("replace", {}).items()} if path.exists() else {}
+
+
 def load_goals(config_dir: Path | None = None) -> GoalsConfig:
     return GoalsConfig.model_validate(_toml((config_dir or settings.CONFIG_DIR) / "goals.toml"))
 

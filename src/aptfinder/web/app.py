@@ -9,8 +9,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -177,12 +177,30 @@ def _parse_value(v: Any) -> Any:
         return s
 
 
-def create_app(db_path: str | Path | None = None) -> FastAPI:
+def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None = None) -> FastAPI:
+    """`redact` (real -> shown) makes a read-only view for screenshots: every API response has the strings
+    swapped, longest first, and every write is refused."""
     db_path = str(db_path or settings.DB_PATH)
     conn = connect(db_path)
     init_db(conn)
     lock = threading.Lock()
     app = FastAPI(title="apartment finder")
+
+    if redact is not None:
+        pairs = sorted(redact.items(), key=lambda kv: -len(kv[0]))
+
+        @app.middleware("http")
+        async def redacted(request: Request, call_next):  # type: ignore[no-untyped-def]
+            if request.method != "GET":
+                return JSONResponse({"detail": "read-only (redacted view)"}, status_code=403)
+            resp = await call_next(request)
+            if not request.url.path.startswith("/api/"):
+                return resp
+            body = b"".join([chunk async for chunk in resp.body_iterator]).decode()
+            for real, shown in pairs:
+                body = body.replace(real, shown)
+            headers = {k: v for k, v in resp.headers.items() if k.lower() != "content-length"}
+            return Response(body, status_code=resp.status_code, headers=headers, media_type=resp.media_type)
 
     def q(sql: str, args: tuple = ()) -> list[dict[str, Any]]:
         with lock:

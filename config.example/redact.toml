@@ -1,0 +1,5 @@
+# Strings that `aptf-web --redact` replaces in every API response (longest first); the view is read-only.
+# For screenshots of real data: goal labels, private commute targets and their coordinates, search dates.
+[replace]
+"Temp stay, 1 person, Dec 1 2026 - Jan 1 2027" = "Temp stay"
+"Downtown Palo Alto" = "Office"
