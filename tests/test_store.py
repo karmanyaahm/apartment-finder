@@ -190,3 +190,14 @@ def test_init_db_is_noop_when_schema_unchanged(conn):
     init_db(conn)  # changed version -> rebuild, restores the hash
     assert conn.execute("PRAGMA user_version").fetchone()[0] == v
     assert conn.execute("SELECT COUNT(*) FROM listings").fetchone()[0] == 0
+
+
+def test_address_without_comma_before_the_city_gets_the_same_key():
+    from aptfinder.store.keys import parse_address, place_key
+
+    a = "234 Escuela Avenue Mountain View, CA 94040"
+    b = "234 Escuela Avenue, Mountain View, CA 94040"
+    assert place_key(a, None, None, None) == place_key(b, None, None, None)
+    assert parse_address(a) == {"street": "234 escuela ave", "unit": None, "city": "mountain view"}
+    assert parse_address("273 Mountain View Ave, Mountain View, CA")["street"] == "273 mountain view ave"
+    assert parse_address("400 Avenue A Apt 3, Palo Alto")["street"] == "400 ave a"  # 'Avenue' is the name here

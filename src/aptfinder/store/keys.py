@@ -17,6 +17,9 @@ UNIT_RE = re.compile(
     r"(?:\b(?:apt|apartment|unit|ste|suite|bldg|building|fl|floor|rm|room)\b\.?|#)\s*([a-z0-9][\w-]*)",
     re.IGNORECASE,
 )
+# street-type words after normalization: where a street line ends when no comma separates it from the city
+STREET_TYPES = set(SUFFIXES.values()) | {"way", "real", "row", "walk", "plz", "plaza", "loop", "aly", "pass", "path",
+                                         "cres", "crescent", "run", "xing", "mall"}
 STATE_ZIP_RE = re.compile(r"^(ca|california)?\s*(\d{5})?(-\d{4})?$", re.IGNORECASE)
 
 
@@ -54,6 +57,14 @@ def parse_address(address: str | None, city: str | None = None) -> dict[str, str
     # drop trailing descriptive text after " - " or " (" in the street part
     street = re.split(r"\s+-\s+|\s*\(", street)[0]
     result["street"] = _norm_tokens(street)
+    # no comma before the city ("234 Escuela Avenue Mountain View, CA 94040"): the street ends at its last
+    # street-type word and the rest is the city ("Mountain View Ave" keeps its type word last, so stays whole)
+    toks = result["street"].split()
+    last = max((i for i, tok in enumerate(toks) if tok in STREET_TYPES and i > 1), default=None)
+    if last is not None and last < len(toks) - 1 and len(toks) - last - 1 <= 3:
+        result["street"] = " ".join(toks[:last + 1])
+        if not result["city"]:
+            result["city"] = " ".join(toks[last + 1:])
     if idx + 1 < len(parts) and not result["city"]:
         cand = re.split(r"\s+-\s+", parts[idx + 1])[0]
         if not STATE_ZIP_RE.match(cand.strip()):
