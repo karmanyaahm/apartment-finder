@@ -166,11 +166,13 @@ def parse_jd_floorplans(item: dict[str, Any], site: dict[str, Any]) -> list[Pars
 
 
 # --------------------------------------------------------------------------------------------- Prometheus
-PROM_SQFT = re.compile(r"(\d{3,4})\s*sqft", re.IGNORECASE)
-PROM_BB = re.compile(r"_(\d)B(\d(?:\.\d)?)BR", re.IGNORECASE)  # e.g. ..._594sqft_11CA_1B1BR_1A.svg
 
 
 def parse_prometheus(item: dict[str, Any], site: dict[str, Any]) -> list[Parsed]:
+    """A Prometheus community page: one `site_info` row (photos, link, address), no plans. The page data carries
+    floor plan *drawings* (`floorplanSvg`, named like `..._1100SQFT_3B2BR_NORTH-3A.svg`), including plans not
+    offered now (e.g. Park Place's 3-bedroom drawings, 2026-11-24); the plans actually offered load with JavaScript.
+    A drawing is not evidence of a plan, so none is read until a rendered fetch shows the offered plans."""
     text = _script(item, lambda s: s["id"] == "__NEXT_DATA__")
     if not text:
         return []
@@ -178,26 +180,14 @@ def parse_prometheus(item: dict[str, Any], site: dict[str, Any]) -> list[Parsed]
     ll = apd.get("latLong") or {}
     photos = [g.get("src") for g in ((apd.get("webContents") or {}).get("fields") or {}).get("galleryImages") or []
               if g.get("src")][:16]
-    base = dict(address=apd.get("fullAddress") or site.get("address"), city=apd.get("city"), lat=ll.get("lat"), lon=ll.get("lon"),
-                kind="apartment", term="long", property_name=apd.get("name"), operator="Prometheus")
-    out = []
-    pngs = apd.get("floorplanPng") or {}
-    for name, svg in (apd.get("floorplanSvg") or {}).items():
-        img = pngs.get(name) or svg
-        fname = (svg or "").rsplit("/", 1)[-1]
-        ms, mb = PROM_SQFT.search(fname), PROM_BB.search(fname)
-        sqft = float(ms.group(1)) if ms else None
-        beds, baths = (float(mb.group(1)), float(mb.group(2))) if mb else (None, None)
-        if beds is None and "studio" in fname.lower():
-            beds = 0.0
-        out.append(Parsed(
-            source_id=f"{site['id']}:m:{re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')}", url=site["url"],
-            price=None, price_basis=None,
-            data=ObservationData(**base, floor_plan=name, beds=beds, baths=baths, sqft=sqft,
-                                 extra={"site": site["id"], "platform": "prometheus", "floorplan_image": img,
-                                        "images": photos, "sizes_from": "plan drawing file name",
-                                        "note": "prices and availability load via JavaScript"})))
-    return out
+    return [Parsed(source_id=f"{site['id']}:site", url=site["url"], price=None, price_basis=None,
+                   data=ObservationData(address=apd.get("fullAddress") or site.get("address"), city=apd.get("city"),
+                                        lat=ll.get("lat"), lon=ll.get("lon"), kind=SITE_INFO,
+                                        property_name=apd.get("name") or site.get("name"), operator="Prometheus",
+                                        extra={"site": site["id"], "platform": "prometheus", "images": photos,
+                                               "plan_drawings": sorted(apd.get("floorplanSvg") or {}),
+                                               "note": "community website: photos and link; offered plans load "
+                                                       "via JavaScript"}))]
 
 
 # ------------------------------------------------------------------------------- any site: photos only

@@ -69,7 +69,10 @@ def evaluate_all(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> di
     anns = place_annotations(conn)
     low = low_accuracy(accuracy(conn), cfg.verify.min_samples, cfg.verify.min_accuracy)
     # site_info rows (a community website's photos and link) are not offers: no goal applies to them
-    listings = [dict(r) for r in conn.execute("SELECT * FROM listings WHERE kind IS NOT 'site_info'")]
+    # nor are a community site's plans without a price (Prometheus plan drawings, Landsby's plan list): the plan
+    # exists, but no unit in it is known to be offered, so it shows in the drawer and does not count for goals
+    listings = [dict(r) for r in conn.execute("SELECT * FROM listings WHERE kind IS NOT 'site_info' "
+                                              "AND NOT (source = 'direct' AND price IS NULL)")]
     inherit_prices(listings)  # a price-less plan row takes the same plan's price from another source
     out: dict[str, Any] = {"listings": {}, "places": {}}
     for gid, goal in cfg.goals.items():

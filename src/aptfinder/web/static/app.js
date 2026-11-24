@@ -332,7 +332,8 @@ async function openPlace(pk) {
       <td>${rng(pl.sqft, (v) => num(v))}</td>
       <td>${rng(pl.price_month, money)}</td>
       <td>${pl.price_per_bed ? money(pl.price_per_bed) : ""}</td>
-      <td>${pl.n_units ? `${pl.n_units} unit${pl.n_units > 1 ? "s" : ""}` : `${pl.n_active} listing${pl.n_active === 1 ? "" : "s"}`}</td>
+      <td>${pl.plan_only ? '<span class="muted" title="Listed in the community\'s own plan data, with no price: no unit in this plan is known to be offered. Not counted for goals.">plan exists, no unit offered</span>'
+        : pl.n_units ? `${pl.n_units} unit${pl.n_units > 1 ? "s" : ""}` : `${pl.n_active} listing${pl.n_active === 1 ? "" : "s"}`}</td>
       <td>${esc(pl.earliest || "")}</td>
       <td>${pl.from_direct ? `<b>own site</b>${pl.also_on.length ? `<br><span class="muted">also on ${esc(pl.also_on.join(", "))}</span>` : ""}` : esc(pl.sources.join(", "))}</td>
       <td>${pl.image ? `<a href="${esc(pl.image)}" target="_blank" rel="noopener noreferrer"><img class="plan-img" loading="lazy" src="${esc(pl.image)}" alt="floor plan" onerror="this.parentNode.remove()"></a>` : ""}</td>

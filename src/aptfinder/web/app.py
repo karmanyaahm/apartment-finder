@@ -84,6 +84,8 @@ def group_plans(listings: list[dict[str, Any]]) -> list[dict[str, Any]]:
                            for u in [(l["data"].get("extra") or {}).get("floorplan_image")]
                            if u and not any(h in u for h in HOTLINK_BLOCKED)), None),
             "listing_ids": [f"{l['source']}|{l['source_id']}" for l in ls],
+            # only the community's own plan list, no price: the plan exists, no unit in it is known to be offered
+            "plan_only": all(l["source"] == "direct" and not l["fields"].get("price") for l in ls),
         })
     return sorted(out, key=lambda p: (p["offer"] != "lease", p["offer"], p["beds"] is None, p["beds"] or 0, p["baths"] or 0,
                                       (p["price_month"] or [1e9])[0]))

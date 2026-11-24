@@ -64,7 +64,7 @@ def test_jd_floorplans_uses_config_address_when_page_has_none():
     assert p.data.address == "100 Aspen Way, Mountain View, CA 94040"
 
 
-def test_prometheus_plans_from_drawing_names():
+def test_prometheus_page_gives_the_building_not_plans_from_drawings():
     apd = {"name": "The Dean", "fullAddress": "458 San Antonio Rd, Mountain View, CA 94040", "city": "Mountain View",
            "latLong": {"lat": 37.40, "lon": -122.11},
            "floorplanSvg": {"Plan 3A": "https://x/2023_DEANO_1196sqft_32CA_3B2BR_3A.svg",
@@ -74,11 +74,10 @@ def test_prometheus_plans_from_drawing_names():
     nd = {"props": {"pageProps": {"apartmentPageData": apd}}}
     item = page("https://p.example/the-dean", [{"type": "application/json", "id": "__NEXT_DATA__",
                                                 "text": json.dumps(nd)}])
-    plans = {p.data.floor_plan: p for p in direct.parse(item, {})}
-    a3 = plans["Plan 3A"].data
-    assert (a3.beds, a3.baths, a3.sqft) == (3, 2, 1196) and plans["Plan 3A"].price is None
-    assert a3.extra["floorplan_image"] == "https://x/3A-2x.png" and a3.extra["images"] == ["https://img/1.jpg"]
-    assert plans["Plan A"].data.beds == 0
+    (p,) = direct.parse(item, {})  # one row for the building: a drawing is not an offered plan
+    assert p.data.kind == "site_info" and p.data.beds is None and p.price is None
+    assert p.data.address == "458 San Antonio Rd, Mountain View, CA 94040" and p.data.extra["images"] == ["https://img/1.jpg"]
+    assert p.data.extra["plan_drawings"] == ["Plan 3A", "Plan A"]
 
 
 def test_unknown_page_is_unparsed():
