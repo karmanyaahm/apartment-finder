@@ -40,17 +40,64 @@ Screenshots are real data, shown with `aptf-web --redact` (below).
 
 Goal examples are in [config.example/goals.toml](config.example/goals.toml).
 
+Everything runs through Nix (`flake.nix`); every `aptf-*` command is `nix run .#<name> -- <args>` from the repo root. Run them from the repo: `config/`, `data/` and `.env` are read from the current directory.
+
+## 1. Setup (once)
+
 ```sh
-uv sync --extra intake
-cp .env.example .env    # add APIFY_TOKEN, GOOGLE_MAPS_API_KEY
-cp -r config.example config  # your own goals, targets and sites; config/ is gitignored
-uv run aptf-intake coverage   # what's left to scrape
-uv run aptf-web               # dashboard at http://127.0.0.1:8765
+cp .env.example .env           # APIFY_TOKEN (needed to gather), GOOGLE_MAPS_API_KEY (optional: real routes),
+                               # CLOUDFLARED_TOKEN and APTF_BASE_PATH (optional: the tunnel, step 3)
+cp -r config.example config    # your own config; config/ is gitignored
+nix run .#db -- init           # create data/apartments.db
 ```
 
-`aptf-web --redact` serves a read-only dashboard with the strings listed in `config/redact.toml` replaced in every API response (goal labels, private commute targets and their coordinates, search dates), for screenshots or demos of real data. `scripts/screenshots.py` takes the images above from it.
+Then edit your copy in `config/`:
 
-Other commands: `aptf-db`, `aptf-identity`, `aptf-commute`, `aptf-filter`, `aptf-verify`, `aptf-eval`. Goals, commute targets, search areas and community sites live in `config/`; without it the committed example in `config.example/` is used. Tests always use `config.example/`. See [design.md](design.md) for the architecture.
+- `goals.toml`: what you are looking for (rules and nice-to-haves, see [Everything it considers](#everything-it-considers)).
+- `points/commute_targets.csv`: where you commute to.
+- `areas.toml`: the search area, split into chunks (Caltrain station walk zones). `active = [...]` lists the chunks you are working on now; places outside them show as TODO and get no paid routing. Regenerate for another region with `scripts/plan_areas.py`.
+- `direct_sites.toml`: buildings' own websites to read (optional).
+- `redact.toml`: strings to hide in screenshots (optional).
+
+## 2. Gather and explore
+
+Every scrape goes through Apify, with spend caps (`config/sources.toml`: $1 per run and a reserve). Limit what a run covers with `--chunk` (one chunk of `areas.toml`), `--area` (one ZIP, city or box id), `--max-items` and `--max-usd`, and look first with `--dry-run`:
+
+```sh
+nix run .#intake -- coverage                                     # what is done and left, per chunk, area and source
+nix run .#intake -- run zillow --chunk mountain_view --dry-run   # which areas would run; spends nothing
+nix run .#intake -- run zillow --chunk mountain_view             # sources: zillow apartments_com craigslist airbnb furnishedfinder direct
+nix run .#intake -- run craigslist --area 94041 --max-usd 0.25   # one ZIP, capped
+nix run .#identity                                               # match listings to buildings and units
+nix run .#commute -- compute                                     # free straight-line estimates for every place
+nix run .#commute -- --provider google compute --candidates --dry-run   # count paid Google calls first
+nix run .#commute -- --provider google compute --candidates      # real routes, only where a goal can still pass
+nix run .#filter -- --goal lease --status pass                   # goal results in the terminal
+nix run .#eval -- recall                                         # found vs. a hand-built benchmark
+```
+
+Run `identity` and `commute compute` after each intake run. Goal results are computed on read, so editing `goals.toml` needs no rerun.
+
+## 3. Run the dashboard
+
+```sh
+nix run                        # http://127.0.0.1:8765, local only
+nix run .#tunnel               # the same, plus a Cloudflare tunnel (CLOUDFLARED_TOKEN in .env)
+nix run . -- --redact          # read-only, strings from config/redact.toml replaced (screenshots, demos)
+```
+
+- **Tunnel:** in the Cloudflare dashboard, give the tunnel a public hostname with service `http://localhost:8765`. Use a one-level subdomain (`app.example.com`): Cloudflare's free certificate does not cover `a.b.example.com`. `CLOUDFLARED_TOKEN` is the token alone, not the whole `cloudflared ... --token` command.
+- **Protect it:** the dashboard has no login and can write (ratings, checks) and spend Google calls. Set `APTF_BASE_PATH=/SomeLongPhrase` in `.env` so it only answers under that secret path (everything else is 404), and/or put the hostname behind a Cloudflare Access policy.
+- `scripts/screenshots.py` takes the README images from the redacted view.
+
+Goals, commute targets, search areas and community sites live in `config/`; without it the committed example in `config.example/` is used. See [design.md](design.md) for the architecture.
+
+## Development
+
+```sh
+nix develop                    # uv, Python 3.12, cloudflared
+uv run pytest                  # tests always use config.example/
+```
 
 ## Reference data (refresh by hand)
 
@@ -58,7 +105,7 @@ These files are generated once and committed in `config.example/`; nothing updat
 
 - **Grocery stores** (`config/points/grocery_any.csv`, `grocery_chains.csv`), from OpenStreetMap through the Overpass API (free, fetched directly: reference data, not a listing site). Re-run when the search area in `config/area.toml` changes, or every few months:
   ```sh
-  env -u PYTHONPATH uv run python scripts/osm_groceries.py   # writes to config/points/
+  nix develop -c uv run python scripts/osm_groceries.py   # writes to config/points/
   ```
 - **Caltrain timetable** (`config/caltrain.toml`: ride-time offsets and headways per service pattern), worked out by hand from the [Caltrain GTFS feed](https://data.trilliumtransit.com/gtfs/caltrain-ca-us/caltrain-ca-us.zip) of 13-Nov-2026. **The feed is valid to 2027-01-31**; after a timetable change, update the offsets and headways (and the `source` line) by hand. There is no script.
 - **Caltrain stations** (`config/points/caltrain_stations.csv`) and **commute targets** (`config/points/commute_targets.csv`): hand-edited.

@@ -311,7 +311,7 @@ async function openPlace(pk) {
   $$(".card").forEach((c) => c.classList.toggle("sel", c.dataset.pk === pk));
   const m = S.markers[pk];
   if (m) map.panTo(m.getLatLng());
-  const d = await api(`/api/places/${encodeURIComponent(pk)}`);
+  const d = await api(`api/places/${encodeURIComponent(pk)}`);
   const p = d.place;
   const label = p.label || d.listings.find((l) => l.fields.title)?.fields.title || pk;
   const goals = Object.entries(d.goals).filter(([g, r]) => r && (S.goal === "all" || g === S.goal)).map(([g, r]) => `
@@ -320,7 +320,7 @@ async function openPlace(pk) {
       ${r.nice.length ? `<div class="small muted">nice to have: ${r.nice.map(([s, t]) => `${s === "pass" ? "✓" : s === "fail" ? "✗" : "?"} ${esc(t)}`).join(" · ")}</div>` : ""}
     </div>`).join("");
   const photos = (d.photos || []).map((ph) => `<figure class="ph"><a href="${esc(ph.page || ph.url)}" target="_blank" rel="noopener noreferrer" title="Open the ${esc(ph.site || ph.source)} page this photo is from"><img loading="lazy" src="${esc(ph.url)}" alt="photo from ${esc(ph.site || ph.source)}" onerror="this.closest('figure').remove()"></a>${ph.page ? `<a class="src" href="${esc(ph.page)}" target="_blank" rel="noopener noreferrer" title="Open the page this photo came from">${esc(ph.site || ph.source)} ↗</a>` : `<span class="src">${esc(ph.source)}</span>`}</figure>`)
-    .concat(d.listings.flatMap((l) => l.media.map((f) => `<a href="/media/${encodeURIComponent(f)}" target="_blank" rel="noopener"><img src="/media/${encodeURIComponent(f)}" alt="file from ${esc(l.source)}"></a>`)));
+    .concat(d.listings.flatMap((l) => l.media.map((f) => `<a href="media/${encodeURIComponent(f)}" target="_blank" rel="noopener"><img src="media/${encodeURIComponent(f)}" alt="file from ${esc(l.source)}"></a>`)));
   const rng = (a, f) => (!a ? '<span class="muted">?</span>' : a[0] === a[1] ? f(a[0]) : `${f(a[0])}–${f(a[1])}`);
   // leases and furnished offers (the building's own furnished option, operators' furnished stays) never mix
   const planRows = (plans) => `<div class="scroll-x"><table>
@@ -389,14 +389,14 @@ function wireDrawer(pk) {
   $$("#drawer .attr").forEach((box) => {
     const attr = box.dataset.attr;
     $$(".rate button", box).forEach((b) => b.addEventListener("click", async () => {
-      await post("/api/annotations", { entity_key: pk, attribute: attr, rating: +b.dataset.rate, goal_id: S.goal === "all" ? null : S.goal });
+      await post("api/annotations", { entity_key: pk, attribute: attr, rating: +b.dataset.rate, goal_id: S.goal === "all" ? null : S.goal });
       await refreshAfterWrite(pk); toast(`Rated ${attr} ${b.dataset.rate}/5`);
     }));
     $("form", box).addEventListener("submit", async (e) => {
       e.preventDefault();
       const c = e.target.c.value.trim();
       if (!c) return;
-      await post("/api/annotations", { entity_key: pk, attribute: attr, comment: c, goal_id: S.goal === "all" ? null : S.goal });
+      await post("api/annotations", { entity_key: pk, attribute: attr, comment: c, goal_id: S.goal === "all" ? null : S.goal });
       await refreshAfterWrite(pk); toast("Comment saved");
     });
   });
@@ -416,13 +416,13 @@ function wireDrawer(pk) {
   $$("#drawer [data-split]").forEach((b) => b.addEventListener("click", async () => {
     const [source, source_id] = b.dataset.split.split("|");
     if (!confirm(`Record that ${source} ${source_id} is a different place from the others here?`)) return;
-    const r = await post("/api/links", { source, source_id, place_key: null });
+    const r = await post("api/links", { source, source_id, place_key: null });
     toast("Split recorded"); await loadPlaces(); openPlace(r.place_key);
   }));
   $("#route-btn")?.addEventListener("click", async (e) => {
     e.target.disabled = true; e.target.textContent = "Routing…";
     try {
-      const r = await post(`/api/trips/${encodeURIComponent(pk)}`);
+      const r = await post(`api/trips/${encodeURIComponent(pk)}`);
       toast(`${r.new_trips} new trips (${r.provider}, ${r.api_calls} API calls)`);
       await refreshAfterWrite(pk);
     } catch (err) { toast("Routing failed: " + err.message, 6000); e.target.disabled = false; e.target.textContent = "Retry routing"; }
@@ -443,7 +443,7 @@ async function openVerify() {
 async function renderVerify() {
   const body = $("#verify-body");
   body.innerHTML = '<p class="muted">Loading…</p>';
-  const d = await api(`/api/verify/next?seed=${S.verifySeed}&skip=${S.verifySkip}`);
+  const d = await api(`api/verify/next?seed=${S.verifySeed}&skip=${S.verifySkip}`);
   if (d.done) { body.innerHTML = "<h2>Queue empty</h2><p>Nothing left to check. 🎉</p>"; return; }
   const it = d.item;
   const head = `<p class="muted small">${d.remaining} items in queue (conflicts first, then an even sample across sources) · item ${S.verifySkip + 1}</p>`;
@@ -485,7 +485,7 @@ function wireVbtns(box) {
   const input = $("input", box), save = $("[data-save]", box);
   const send = async (verdict, true_value) => {
     try {
-      await post("/api/checks", { ...ctx, verdict, true_value });
+      await post("api/checks", { ...ctx, verdict, true_value });
       $$("button[data-v]", box).forEach((b) => b.classList.toggle("on", b.dataset.v === verdict));
       input.classList.add("hidden"); save.classList.add("hidden");
       toast(`Recorded ${verdict.replace("_", " ")} for ${ctx.field}`);
@@ -501,7 +501,7 @@ function wireVbtns(box) {
 
 /* ---------------------------------------------------------------- status strip */
 async function loadStatus() {
-  const s = await api("/api/status");
+  const s = await api("api/status");
   const intake = s.runs.filter((r) => r.component === "intake");
   const parts = [`<span>${s.counts.places} places · ${s.counts.active}/${s.counts.listings} listings active</span>`];
   for (const r of intake) {
@@ -521,13 +521,13 @@ async function loadStatus() {
 
 /* ---------------------------------------------------------------- boot */
 async function loadPlaces() {
-  S.places = await api("/api/places");
+  S.places = await api("api/places");
   renderList();
 }
 
 async function boot() {
-  if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
-  S.meta = await api("/api/meta");
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+  S.meta = await api("api/meta");
   $("#dbname").textContent = S.meta.db;
   const gs = $("#goal-switch");
   gs.innerHTML = [`<button data-goal="all" class="on">All</button>`, ...S.meta.goals.map((g) => `<button data-goal="${esc(g.id)}" title="${esc(g.label)}">${esc(g.id)}</button>`)].join("");
@@ -556,7 +556,7 @@ async function boot() {
     if (e.key === "Escape") { $("#drawer").classList.add("hidden"); $("#verify").classList.add("hidden"); }
   });
   $("#verify-btn").addEventListener("click", openVerify);
-  S.points = await api("/api/points");
+  S.points = await api("api/points");
   buildPointLayers();
   await Promise.all([loadPlaces(), loadStatus()]);
   const pts = S.places.filter((p) => p.lat != null).map((p) => [p.lat, p.lon]);

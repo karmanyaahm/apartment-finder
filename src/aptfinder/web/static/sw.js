@@ -8,7 +8,7 @@ const APP_CACHE = "app-v1";
 const TILE_HOSTS = ["server.arcgisonline.com", "tile.openstreetmap.org", "cdnjs.cloudflare.com"];
 
 self.addEventListener("install", (e) => {
-  e.waitUntil(caches.open(APP_CACHE).then((c) => c.addAll(["/", "/static/app.js", "/static/style.css"])).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(APP_CACHE).then((c) => c.addAll(["./", "static/app.js", "static/style.css"])).then(() => self.skipWaiting()));
 });
 self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
 

@@ -184,7 +184,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
     conn = connect(db_path)
     init_db(conn)
     lock = threading.Lock()
-    app = FastAPI(title="apartment finder")
+    app = FastAPI(title="apartment finder", openapi_url=None, docs_url=None, redoc_url=None)
 
     if redact is not None:
         pairs = sorted(redact.items(), key=lambda kv: -len(kv[0]))
