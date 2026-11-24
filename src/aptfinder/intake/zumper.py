@@ -79,6 +79,7 @@ def zumper_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] | No
     extra = {"listing_id": lid, "building_id": item.get("building_id"),
              "website": None if op else clean_url(homepage)[0], "operator_url": homepage if op else None,
              "website_raw": homepage, "provider_url": item.get("provider_url"), "brokerage": item.get("brokerage_name"),
+             "phone": item.get("phone"),
              "feed": item.get("feed_name"), "padmapper_url": ("https://www.padmapper.com" + item["padmapper_url"])
              if item.get("padmapper_url") else None, "images": photos,
              "price_range": [item.get("min_price"), item.get("max_price")],
@@ -92,7 +93,9 @@ def zumper_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] | No
     for f in plans:  # a building with its offered floor plans
         ud = f.get("unit_data") or {}
         out.append(Parsed(
-            source_id=f"{lid}:fp:{f.get('listing_id')}", url=url, price=f.get("min_price") or None, price_basis="month",
+            # the plan's own listing id: the item's id is just one of its plans (all 31 buildings, 2026-11-24), so
+            # keying by it would rename every row of a building when that plan leaves the market
+            source_id=f"plan:{f.get('listing_id')}", url=url, price=f.get("min_price") or None, price_basis="month",
             data=ObservationData(**base, kind="apartment", term="short" if short else "long",
                                  furnished=True if short else None, floor_plan=f.get("title"),
                                  beds=f.get("bedrooms"), baths=_baths(f.get("bathrooms"), f.get("half_bathrooms")),
@@ -129,7 +132,7 @@ def _single(lid, url, base, extra, bmin, bmax, tmin, tmax, smin, smax, price, av
 
 
 def _summary(lid, url, base, extra) -> Parsed:
-    return Parsed(source_id=f"{lid}:building", url=url, price=None, price_basis=None,
+    return Parsed(source_id=f"building:{extra.get('building_id') or lid}", url=url, price=None, price_basis=None,
                   data=ObservationData(**base, kind=SITE_INFO,
                                        extra={**extra, "note": "building summary (beds and prices as ranges): "
                                                                "not an offer"}))
@@ -164,7 +167,7 @@ def padmapper_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] |
     m = re.search(r"/buildings/[^/]+/(.+?)-at-\d", url or "")
     if m and m.group(1) != "apartments":  # unnamed buildings read "apartments-at-801-church-st-..."
         base["property_name"] = m.group(1).replace("-", " ").title()
-    extra = {"listing_id": lid, "name": item.get("name"), "phone": item.get("phone"),
+    extra = {"listing_id": lid, "building_id": None, "name": item.get("name"), "phone": item.get("phone"),
              "images": [f"https://img.zumpercdn.com/{i}/1280x960" for i in (item.get("image_ids") or [])[:16]],
              "price_range": [item.get("price_min"), item.get("price_max")],
              "beds_range": [item.get("beds_min"), item.get("beds_max")], "has_fees": item.get("has_fees"),

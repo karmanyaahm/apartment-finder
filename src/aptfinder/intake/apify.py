@@ -26,7 +26,8 @@ class ActorRun:
     cost_usd: float | None
     charged_events: dict[str, int] | None
     console_url: str
-    truncated: bool = False  # the source said there was more than it returned (e.g. Places' 60-result limit)
+    truncated: bool = False  # the source said there was more than it returned: every area of the run is partial
+    truncated_areas: list[str] | None = None  # ... or only these areas (Places: a box whose query hit 60 results)
 
 
 def _client() -> httpx.Client:

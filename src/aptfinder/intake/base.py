@@ -203,6 +203,9 @@ def run_source(conn: sqlite3.Connection, adapter: Adapter, areas: list[Area], *,
                     parsed.append((q, aid))
             exhausted = len(run.items) + len(skipped) < cap_each * len(group) and not run.truncated
             states = _area_states(per_area, cap_each, exhausted, ok)
+            for aid in run.truncated_areas or []:  # the source said there is more in this area than it returned
+                if states.get(aid) == "complete":
+                    states[aid] = "partial"
             if adapter.name in RANKED_SOURCES:
                 states = {a: ("partial" if s == "complete" else s) for a, s in states.items()}
             if run.items and not parsed:  # nothing usable came back: never coverage
@@ -314,7 +317,7 @@ def reparse(conn: sqlite3.Connection, adapter: Adapter, raw_file: str) -> dict[s
     from pathlib import Path
 
     blob = json.loads(Path(raw_file).read_text())
-    cfg = load_sources()[adapter.name]
+    cfg = load_sources().get(adapter.name, {})  # parsers read little config; a reparse must not need the section
     run_id = start_run(conn, "intake", adapter.name, {"reparse_of": raw_file, "scope": "targeted",
                                                      "actor": blob.get("actor"), "cities": [blob.get("city")]})
     counts = {"items": len(blob["items"]), "observations": 0, "unparsed": 0, "skipped": 0}

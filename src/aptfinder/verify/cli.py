@@ -42,7 +42,7 @@ def main(argv: list[str] | None = None) -> None:
             print(f"  {field:16s} {a['agree']}/{a['compared']}")
 
 
-FIELDS = ["property_name", "operator", "address", "unit", "floor_plan", "beds", "baths", "sqft", "price", "price_basis",
+FIELDS = ["property_name", "operator", "address", "lat", "lon", "unit", "floor_plan", "beds", "baths", "sqft", "price", "price_basis",
           "available_from", "kind", "term", "furnished"]
 EXTRA = ["website", "phone", "rating", "rating_count", "business_status", "price_range", "beds_range", "units_offered",
          "provider_url", "padmapper_url", "operator_page"]

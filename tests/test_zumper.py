@@ -45,8 +45,8 @@ ZUMPER_BLUEGROUND = {
 def test_zumper_building_gives_offered_plans_and_website():
     out = ADAPTERS["zumper"].parse(ZUMPER_BUILDING, {})
     assert [(p.source_id, p.price, p.data.beds, p.data.baths, p.data.sqft, p.data.available_from) for p in out] == [
-        ("16558647:fp:18832950", 3408, 1, 1, 694, "2026-11-24"),
-        ("16558647:fp:18832949", 4215, 2, 2, 874, "2026-11-24")]
+        ("plan:18832950", 3408, 1, 1, 694, "2026-11-24"),
+        ("plan:18832949", 4215, 2, 2, 874, "2026-11-24")]
     d = out[0].data
     assert d.floor_plan == "1 Bedroom C" and d.property_name == "Reserve at Mountain View" and d.term == "long"
     assert d.address == "870 E El Camino Real, Mountain View, CA 94040"
@@ -60,7 +60,7 @@ def test_zumper_furnished_stay_and_summary():
     assert (p.data.operator, p.data.furnished, p.data.term) == ("Blueground", True, "short")
     # a listing spanning bedroom counts without plan details is the building, not an offer
     s, = ADAPTERS["zumper"].parse({**ZUMPER_BUILDING, "detail_entity_data_floorplan_listings": None}, {})
-    assert s.data.kind == "site_info" and s.price is None and s.source_id == "16558647:building"
+    assert s.data.kind == "site_info" and s.price is None and s.source_id == "building:173"
 
 
 # --------------------------------------------------------------------------------------------- PadMapper

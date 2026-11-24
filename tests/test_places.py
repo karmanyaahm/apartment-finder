@@ -75,3 +75,23 @@ def test_places_caps(conn):
                      "'places', 'text_search', 1)")
     with pytest.raises(places.PlacesCapReached, match="monthly cap of 900"):
         places.search_box(conn, "k", {"text": "a"}, BOX.bbox, 10, [0], post=lambda b: FakeResp({}))
+
+
+def test_places_call_cap_spans_every_box_of_a_run(conn, monkeypatch, tmp_path):
+    sent = []
+
+    def post(body):
+        sent.append(body)
+        return FakeResp({"places": [{**PLACE, "id": f"q{len(sent)}"}]})  # one page each
+
+    box2 = Area(kind="box", id="san_antonio", label="", chunks=["c"], bbox=[37.39, -122.12, 37.42, -122.09])
+    monkeypatch.setattr(base.settings, "RAW_DIR", tmp_path / "raw")
+    adapter = base.Adapter(**{**ADAPTERS["google_places"].__dict__,
+                              "fetch": lambda cfg, areas, cap, usd, c: places.fetch(cfg, areas, cap, usd, c, post=post)})
+    monkeypatch.setattr(base, "load_sources", lambda: {"spend": {"max_usd_per_run": 1.0}, "google_places": {
+        "max_calls": 3, "queries": [{"text": "a", "type": "apartment_complex"}, {"text": "a", "type": "apartment_building"}]}})
+    res = run_source(conn, adapter, [BOX, box2])  # 2 boxes x 2 queries = 4 calls > 3
+    assert len(sent) == 3 and res.counts["observations"] == 3  # what was paid for is kept
+    assert {a["state"] for a in res.counts["areas"].values()} == {"partial"}
+    assert any("CAP_REACHED" in w for w in res.warnings)
+

@@ -106,21 +106,28 @@ def fetch(cfg: dict[str, Any], areas: list, cap_each: int, max_usd: float, conn:
     key = settings.secret("GOOGLE_MAPS_API_KEY")
     if not key and post is None:
         raise SystemExit("GOOGLE_MAPS_API_KEY is not set in .env")
-    calls = [0]
+    calls = [0]  # one counter for the whole run (all boxes): `max_calls` is per run
     items: dict[str, dict[str, Any]] = {}
-    truncated = False
+    truncated: list[str] = []
+    status = "SUCCEEDED"
     for a in areas:
         for q in cfg.get("queries") or [{"text": "apartments", "type": "apartment_complex"}]:
-            found, more = search_box(conn, key, q, a.bbox, cfg.get("max_calls", 30), calls, post)
-            truncated |= more
+            try:
+                found, more = search_box(conn, key, q, a.bbox, cfg.get("max_calls", 30), calls, post)
+            except PlacesCapReached as e:  # keep what was paid for; the run is not complete (warned, areas partial)
+                status = f"CAP_REACHED: {e}"
+                break
+            if more and a.id not in truncated:
+                truncated.append(a.id)
             for p in found:
-                p["_box"] = a.id
-                if p.get("id") in items:  # the same place from another query: keep one, note both queries
+                if p.get("id") in items:  # the same place from another query or an overlapping box: keep one
                     items[p["id"]]["_queries"].append(q)
                 else:
-                    items[p["id"]] = {**p, "_queries": [q]}
-    return ActorRun(actor="google places api", run_id="", status="SUCCEEDED", items=list(items.values()),
-                    cost_usd=0.0, charged_events=None, console_url="", truncated=truncated)
+                    items[p["id"]] = {**p, "_box": a.id, "_queries": [q]}
+        if status != "SUCCEEDED":
+            break
+    return ActorRun(actor="google places api", run_id="", status=status, items=list(items.values()),
+                    cost_usd=0.0, charged_events=None, console_url="", truncated_areas=truncated)
 
 
 def build_input(cfg: dict[str, Any], areas: list) -> dict[str, Any]:  # unused: fetch replaces the actor input
@@ -156,6 +163,7 @@ def area_of(item: dict[str, Any], ids: list[str]) -> str | None:
     return item.get("_box") if item.get("_box") in ids else None
 
 
-ADAPTER = Adapter(name="google_places", build_input=build_input, parse=parse, area_kind="box", batch=False,
+# batch: one fetch for every box of the run, so the per-run call cap spans all boxes
+ADAPTER = Adapter(name="google_places", build_input=build_input, parse=parse, area_kind="box", batch=True,
                   area_of=area_of, required=(), skip=lambda i: i.get("businessStatus") == "CLOSED_PERMANENTLY",
                   fetch=fetch, apify=False)

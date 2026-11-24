@@ -159,12 +159,16 @@ def fetch(cfg: dict[str, Any], areas: list, cap_each: int, max_usd: float, conn)
         if claude_usd >= cfg.get("max_claude_usd", 0.5):
             it["communities_error"] = "Claude budget for this run reached"
             continue
-        it["communities"], c = ask(it.get("operator") or "", it, cfg.get("model", "haiku"), 0.3)
+        try:
+            it["communities"], c = ask(it.get("operator") or "", it, cfg.get("model", "haiku"), 0.3)
+        except (Blocker, subprocess.TimeoutExpired) as e:  # keep the paid page: the raw file is written after this
+            it["communities_error"] = f"claude: {e}"[:300]
+            continue
         it["claude_usd"] = c
         it["model"] = cfg.get("model", "haiku")
         claude_usd += c
     run.cost_usd = round((run.cost_usd or 0.0) + claude_usd, 4)
-    run.truncated = any(it["page_state"] in ("blocked", "failed") for it in run.items)
+    run.truncated = any(it["page_state"] in ("blocked", "failed") or it.get("communities_error") for it in run.items)
     return run
 
 
