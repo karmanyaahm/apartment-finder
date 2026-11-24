@@ -316,14 +316,14 @@ async function openPlace(pk) {
   const planTable = plans.length ? `<div class="scroll-x"><table>
     <tr><th>plan</th><th>bd / ba</th><th>sqft</th><th>$/month</th><th>$/bed</th><th>available</th><th>earliest</th><th>sources</th><th></th></tr>
     ${plans.map((pl) => `<tr>
-      <td>${esc(pl.name || "")}</td>
+      <td>${esc(pl.name || "")}${pl.offer !== "lease" ? `<br><span class="chip">${esc(pl.offer)}</span>` : ""}</td>
       <td>${pl.beds === 0 ? "studio" : esc(pl.beds ?? "?")} / ${esc(pl.baths ?? "?")}</td>
       <td>${rng(pl.sqft, (v) => num(v))}</td>
       <td>${rng(pl.price_month, money)}</td>
       <td>${pl.price_per_bed ? money(pl.price_per_bed) : ""}</td>
       <td>${pl.n_units ? `${pl.n_units} unit${pl.n_units > 1 ? "s" : ""}` : `${pl.n_active} listing${pl.n_active === 1 ? "" : "s"}`}</td>
       <td>${esc(pl.earliest || "")}</td>
-      <td>${esc(pl.sources.join(", "))}</td>
+      <td>${pl.from_direct ? `<b>own site</b>${pl.also_on.length ? `<br><span class="muted">also on ${esc(pl.also_on.join(", "))}</span>` : ""}` : esc(pl.sources.join(", "))}</td>
       <td>${pl.image ? `<a href="${esc(pl.image)}" target="_blank" rel="noopener noreferrer"><img class="plan-img" loading="lazy" src="${esc(pl.image)}" alt="floor plan" onerror="this.parentNode.remove()"></a>` : ""}</td>
     </tr>`).join("")}
   </table></div>` : '<p class="muted small">No plan information.</p>';

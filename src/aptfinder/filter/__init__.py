@@ -7,6 +7,7 @@ from collections import defaultdict
 from typing import Any
 
 from ..config import GoalsConfig, load_goals
+from ..plans import inherit_prices
 from ..verify import accuracy, low_accuracy
 from .rules import CHECK, FAIL, PASS, RANK, Ctx, combine, evaluate
 
@@ -56,6 +57,7 @@ def evaluate_all(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> di
     anns = place_annotations(conn)
     low = low_accuracy(accuracy(conn), cfg.verify.min_samples, cfg.verify.min_accuracy)
     listings = [dict(r) for r in conn.execute("SELECT * FROM listings")]
+    inherit_prices(listings)  # a price-less plan row takes the same plan's price from another source
     out: dict[str, Any] = {"listings": {}, "places": {}}
     for gid, goal in cfg.goals.items():
         lres, pres = {}, {}

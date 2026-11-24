@@ -19,6 +19,7 @@ from ..areas import chunk_of, is_active
 from ..areas import zones as area_zones
 from ..config import load_goals, load_point_sets, load_points
 from ..filter import best_trips, evaluate_all, nearest_by_set
+from ..plans import plan_key as _plan_key
 from ..store import append_annotation, append_check, append_link, connect, init_db
 from ..store.models import CHECKABLE_FIELDS
 
@@ -29,17 +30,6 @@ DEFAULT_ATTRIBUTES = ["overall", "status", "gym", "walk_to_caltrain", "living_ro
 LISTING_FIELDS = ["price", "price_basis", "price_month", "price_per_bed", "beds", "baths", "sqft", "kind",
                   "term", "furnished", "private_bath", "available_from", "available_to", "address", "unit",
                   "property_name", "operator", "title", "amenities", "floor_plan"]
-
-
-def _plan_key(f: dict[str, Any]) -> str:
-    """Same plan across sources = same beds, baths and size (to 10 sqft); the name only when size is unknown
-    (sources name plans differently: Avalon 'C1', Apartments.com none)."""
-    beds, baths = f.get("beds"), f.get("baths")
-    size = f"{'studio' if beds == 0 else (f'{beds:g}bd' if beds is not None else '?bd')}/" \
-           f"{f'{baths:g}' if baths is not None else '?'}ba"
-    if f.get("sqft"):
-        return f"{size}|{round(f['sqft'] / 10) * 10:.0f}sqft"
-    return f"{size}|{(f.get('floor_plan') or '').strip().lower()}"
 
 
 def group_plans(listings: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -54,16 +44,23 @@ def group_plans(listings: list[dict[str, Any]]) -> list[dict[str, Any]]:
         else:
             groups.setdefault(_plan_key(f), []).append(l)
     for l in summaries:  # join the largest plan with the same bedroom count, else stand alone
-        same = [k for k, ls in groups.items() if ls[0]["fields"].get("beds") == l["fields"]["beds"]]
+        same = [k for k, ls in groups.items() if k.startswith("lease|")
+                and ls[0]["fields"].get("beds") == l["fields"]["beds"]]
         k = max(same, key=lambda k: len(groups[k])) if same else _plan_key(l["fields"])
         groups.setdefault(k, []).append(l)
     out = []
     for key, ls in groups.items():
+        # the community's own site is current when it prices the plan; other sources are "also on"
+        direct = [l for l in ls if l["source"] == "direct" and l["fields"].get("price_month")]
+        basis = direct or ls
         f = [l["fields"] for l in ls]
-        prices = [x["price_month"] for x in f if x.get("price_month")]
+        fb = [l["fields"] for l in basis]
+        prices = [x["price_month"] for x in fb if x.get("price_month")]
         sqft = [x["sqft"] for x in f if x.get("sqft")]
-        avail = sorted(x["available_from"] for x in f if x.get("available_from"))
-        active = [l for l in ls if l["active"]]
+        avail = sorted(x["available_from"] for x in fb if x.get("available_from"))
+        active = [l for l in basis if l["active"]]
+        stay = key.startswith("stay|")
+        ops = sorted({x["operator"] for x in f if x.get("operator")})
         out.append({
             "key": key, "name": next((l["fields"]["floor_plan"] for l in sorted(ls, key=lambda l: l["source"] != "direct")
                                       if l["fields"].get("floor_plan")
@@ -73,16 +70,19 @@ def group_plans(listings: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "price_month": [min(prices), max(prices)] if prices else None,
             "price_per_bed": (min(prices) / f[0]["beds"]) if prices and f[0].get("beds") else None,
             "n_listings": len(ls), "n_active": len(active),
-            "n_units": len({x.get("unit") for x in f if x.get("unit")}),
+            "n_units": len({x.get("unit") for x in fb if x.get("unit")}),
+            "offer": "furnished stay" + (f" ({', '.join(ops)})" if ops else "") if stay else "lease",
+            "from_direct": bool(direct),
             "earliest": avail[0] if avail else None,
             "sources": sorted({l["source"] for l in ls}),
+            "also_on": sorted({l["source"] for l in ls} - {"direct"}) if direct else [],
             # the community's own drawing first; hotlink-blocked hosts last
             "image": next((u for l in sorted(ls, key=lambda l: l["source"] != "direct")
                            for u in [(l["data"].get("extra") or {}).get("floorplan_image")]
                            if u and not any(h in u for h in HOTLINK_BLOCKED)), None),
             "listing_ids": [f"{l['source']}|{l['source_id']}" for l in ls],
         })
-    return sorted(out, key=lambda p: (p["beds"] is None, p["beds"] or 0, p["baths"] or 0,
+    return sorted(out, key=lambda p: (p["offer"] != "lease", p["beds"] is None, p["beds"] or 0, p["baths"] or 0,
                                       (p["price_month"] or [1e9])[0]))
 
 

@@ -89,7 +89,8 @@ def evaluate(rule: dict[str, Any], row: dict[str, Any], ctx: Ctx) -> tuple[str, 
         if (u := _untrusted(ctx, *deps)):
             return CHECK, f"{label}: {u}"
         ok = v < rule["value"] if rule.get("strict") else v <= rule["value"]
-        return (PASS, f"{label} ({v:,.0f})") if ok else (FAIL, f"{label}: is {v:,.0f}")
+        via = f", price from {row['price_from']}" if row.get("price_from") and f.startswith("price") else ""
+        return (PASS, f"{label} ({v:,.0f}{via})") if ok else (FAIL, f"{label}: is {v:,.0f}{via}")
 
     if t == "size_options":
         beds, baths = row.get("beds"), row.get("baths")
