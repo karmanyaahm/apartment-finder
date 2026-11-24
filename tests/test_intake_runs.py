@@ -139,3 +139,16 @@ def test_reparse_supersedes_listings_it_no_longer_produces(conn, tmp_path):
         b.load_sources = orig
     active = dict(conn.execute("SELECT source_id, active FROM listings").fetchall())
     assert active == {"old-id": 0, "new-id": 1}
+
+
+def test_unparseable_run_is_not_coverage_and_empty_marker_is_empty(conn, fake, monkeypatch):
+    calls, plan = fake
+    adapter = Adapter(name="fake", build_input=lambda cfg, areas: {"areas": [a.id for a in areas]},
+                      parse=lambda item, cfg: None, is_empty_marker=lambda i: bool(i.get("noResults")))
+    register(monkeypatch, adapter)
+    plan["items"] = lambda inp: [{"junk": 1}]
+    res = run_source(conn, adapter, ZIPS[:1])
+    assert res.counts["areas"]["94040"]["state"] == "failed" and not done(coverage(conn), "fake", "94040")
+    plan["items"] = lambda inp: [{"noResults": True}]
+    res = run_source(conn, adapter, ZIPS[1:2])
+    assert res.counts["areas"]["94041"]["state"] == "empty" and done(coverage(conn), "fake", "94041")

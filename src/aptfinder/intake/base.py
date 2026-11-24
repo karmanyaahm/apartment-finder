@@ -41,6 +41,8 @@ class Adapter:
     # area_of(item, area ids) must attribute each item to its area. Otherwise one actor run per area.
     batch: bool = False
     area_of: Callable[[dict[str, Any], list[str]], str | None] | None = None
+    # an actor's "nothing found" marker item (e.g. memo23 {"noResults": true}): the area is empty, not broken
+    is_empty_marker: Callable[[dict[str, Any]], bool] | None = None
 
 
 @dataclass
@@ -171,6 +173,9 @@ def run_source(conn: sqlite3.Connection, adapter: Adapter, areas: list[Area], *,
             per_area = {aid: 0 for aid in gids}
             parsed: list[tuple[Parsed, str | None]] = []
             unparsed = 0
+            markers = [i for i in run.items if adapter.is_empty_marker and adapter.is_empty_marker(i)]
+            run.items = [i for i in run.items if i not in markers]
+            counts["empty_markers"] = counts.get("empty_markers", 0) + len(markers)
             for item in run.items:
                 aid = gids[0] if len(gids) == 1 else (adapter.area_of(item, gids) if adapter.area_of else None)
                 if aid in per_area:
@@ -183,6 +188,9 @@ def run_source(conn: sqlite3.Connection, adapter: Adapter, areas: list[Area], *,
                     parsed.append((q, aid))
             exhausted = len(run.items) < cap_each * len(group)
             states = _area_states(per_area, cap_each, exhausted, ok)
+            if run.items and not parsed:  # nothing usable came back: never coverage
+                states = {aid: "failed" for aid in gids}
+                warnings.append(f"{', '.join(gids)}: no item could be parsed; areas not credited")
             for aid in gids:
                 counts["areas"][aid] = {"items": per_area[aid], "state": states[aid], "cost_usd": round(
                     cost / len(gids), 4)}
@@ -209,10 +217,11 @@ def run_source(conn: sqlite3.Connection, adapter: Adapter, areas: list[Area], *,
                 counts["new"] += 1
             elif prev[r["source_id"]] != r["content_hash"]:
                 counts["changed"] += 1
-        if counts["items"] == 0:
+        nothing = counts["items"] == 0 and not counts.get("empty_markers")
+        if nothing:
             warnings.append("actor returned no items for any area")
         counts["warnings"] = warnings
-        status = "error" if counts["items"] == 0 else "ok"
+        status = "error" if nothing else "ok"
         finish_run(conn, run_id, status, counts, est_cost=round(spent, 4),
                    error="; ".join(warnings) if status == "error" else None)
     except Exception as e:  # record the failure, then re-raise
@@ -254,6 +263,8 @@ def coverage(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
         kind = intake.ADAPTERS[r["source"]].area_kind
         base = {"run_id": r["id"], "date": r["started_at"][:10]}
         if "areas" in params:
+            if counts.get("items") and not counts.get("observations") and counts.get("unparsed") == counts.get("items"):
+                continue  # every item unparseable (run 17, before 'failed' existed): not coverage
             per = counts.get("areas") or {aid: {"state": "complete", "items": None} for aid in params["areas"]}
             for aid, a in per.items():
                 if a.get("state") in ("complete", "empty", "partial"):

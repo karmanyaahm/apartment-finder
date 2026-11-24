@@ -212,8 +212,8 @@ def zillow_area(item: dict[str, Any], ids: list[str]) -> str | None:
 
 
 def apartments_area(item: dict[str, Any], ids: list[str]) -> str | None:
-    z = str(item.get("listingZip") or "")
-    return z if z in ids else None
+    c = str(item.get("listingCity") or "")
+    return c if c in ids else None
 
 
 ZILLOW = Adapter(name="zillow", build_input=zillow_input, parse=zillow_parse, area_kind="zip", batch=True,
@@ -223,9 +223,10 @@ CRAIGSLIST = Adapter(name="craigslist", build_input=craigslist_input, parse=crai
 
 # ------------------------------------------------------------- Apartments.com (memo23, no free-plan cap)
 def apartments2_input(cfg: dict[str, Any], areas: list) -> dict[str, Any]:
+    # City pages (proven: Mountain View returned 143 buildings). The {city}-ca-{zip} form returned
+    # "No listings were found" for 94306 on 2026-11-24.
     def url(a):
-        city = re.sub(r"[^a-z0-9]+", "-", (a.city or "").lower()).strip("-")
-        return f"https://www.apartments.com/{city}-ca-{a.id}/"
+        return f"https://www.apartments.com/{re.sub(r'[^a-z0-9]+', '-', a.id.lower()).strip('-')}-ca/"
     return {"startUrls": [url(a) for a in areas], "includeMoreDetails": True,
             "maxItems": cfg.get("max_items", 150)}
 
@@ -290,4 +291,5 @@ def apartments2_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed]
 
 
 APARTMENTS = Adapter(name="apartments_com", build_input=apartments2_input, parse=apartments2_parse,
-                     area_kind="zip", batch=True, area_of=apartments_area)
+                     area_kind="city", batch=True, area_of=apartments_area,
+                     is_empty_marker=lambda item: bool(item.get("noResults")))
