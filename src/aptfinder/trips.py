@@ -153,10 +153,15 @@ def compute_for_place(conn: sqlite3.Connection, commute: Commute, place: sqlite3
 def compute_all(conn: sqlite3.Connection, commute: Commute, place_keys: list[str] | None = None,
                 on_demand: bool = False, needs_by_place: dict[str, list[tuple[str, str]]] | None = None
                 ) -> dict[str, Any]:
+    # stay places (`<building>~<operator>`) share their building's trips (filter._Trips): never routed twice
     q = "SELECT place_key, lat, lon FROM places WHERE lat IS NOT NULL"
     places = conn.execute(q).fetchall()
     if place_keys:
         places = [p for p in places if p["place_key"] in place_keys]
+    else:
+        keys = {p["place_key"] for p in places}
+        places = [p for p in places if p["place_key"].split("~", 1)[0] == p["place_key"]
+                  or p["place_key"].split("~", 1)[0] not in keys]
     total, done, error = 0, 0, None
     try:
         for p in places:
@@ -207,9 +212,15 @@ def main(argv: list[str] | None = None) -> None:
         from .filter import routing_needs
 
         cands = routing_candidates(conn)
-        args.place = sorted(pk for pk, la, lo in conn.execute("SELECT place_key, lat, lon FROM places")
-                            if pk in cands and is_active(chunk_of(la, lo)))
-        needs_by_place = {pk: routing_needs(cands[pk]) for pk in args.place}
+        # a stay place (`<building>~<operator>`) is routed as its building, whose trips it reads
+        # (or as itself when no listing makes the building a place)
+        located = {pk: (la, lo) for pk, la, lo in conn.execute("SELECT place_key, lat, lon FROM places")}
+        merged: dict[str, set] = {}
+        for pk, goals in cands.items():
+            base = pk.split("~", 1)[0]
+            merged.setdefault(base if base in located else pk, set()).update(goals)
+        args.place = sorted(pk for pk in merged if pk in located and is_active(chunk_of(*located[pk])))
+        needs_by_place = {pk: routing_needs(merged[pk]) for pk in args.place}
         print(f"{len(args.place)} candidate places in active chunks; routing only what their goals read")
     else:
         needs_by_place = None

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 
 from ..commute.geo import haversine_m
@@ -16,9 +17,23 @@ NEAR_M = 80.0
 NO_NEAR_MERGE = {"airbnb"}
 
 
+def stay_key(pk: str, row: sqlite3.Row | dict) -> str | None:
+    """A furnished short stay rented by a third party (Blueground, an unnamed operator in its listing template,
+    a Furnished Finder host) at a building's address is its own place, `<building>~<operator>`: a different
+    landlord, closer to a hotel than to the building's leases. The building's own furnished option is not: it
+    comes from the building (source `direct`) on long terms."""
+    if row["term"] != "short" or row["source"] == "direct":
+        return None
+    who = re.sub(r"[^a-z0-9]+", "-", (row["operator"] or row["source"]).lower()).strip("-")
+    return f"{pk}~{who}"
+
+
 def decide(row: sqlite3.Row | dict) -> tuple[str, str, str, str] | None:
     """(rule, place_key, unit_key, reason) for one listing, or None when nothing identifies it."""
     pk = place_key(row["address"], row["city"], None, None)
+    if pk and (sk := stay_key(pk, row)):
+        uk = unit_key(sk, row["address"], row["unit"], row["floor_plan"])
+        return "addr_stay", sk, uk, f"third-party stay ({row['operator'] or row['source']}) at {row['address']!r}"
     if pk:
         uk = unit_key(pk, row["address"], row["unit"], row["floor_plan"])
         return "addr_unit", pk, uk, f"address {row['address']!r}"
@@ -49,7 +64,7 @@ def _near_address(decisions: dict, rows: list) -> None:
     for r in rows:
         key = (r["source"], r["source_id"])
         d = decisions.get(key)
-        if not d or d[0] != "geo_beds_price" or r["source"] in NO_NEAR_MERGE:
+        if not d or d[0] != "geo_beds_price" or r["source"] in NO_NEAR_MERGE or r["term"] == "short":
             continue
         cx, cy = int(r["lat"] * 500), int(r["lon"] * 500)
         best, best_m = None, NEAR_M
@@ -67,7 +82,7 @@ def _near_address(decisions: dict, rows: list) -> None:
 
 def run(conn: sqlite3.Connection) -> dict[str, int]:
     rows = conn.execute(
-        "SELECT source, source_id, address, unit, city, floor_plan, property_name, lat, lon, beds, price "
+        "SELECT source, source_id, address, unit, city, floor_plan, property_name, lat, lon, beds, price, term, operator "
         "FROM listings"
     ).fetchall()
     last_rule = {

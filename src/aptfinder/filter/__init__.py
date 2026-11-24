@@ -14,9 +14,21 @@ from .rules import CHECK, FAIL, PASS, RANK, Ctx, combine, evaluate
 PROVIDER_PREF = {"google": 0, "estimate": 9}
 
 
+class _Trips(defaultdict):
+    """A third-party stay place (`<building>~<operator>`) is at its building's address: it reads the building's
+    trips instead of having its own routed (identity.stay_key)."""
+
+    def get(self, key, default=None):
+        if key in self:
+            return self[key]
+        if key and "~" in key and key.split("~", 1)[0] in self:
+            return self[key.split("~", 1)[0]]
+        return default
+
+
 def best_trips(conn: sqlite3.Connection) -> dict[str, dict[tuple[str, str], dict[str, Any]]]:
     """place_key -> (point_id, mode) -> latest trip from the most trusted provider."""
-    out: dict[str, dict[tuple[str, str], dict[str, Any]]] = defaultdict(dict)
+    out: dict[str, dict[tuple[str, str], dict[str, Any]]] = _Trips(dict)
     rows = conn.execute("""
         SELECT * FROM (SELECT t.*, ROW_NUMBER() OVER (
             PARTITION BY place_key, point_id, mode, provider ORDER BY id DESC) rn FROM trips t) WHERE rn = 1

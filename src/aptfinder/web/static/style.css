@@ -119,3 +119,4 @@ details > summary { cursor: pointer; margin: 14px 0 6px; font-size: 14px; text-t
 .raw-row.hidden { display: none; }
 .raw-row pre.raw { max-height: 320px; overflow: auto; margin: 4px 0; }
 td.nowrap { white-space: nowrap; }
+.related { margin: 6px 0; padding: 6px 8px; border: 1px dashed var(--line); border-radius: 6px; }

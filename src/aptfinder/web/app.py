@@ -111,6 +111,14 @@ def gather_photos(listings: list[dict[str, Any]], limit: int = 30) -> list[dict[
     return out[:limit]
 
 
+def place_label(p: dict[str, Any]) -> str | None:
+    """A building's name or address; a third-party stay place says whose stays and where."""
+    if "~" in (p.get("place_key") or ""):
+        who = p.get("operator") or p["place_key"].split("~", 1)[1]
+        return f"{who} furnished stays · {p.get('address') or ''}".strip(" ·")
+    return p.get("property_name") or p.get("address")
+
+
 def site_name(url: str | None) -> str | None:
     if not url:
         return None
@@ -236,7 +244,7 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
             out.append({
                 **p,
                 "chunk": chunk, "todo": not is_active(chunk),
-                "label": p["property_name"] or p["address"] or title or pk,
+                "label": place_label(p) or title or pk,
                 "title": title,
                 "beds": sorted({x["beds"] for x in rows if x["beds"] is not None}),
                 "baths": sorted({x["baths"] for x in rows if x["baths"] is not None}),
@@ -253,7 +261,8 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
         rows = q("SELECT * FROM places WHERE place_key = ?", (place_key,))
         if not rows:
             raise HTTPException(404, "no such place")
-        place = rows[0]
+        place = dict(rows[0])
+        place["label"] = place_label(place)
         listings = q("SELECT * FROM listings WHERE place_key = ? ORDER BY source, source_id", (place_key,))
         with lock:
             res = evaluate_all(conn)
@@ -306,6 +315,11 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
             "matrix": matrix,
             "nearest": nearest,
             "annotations": anns,
+            # the building and its third-party stay places (`<building>~<operator>`), linked both ways
+            "related": [dict(r, label=place_label(r)) for r in q(
+                "SELECT place_key, property_name, operator, address, n_active, min_lease_month, min_stay_month "
+                "FROM places WHERE (place_key = ? OR place_key LIKE ?) AND place_key <> ?",
+                (place_key.split("~", 1)[0], place_key.split("~", 1)[0] + "~%", place_key))],
         }
 
     @app.get("/api/status")

@@ -249,3 +249,19 @@ def test_routing_needs_follow_goal_rules():
     assert (DOWNTOWN, "bike") in needs and (DOWNTOWN, "transit") in needs
     assert ("caltrain_stations", "walk") in needs
     assert all(t != "commute_targets:Meta HQ" for t, _ in needs)
+
+
+def test_third_party_stay_is_its_own_place_with_the_buildings_trips():
+    from aptfinder.filter import _Trips
+    from aptfinder.identity import decide
+
+    base = {"address": "1600 Villa St, Mountain View, CA 94041", "city": "Mountain View", "unit": "SI FL1-ID1",
+            "floor_plan": None, "lat": None, "lon": None, "beds": 3, "price": 6240, "property_name": None}
+    lease = decide({**base, "source": "apartments_com", "term": "long", "operator": None})
+    stay = decide({**base, "source": "apartments_com", "term": "short", "operator": "Blueground"})
+    own = decide({**base, "source": "direct", "term": "long", "operator": "AvalonBay"})
+    assert stay[1] == lease[1] + "~blueground" and stay[0] == "addr_stay"
+    assert own[1] == lease[1]  # the building's own furnished option stays with the building
+    t = _Trips(dict)
+    t[lease[1]][("x", "bike")] = {"minutes": 5}
+    assert t.get(stay[1]) == {("x", "bike"): {"minutes": 5}} and t.get("p_other") is None

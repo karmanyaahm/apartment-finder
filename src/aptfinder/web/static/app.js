@@ -313,7 +313,7 @@ async function openPlace(pk) {
   if (m) map.panTo(m.getLatLng());
   const d = await api(`/api/places/${encodeURIComponent(pk)}`);
   const p = d.place;
-  const label = p.property_name || p.address || d.listings.find((l) => l.fields.title)?.fields.title || pk;
+  const label = p.label || d.listings.find((l) => l.fields.title)?.fields.title || pk;
   const goals = Object.entries(d.goals).filter(([g, r]) => r && (S.goal === "all" || g === S.goal)).map(([g, r]) => `
     <div><span class="chip ${r.status}">${esc(g)}: ${esc(STATUS_LABEL[r.status])}</span>
       ${r.reasons.map(([s, t]) => `<div class="reason ${s}">${s === "pass" ? "✓" : s === "fail" ? "✗" : "?"} ${esc(t)}</div>`).join("")}
@@ -337,11 +337,11 @@ async function openPlace(pk) {
       <td>${pl.image ? `<a href="${esc(pl.image)}" target="_blank" rel="noopener noreferrer"><img class="plan-img" loading="lazy" src="${esc(pl.image)}" alt="floor plan" onerror="this.parentNode.remove()"></a>` : ""}</td>
     </tr>`).join("")}
   </table></div>`;
-  const leasePlans = (d.plans || []).filter((pl) => pl.offer_kind === "lease");
-  const furnPlans = (d.plans || []).filter((pl) => pl.offer_kind !== "lease");
-  const planTable = (leasePlans.length ? planRows(leasePlans) : '<p class="muted small">No lease plan information.</p>')
-    + (furnPlans.length ? `<h3>Furnished options &amp; stays (${furnPlans.length})</h3>
-      <p class="muted small">Furnished leases offered by the building itself, and furnished short stays by operators (e.g. Blueground) inside it.</p>${planRows(furnPlans)}` : "");
+  const planTable = (d.plans || []).length ? planRows(d.plans) : '<p class="muted small">No plan information.</p>';
+  const isStay = pk.includes("~");
+  const related = (d.related || []).map((r) => `<a href="#" data-goto="${esc(r.place_key)}">${esc(r.label)}</a>
+      <span class="muted">(${r.n_active} active${r.min_stay_month ? `, stays from ${money(r.min_stay_month)}/mo` : r.min_lease_month ? `, from ${money(r.min_lease_month)}/mo` : ""})</span>`);
+  const relatedBox = related.length ? `<div class="related small">${isStay ? "Building:" : "Also in this building (third party, like a hotel):"} ${related.join(" · ")}</div>` : "";
   const unitRows = d.listings.map((l, i) => {
     const f = l.fields;
     const c = (k) => ck(l.checks[k], l.overridden.includes(k));
@@ -373,7 +373,8 @@ async function openPlace(pk) {
     <div class="muted small">${esc(p.address || "address unknown")} ${p.city ? "· " + esc(p.city) : ""} · ${esc(pk)}</div>
     <h3>Goals</h3>${goals}
     ${photos.length ? `<h3>Photos (${photos.length})</h3><div class="media">${photos.join("")}</div>` : '<p class="muted small">No photos from any source.</p>'}
-    <h3>Floor plans (leases)</h3>${planTable}
+    ${relatedBox}
+    <h3>${isStay ? "Furnished stays" : "Floor plans"}</h3>${planTable}
     ${listingTable}
     <h3>Price history (per month)</h3>${historyChart([...d.listings].sort((a, b) => b.history.length - a.history.length).slice(0, 8))}
     <h3>Commute <button id="route-btn" class="small">${S.meta.google ? "Route with Google" : "Recompute (estimate)"}</button></h3>${matrixTable(d)}
@@ -406,6 +407,7 @@ function wireDrawer(pk) {
     S.meta.attributes.push(a);
     openPlace(pk);
   });
+  $$("#drawer [data-goto]").forEach((a) => a.addEventListener("click", (e) => { e.preventDefault(); openPlace(a.dataset.goto); }));
   $$("#drawer [data-raw]").forEach((b) => b.addEventListener("click", () => {
     const row = $(`#drawer [data-raw-row="${b.dataset.raw}"]`);
     row.classList.toggle("hidden");
