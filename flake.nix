@@ -6,7 +6,11 @@
   outputs = { self, nixpkgs }:
     let
       system = "x86_64-linux";
-      pkgs = nixpkgs.legacyPackages.${system};
+      # claude-code is unfree; allow only it. It runs `extract`, `discover-sites` (headless `claude -p`).
+      pkgs = import nixpkgs {
+        inherit system;
+        config.allowUnfreePredicate = pkg: builtins.elem (nixpkgs.lib.getName pkg) [ "claude-code" ];
+      };
       py = pkgs.python312.pkgs;
 
       # apify-client is not in nixpkgs: the same wheels uv.lock pins.
@@ -40,7 +44,8 @@
         build-system = [ py.hatchling ];
         dependencies = [ py.pydantic py.httpx py.fastapi py.uvicorn py.python-dotenv apify-client ];
         # config/, data/ and .env are read from the directory you run in (override with APTF_ROOT).
-        makeWrapperArgs = [ "--run" "export APTF_ROOT=\${APTF_ROOT:-$PWD}" ];
+        makeWrapperArgs = [ "--run" "export APTF_ROOT=\${APTF_ROOT:-$PWD}"
+                            "--prefix" "PATH" ":" "${pkgs.claude-code}/bin" ];  # claude for extract / discover-sites
         doCheck = false; # tests run with `uv run pytest` in the repo
         meta.license = pkgs.lib.licenses.mit;
       };
@@ -85,7 +90,7 @@
         tunnel = { type = "app"; program = "${tunnel}/bin/aptf-tunnel"; };
       };
       devShells.${system}.default = pkgs.mkShell {
-        packages = [ pkgs.uv pkgs.python312 pkgs.cloudflared ];
+        packages = [ pkgs.uv pkgs.python312 pkgs.cloudflared pkgs.claude-code ];
         shellHook = "unset PYTHONPATH"; # a system PYTHONPATH (e.g. ROS) breaks pytest
       };
     };

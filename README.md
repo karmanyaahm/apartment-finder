@@ -78,7 +78,7 @@ nix run .#eval -- recall                                         # found vs. a h
 
 Run `identity` and `commute compute` after each intake run. Goal results are computed on read, so editing `goals.toml` needs no rerun.
 
-Buildings' own websites (the source of truth when found) and facts that sit only in listing text. These call a local, logged-in Claude Code (`claude -p`); `nix shell --impure nixpkgs/nixos-unstable#claude-code` provides a current one (set `NIXPKGS_ALLOW_UNFREE=1`):
+Buildings' own websites (the source of truth when found) and facts that sit only in listing text. These call headless Claude Code (`claude -p`), which the flake ships as a dependency (`claude-code`, the one unfree package it allows); log in once with `nix develop -c claude`:
 
 ```sh
 nix run .#intake -- extract craigslist                           # Haiku reads listing text: address, name, website, furnished, ...
