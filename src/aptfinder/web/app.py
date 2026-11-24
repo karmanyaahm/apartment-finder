@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .. import settings, verify
+from ..areas import chunk_of, is_active
+from ..areas import zones as area_zones
 from ..config import load_goals, load_point_sets, load_points
 from ..filter import best_trips, evaluate_all, nearest_by_set
 from ..store import append_annotation, append_check, append_link, connect, init_db
@@ -25,7 +28,74 @@ MODES = ["walk", "bike", "transit", "drive", "bike_train_bike", "bike_bus_bike"]
 DEFAULT_ATTRIBUTES = ["overall", "status", "gym", "walk_to_caltrain", "living_room"]
 LISTING_FIELDS = ["price", "price_basis", "price_month", "price_per_bed", "beds", "baths", "sqft", "kind",
                   "term", "furnished", "private_bath", "available_from", "available_to", "address", "unit",
-                  "property_name", "operator", "title", "amenities"]
+                  "property_name", "operator", "title", "amenities", "floor_plan"]
+
+
+def _plan_key(f: dict[str, Any]) -> str:
+    beds, baths = f.get("beds"), f.get("baths")
+    size = f"{'studio' if beds == 0 else (f'{beds:g}bd' if beds is not None else '?bd')}/" \
+           f"{f'{baths:g}' if baths is not None else '?'}ba"
+    return f"{size}|{(f.get('floor_plan') or '').strip().lower()}"
+
+
+def group_plans(listings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Floor plans of a place: listings grouped by beds, baths and plan name across all sources."""
+    listings = [l for l in listings if l["active"]] or listings  # inactive rows only if nothing is live
+    groups: dict[str, list[dict[str, Any]]] = {}
+    summaries = []  # beds-only rows (e.g. Zillow's per-building "3bd from $X", baths unknown)
+    for l in listings:
+        f = l["fields"]
+        if f.get("baths") is None and f.get("beds") is not None and not f.get("unit"):
+            summaries.append(l)
+        else:
+            groups.setdefault(_plan_key(f), []).append(l)
+    for l in summaries:  # join the largest plan with the same bedroom count, else stand alone
+        same = [k for k, ls in groups.items() if ls[0]["fields"].get("beds") == l["fields"]["beds"]]
+        k = max(same, key=lambda k: len(groups[k])) if same else _plan_key(l["fields"])
+        groups.setdefault(k, []).append(l)
+    out = []
+    for key, ls in groups.items():
+        f = [l["fields"] for l in ls]
+        prices = [x["price_month"] for x in f if x.get("price_month")]
+        sqft = [x["sqft"] for x in f if x.get("sqft")]
+        avail = sorted(x["available_from"] for x in f if x.get("available_from"))
+        active = [l for l in ls if l["active"]]
+        out.append({
+            "key": key, "name": next((x["floor_plan"] for x in f if x.get("floor_plan")
+                                      and not re.fullmatch(r"(studio|\d+bd)", x["floor_plan"])), None),
+            "beds": f[0].get("beds"), "baths": next((x["baths"] for x in f if x.get("baths") is not None), None),
+            "sqft": [min(sqft), max(sqft)] if sqft else None,
+            "price_month": [min(prices), max(prices)] if prices else None,
+            "price_per_bed": (min(prices) / f[0]["beds"]) if prices and f[0].get("beds") else None,
+            "n_listings": len(ls), "n_active": len(active),
+            "n_units": len({x.get("unit") for x in f if x.get("unit")}),
+            "earliest": avail[0] if avail else None,
+            "sources": sorted({l["source"] for l in ls}),
+            "image": next((l["data"].get("extra", {}).get("floorplan_image") for l in ls
+                           if l["data"].get("extra", {}).get("floorplan_image")), None),
+            "listing_ids": [f"{l['source']}|{l['source_id']}" for l in ls],
+        })
+    return sorted(out, key=lambda p: (p["beds"] is None, p["beds"] or 0, p["baths"] or 0,
+                                      (p["price_month"] or [1e9])[0]))
+
+
+# Image hosts that refuse hotlinked requests (Chrome: ERR_BLOCKED_BY_ORB on every images1.apartments.com URL,
+# 2026-11-24). Their photos are listed last; showing them needs mirroring through Apify (not done).
+HOTLINK_BLOCKED = ("images1.apartments.com",)
+
+
+def gather_photos(listings: list[dict[str, Any]], limit: int = 30) -> list[dict[str, str]]:
+    """Photo URLs from every listing (not mirrored: the browser loads them from the listing site's CDN).
+    Hosts known to block hotlinking go last, so loadable photos fill the limit first."""
+    seen, out = set(), []
+    listings = sorted(listings, key=lambda l: any(
+        h in u for u in (l["data"].get("extra") or {}).get("images") or [] for h in HOTLINK_BLOCKED))
+    for l in listings:
+        for u in (l["data"].get("extra") or {}).get("images") or []:
+            if u and u not in seen:
+                seen.add(u)
+                out.append({"url": u, "source": l["source"]})
+    return out[:limit]
 
 
 class AnnotationIn(BaseModel):
@@ -98,6 +168,7 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
             "point_sets": {k: {"label": v.label or k} for k, v in load_point_sets().items()},
             "attributes": DEFAULT_ATTRIBUTES,
             "google": bool(settings.secret("GOOGLE_MAPS_API_KEY")),
+            "areas": area_zones(),
         }
 
     @app.get("/api/points")
@@ -129,8 +200,10 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
                                   "source_id": r["source_id"]}
             title = next((x["title"] for x in rows if x.get("title")), None)
             a = anns.get(pk, {})
+            chunk = chunk_of(p["lat"], p["lon"])
             out.append({
                 **p,
+                "chunk": chunk, "todo": not is_active(chunk),
                 "label": p["property_name"] or p["address"] or title or pk,
                 "title": title,
                 "beds": sorted({x["beds"] for x in rows if x["beds"] is not None}),
@@ -194,6 +267,8 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
         return {
             "place": place,
             "goals": {gid: res["places"][gid].get(place_key) for gid in res["places"]},
+            "plans": group_plans(out_listings),
+            "photos": gather_photos(out_listings),
             "listings": out_listings,
             "matrix": matrix,
             "nearest": nearest,

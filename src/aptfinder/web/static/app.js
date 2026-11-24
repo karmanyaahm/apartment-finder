@@ -101,6 +101,16 @@ function buildPointLayers() {
     overlays[label] = g;
     if (set === "commute_targets" || set === "caltrain_stations") g.addTo(map);
   }
+  const a = S.meta.areas;
+  if (a && a.zones) {
+    const zl = L.layerGroup(a.zones.map((z) => {
+      const on = a.active.includes(z.chunk);
+      return L.circle([z.lat, z.lon], { radius: a.radius_km * 1000, color: on ? "#1f9d55" : "#888", weight: on ? 2 : 1,
+        dashArray: on ? null : "6 6", fill: on, fillOpacity: 0.04, interactive: false });
+    }));
+    zl.addTo(map);
+    overlays["Station walk zones (25 min)"] = zl;
+  }
   L.control.layers(null, overlays, { collapsed: true, position: "topright" }).addTo(map);
 }
 
@@ -128,9 +138,11 @@ function filtered() {
   const minBeds = parseFloat($("#minbeds").value);
   const maxPpb = parseFloat($("#maxppb").value);
   const showInactive = $("#inactive").checked;
+  const showTodo = $("#todo").checked;
   return S.places.filter((p) => {
     if (!sts.has(placeStatus(p))) return false;
     if (!showInactive && !p.n_active) return false;
+    if (!showTodo && p.todo) return false;
     if (!isNaN(minBeds) && !(p.max_beds >= minBeds)) return false;
     if (!isNaN(maxPpb) && p.min_price_per_bed != null && p.min_price_per_bed > maxPpb) return false;
     if (q) {
@@ -171,7 +183,7 @@ function renderList() {
     const mins = minutesFor(p);
     const chips = Object.entries(p.goals).map(([g, r]) => `<span class="chip ${r.status}" title="${esc(r.reasons.join("\n"))}">${esc(g)}: ${esc(STATUS_LABEL[r.status])}</span>`).join("");
     const bb = p.beds.length ? `${p.beds.map((b) => (b === 0 ? "studio" : b + "bd")).join("/")} · ${p.baths.join("/")}ba` : "beds ?";
-    return `<div class="card ${st === "fail" ? "dim" : ""} ${S.selected === p.place_key ? "sel" : ""}" data-pk="${esc(p.place_key)}">
+    return `<div class="card ${st === "fail" || p.todo ? "dim" : ""} ${S.selected === p.place_key ? "sel" : ""}" data-pk="${esc(p.place_key)}">
       <h4>${esc(p.label)} ${stars(p.rating)}</h4>
       <div class="facts">
         <span><b>${money(p.min_price_month)}</b>/mo</span><span><b>${money(p.min_price_per_bed)}</b>/bed</span>
@@ -180,7 +192,7 @@ function renderList() {
         <span>${esc(p.sources)}</span>${p.n_active ? "" : '<span style="color:var(--bad)">inactive</span>'}
         ${p.user_status ? `<span>status: ${esc(p.user_status)}</span>` : ""}
       </div>
-      <div class="chips">${chips}</div>
+      <div class="chips">${p.todo ? `<span class="chip todo" title="outside the active chunks${p.chunk ? ` (in ${esc(p.chunk)})` : " and every station walk zone"}">TODO area</span>` : ""}${chips}</div>
     </div>`;
   }).join("");
   $$(".card").forEach((el) => el.addEventListener("click", () => openPlace(el.dataset.pk)));
@@ -297,28 +309,55 @@ async function openPlace(pk) {
       ${r.reasons.map(([s, t]) => `<div class="reason ${s}">${s === "pass" ? "✓" : s === "fail" ? "✗" : "?"} ${esc(t)}</div>`).join("")}
       ${r.nice.length ? `<div class="small muted">nice to have: ${r.nice.map(([s, t]) => `${s === "pass" ? "✓" : s === "fail" ? "✗" : "?"} ${esc(t)}`).join(" · ")}</div>` : ""}
     </div>`).join("");
-  const media = d.listings.flatMap((l) => l.media.map((f) => `<a href="/media/${encodeURIComponent(f)}" target="_blank" rel="noopener"><img src="/media/${encodeURIComponent(f)}" alt="photo or floor plan from ${esc(l.source)}"></a>`));
-  const fields = ["price", "price_month", "price_per_bed", "beds", "baths", "sqft", "kind", "term", "furnished", "private_bath", "available_from", "available_to", "unit", "amenities"];
-  const listingTable = `<div class="scroll-x"><table>
-    <tr><th>field</th>${d.listings.map((l) => `<th><a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">${esc(l.source)}</a><br><span class="muted">${l.active ? "active" : "inactive"} · ${esc((l.first_seen || "").slice(0, 10))} → ${esc((l.last_seen || "").slice(0, 10))}</span></th>`).join("")}</tr>
-    ${fields.map((f) => `<tr><th>${esc(f)}</th>${d.listings.map((l) => {
-      const cf = f === "price_month" || f === "price_per_bed" ? "price" : f;
-      return `<td>${fmtField(f, l.fields[f])}${f === "price" && l.fields.price_basis ? ` <span class="muted">/${esc(l.fields.price_basis)}</span>` : ""}${["price_month", "price_per_bed"].includes(f) ? "" : ck(l.checks[cf], l.overridden.includes(cf))}</td>`;
-    }).join("")}</tr>`).join("")}
-    <tr><th>listing</th>${d.listings.map((l) => `<td><button class="small" data-split="${esc(l.source)}|${esc(l.source_id)}" title="Record that this listing is a different place">split off</button></td>`).join("")}</tr>
-  </table></div>
-  <p class="muted small">✓ checked correct · ✗ checked wrong · ✎ corrected value shown · · not hand-checked. Source shown in each column header.</p>`;
+  const photos = (d.photos || []).map((ph) => `<a href="${esc(ph.url)}" target="_blank" rel="noopener noreferrer"><img loading="lazy" src="${esc(ph.url)}" alt="photo from ${esc(ph.source)}" title="${esc(ph.source)}" onerror="this.parentNode.remove()"></a>`)
+    .concat(d.listings.flatMap((l) => l.media.map((f) => `<a href="/media/${encodeURIComponent(f)}" target="_blank" rel="noopener"><img src="/media/${encodeURIComponent(f)}" alt="file from ${esc(l.source)}"></a>`)));
+  const rng = (a, f) => (!a ? '<span class="muted">?</span>' : a[0] === a[1] ? f(a[0]) : `${f(a[0])}–${f(a[1])}`);
+  const plans = d.plans || [];
+  const planTable = plans.length ? `<div class="scroll-x"><table>
+    <tr><th>plan</th><th>bd / ba</th><th>sqft</th><th>$/month</th><th>$/bed</th><th>available</th><th>earliest</th><th>sources</th><th></th></tr>
+    ${plans.map((pl) => `<tr>
+      <td>${esc(pl.name || "")}</td>
+      <td>${pl.beds === 0 ? "studio" : esc(pl.beds ?? "?")} / ${esc(pl.baths ?? "?")}</td>
+      <td>${rng(pl.sqft, (v) => num(v))}</td>
+      <td>${rng(pl.price_month, money)}</td>
+      <td>${pl.price_per_bed ? money(pl.price_per_bed) : ""}</td>
+      <td>${pl.n_units ? `${pl.n_units} unit${pl.n_units > 1 ? "s" : ""}` : `${pl.n_active} listing${pl.n_active === 1 ? "" : "s"}`}</td>
+      <td>${esc(pl.earliest || "")}</td>
+      <td>${esc(pl.sources.join(", "))}</td>
+      <td>${pl.image ? `<a href="${esc(pl.image)}" target="_blank" rel="noopener noreferrer"><img class="plan-img" loading="lazy" src="${esc(pl.image)}" alt="floor plan" onerror="this.parentNode.remove()"></a>` : ""}</td>
+    </tr>`).join("")}
+  </table></div>` : '<p class="muted small">No plan information.</p>';
+  const unitRows = d.listings.map((l) => {
+    const f = l.fields;
+    const c = (k) => ck(l.checks[k], l.overridden.includes(k));
+    return `<tr class="${l.active ? "" : "inactive"}">
+      <td><a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">${esc(l.source)}</a></td>
+      <td>${esc(f.unit || "")}</td><td>${esc(f.floor_plan || "")}</td>
+      <td>${fmtField("beds", f.beds)}${c("beds")} / ${fmtField("baths", f.baths)}${c("baths")}</td>
+      <td>${fmtField("sqft", f.sqft)}${c("sqft")}</td>
+      <td>${fmtField("price", f.price)}${f.price_basis && f.price_basis !== "month" ? ` <span class="muted">/${esc(f.price_basis)}</span>` : ""}${c("price")}</td>
+      <td>${esc(f.available_from || "")}${c("available_from")}</td>
+      <td class="muted">${esc((l.first_seen || "").slice(5, 10))}→${esc((l.last_seen || "").slice(5, 10))}${l.active ? "" : " inactive"}</td>
+      <td><button class="small" data-split="${esc(l.source)}|${esc(l.source_id)}" title="Record that this listing is a different place">split</button></td>
+    </tr>`;
+  }).join("");
+  const listingTable = `<details${d.listings.length <= 4 ? " open" : ""}><summary>Units &amp; listings (${d.listings.length})</summary>
+    <div class="scroll-x"><table>
+    <tr><th>source</th><th>unit</th><th>plan</th><th>bd / ba</th><th>sqft</th><th>price</th><th>available</th><th>seen</th><th></th></tr>
+    ${unitRows}</table></div>
+    <p class="muted small">✓ checked correct · ✗ checked wrong · ✎ corrected value shown · · not hand-checked.</p></details>`;
   $("#drawer-body").innerHTML = `
     <h2>${esc(label)} ${stars(d.annotations.filter((a) => a.attribute === "overall" && a.rating).slice(-1)[0]?.rating)}</h2>
     <div class="muted small">${esc(p.address || "address unknown")} ${p.city ? "· " + esc(p.city) : ""} · ${esc(pk)}</div>
     <h3>Goals</h3>${goals}
-    ${media.length ? `<h3>Photos & floor plans</h3><div class="media">${media.join("")}</div>` : ""}
-    <h3>Listings by source</h3>${listingTable}
-    <h3>Price history (per month)</h3>${historyChart(d.listings)}
+    ${photos.length ? `<h3>Photos (${photos.length})</h3><div class="media">${photos.join("")}</div>` : '<p class="muted small">No photos from any source.</p>'}
+    <h3>Floor plans</h3>${planTable}
+    ${listingTable}
+    <h3>Price history (per month)</h3>${historyChart([...d.listings].sort((a, b) => b.history.length - a.history.length).slice(0, 8))}
     <h3>Commute <button id="route-btn" class="small">${S.meta.google ? "Route with Google" : "Recompute (estimate)"}</button></h3>${matrixTable(d)}
     <h3>Nearby</h3>${nearestBlock(d)}
     <h3>Your notes & ratings</h3>${attributesBlock(d, pk)}
-    <h3>Raw data</h3>${d.listings.map((l) => `<details><summary>${esc(l.source)} ${esc(l.source_id)} (latest observation, ${l.n_obs} seen)</summary><pre class="raw">${esc(JSON.stringify(l.data, null, 2))}</pre>${l.raw ? `<pre class="raw">${esc(l.raw)}</pre>` : ""}</details>`).join("")}
+    <h3>Raw data</h3>${d.listings.slice(0, 12).map((l) => `<details><summary>${esc(l.source)} ${esc(l.source_id)} (latest observation, ${l.n_obs} seen)</summary><pre class="raw">${esc(JSON.stringify(l.data, null, 2))}</pre>${l.raw ? `<pre class="raw">${esc(l.raw)}</pre>` : ""}</details>`).join("")}
   `;
   $("#drawer").classList.remove("hidden");
   wireDrawer(pk);
@@ -477,7 +516,7 @@ async function boot() {
   $("#mode").value = "bike";
   initMap();
   $$("#base-switch button").forEach((b) => b.addEventListener("click", () => setBase(b.dataset.base)));
-  ["#q", "#sort", "#target", "#mode", "#minbeds", "#maxppb", "#inactive", ...$$(".st")].forEach((el) => {
+  ["#q", "#sort", "#target", "#mode", "#minbeds", "#maxppb", "#inactive", "#todo", ...$$(".st")].forEach((el) => {
     const node = typeof el === "string" ? $(el) : el;
     node.addEventListener("input", renderList);
   });

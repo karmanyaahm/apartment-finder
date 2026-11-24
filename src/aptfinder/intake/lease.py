@@ -240,9 +240,12 @@ def apartments2_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed]
     base = dict(address=addr, city=item.get("listingCity"), zip=item.get("listingZip"), lat=loc.get("latitude"),
                 lon=loc.get("longitude"), kind="apartment", term="long", property_name=item.get("listingName"),
                 amenities=amen or None)
+    photos = [i.get("url") for i in item.get("images") or [] if isinstance(i, dict) and i.get("url")]
+    if not photos and item.get("imageUrl"):
+        photos = [item["imageUrl"]]
     extra = {"rent_range": [item.get("listingMinRent"), item.get("listingMaxRent")],
              "specialties": item.get("listingSpecialties"), "has_specials": item.get("hasRentSpecials"),
-             "images": [item["imageUrl"]] if item.get("imageUrl") else []}
+             "images": photos[:16]}
     url = item.get("url")
     out = []
     for m in item.get("models") or []:
@@ -253,19 +256,20 @@ def apartments2_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed]
         if sqft_plan:  # same-named plans (e.g. two "Three Bedroom" plans) differ by size
             plan_key = f"{plan_key}-{int(sqft_plan)}"
         units = m.get("units") or []
+        pextra = {**extra, "floorplan_image": m.get("imageLarge") or m.get("image")}
         for u in units:
             out.append(Parsed(
                 source_id=f"{pid}:u:{u.get('type')}", url=url, price=money(u.get("price")), price_basis="month",
                 data=ObservationData(unit=u.get("type"), floor_plan=plan, beds=beds, baths=baths,
                                      sqft=_first_num(u.get("sqft")), available_from=_avail(u.get("availability")),
-                                     extra=extra, **base)))
+                                     extra=pextra, **base)))
         if not units:
             out.append(Parsed(
                 source_id=f"{pid}:m:{plan_key}", url=url, price=money(m.get("rentLabel")), price_basis="month",
                 data=ObservationData(floor_plan=plan, beds=beds, baths=baths,
                                      sqft=sqft_plan,
                                      available_from=_avail(m.get("availability")),
-                                     extra={**extra, "availability": m.get("availability")}, **base)))
+                                     extra={**pextra, "availability": m.get("availability")}, **base)))
     if not item.get("models"):
         # a single unit, condo or house for rent: details live in `rentals`
         ptype = item.get("propertyType") or ""

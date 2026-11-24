@@ -102,3 +102,9 @@ svg.chart text { fill: var(--muted); font-size: 10px; }
   #side { flex: 1 1 auto; border-left: none; border-top: 1px solid var(--line); }
   header { padding: 8px 16px; }
 }
+
+.plan-img { height: 48px; border-radius: 4px; border: 1px solid var(--line); background: #fff; }
+tr.inactive td { opacity: .5; }
+details > summary { cursor: pointer; margin: 14px 0 6px; font-size: 14px; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--muted); }
+.chip.todo { background: transparent; border: 1px dashed var(--muted); color: var(--muted); }

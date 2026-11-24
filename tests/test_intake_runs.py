@@ -116,3 +116,26 @@ def test_budget_guard_stops_before_running_out(conn, fake, monkeypatch):
     res = run_source(conn, adapter, ZIPS[:2])
     assert calls == [] and all(v["state"] == "not_reached" for v in res.counts["areas"].values())
     assert "Apify credit left" in res.warnings[0]
+
+
+def test_reparse_supersedes_listings_it_no_longer_produces(conn, tmp_path):
+    import json as _json
+
+    from aptfinder.intake.base import reparse
+    from aptfinder.store import append_observation, start_run
+
+    raw = tmp_path / "run1.json"
+    raw.write_text(_json.dumps({"actor": "a/b", "items": [{"id": "new-id"}]}))
+    r = start_run(conn, "intake", "fake")
+    append_observation(conn, r, "fake", "old-id", {"lat": 37.4, "lon": -122.1}, raw_path=str(raw))
+    adapter = per_area_adapter()
+    import aptfinder.intake.base as b
+
+    orig = b.load_sources
+    b.load_sources = lambda: {"fake": {"actor": "a/b"}, "spend": {}}
+    try:
+        reparse(conn, adapter, str(raw))
+    finally:
+        b.load_sources = orig
+    active = dict(conn.execute("SELECT source_id, active FROM listings").fetchall())
+    assert active == {"old-id": 0, "new-id": 1}

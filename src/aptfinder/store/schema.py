@@ -223,6 +223,12 @@ SELECT lo.source, lo.source_id, lo.url, lo.id AS obs_id, lo.run_id, lo.observed_
                 WHERE r.source = lo.source AND r.component = 'intake' AND r.status = 'ok' AND r.id > lo.run_id
                   AND json_extract(r.counts, '$.areas."' || json_extract(lo.data, '$.extra.area') || '".state')
                       IN ('complete', 'empty')) THEN 0
+            -- superseded by a later reparse of the same raw file that no longer produced this listing
+            WHEN lo.raw_path IS NOT NULL AND EXISTS (
+                SELECT 1 FROM runs r
+                WHERE r.source = lo.source AND r.id > lo.run_id AND r.status = 'ok'
+                  AND json_extract(r.params, '$.reparse_of') IS NOT NULL
+                  AND lo.raw_path LIKE '%' || json_extract(r.params, '$.reparse_of')) THEN 0
             ELSE 1 END AS active,
        cl.place_key, cl.unit_key,
        {_overridden('price')} AS price,
