@@ -77,7 +77,7 @@ def test_dates_cover():
 
 
 def test_commute_any_with_estimates_and_google():
-    rule = load_goals().goals["temp"].rules[3]
+    rule = next(r for r in load_goals().goals["temp"].rules if r["type"] == "commute_any")
 
     def ctx(**trips):
         return Ctx(trips={(DOWNTOWN, m): {"minutes": v[0], "provider": v[1]} for m, v in trips.items()})
