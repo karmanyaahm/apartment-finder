@@ -255,3 +255,19 @@ def test_third_party_stay_is_its_own_place_with_the_buildings_trips():
     t = _Trips(dict)
     t[lease[1]][("x", "bike")] = {"minutes": 5}
     assert t.get(stay[1]) == {("x", "bike"): {"minutes": 5}} and t.get("p_other") is None
+
+
+def test_unitless_ads_in_a_building_are_not_one_unit():
+    from aptfinder.identity import decide
+
+    base = {"source": "craigslist", "address": "200 Infinity Way, Mountain View, CA 94043", "unit": None,
+            "city": None, "floor_plan": None, "property_name": "Revela", "kind": "apartment", "lat": None,
+            "lon": None, "term": "long", "operator": None}
+    studio = decide({**base, "source_id": "1", "beds": 0, "price": 3706})
+    two_bed = decide({**base, "source_id": "2", "beds": 2, "price": 5242})
+    repost = decide({**base, "source_id": "3", "beds": 2, "price": 5242})
+    assert studio[1] == two_bed[1]  # same building
+    assert studio[2] != two_bed[2] and two_bed[2] == repost[2]  # different units; a repost merges
+    house = {**base, "property_name": None, "kind": "house", "address": "49 Showers Dr, Mountain View"}
+    assert decide({**house, "source_id": "4", "beds": 3, "price": 5000})[2] == decide(
+        {**house, "source_id": "5", "beds": 3, "price": 5400})[2]  # a house stays one unit

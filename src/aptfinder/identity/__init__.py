@@ -28,20 +28,37 @@ def stay_key(pk: str, row: sqlite3.Row | dict) -> str | None:
     return f"{pk}~{who}"
 
 
+def _beds_price(row: sqlite3.Row | dict) -> str:
+    beds = "" if row["beds"] is None else f"{row['beds']:g}b"
+    price = "" if row["price"] is None else f"{row['price']:.0f}"
+    return f"{beds}{price}"
+
+
+def _unit(pk: str, row: sqlite3.Row | dict) -> str:
+    """A listing that names its unit or floor plan joins that unit. In an apartment building (a named community,
+    or kind apartment), one that names neither (a Craigslist ad giving only the building's address) is keyed by
+    beds and price, so reposts of one ad merge but a studio and a 2-bed are not taken for one unit. A house or
+    an unnamed place stays one unit, so two sources quoting it differently still conflict."""
+    uk = unit_key(pk, row["address"], row["unit"], row["floor_plan"])
+    get = (lambda k: row[k] if k in row.keys() else None) if hasattr(row, "keys") else row.get
+    building = bool(get("property_name")) or get("kind") == "apartment"
+    if uk == pk and building and (bp := _beds_price(row)):
+        return f"{pk}/~{bp}"
+    return uk
+
+
 def decide(row: sqlite3.Row | dict) -> tuple[str, str, str, str] | None:
     """(rule, place_key, unit_key, reason) for one listing, or None when nothing identifies it."""
     pk = place_key(row["address"], row["city"], None, None)
     if pk and (sk := stay_key(pk, row)):
-        uk = unit_key(sk, row["address"], row["unit"], row["floor_plan"])
-        return "addr_stay", sk, uk, f"third-party stay ({row['operator'] or row['source']}) at {row['address']!r}"
+        return ("addr_stay", sk, _unit(sk, row),
+                f"third-party stay ({row['operator'] or row['source']}) at {row['address']!r}")
     if pk:
-        uk = unit_key(pk, row["address"], row["unit"], row["floor_plan"])
-        return "addr_unit", pk, uk, f"address {row['address']!r}"
+        return "addr_unit", pk, _unit(pk, row), f"address {row['address']!r}"
     if row["lat"] is not None and row["lon"] is not None:
         pk = place_key(None, None, row["lat"], row["lon"])
-        beds = "" if row["beds"] is None else f"{row['beds']:g}b"
-        price = "" if row["price"] is None else f"{row['price']:.0f}"
-        uk = f"{pk}/{beds}{price}" if (beds or price) else pk
+        bp = _beds_price(row)
+        uk = f"{pk}/{bp}" if bp else pk
         return "geo_beds_price", pk, uk, f"no address; lat/lon {row['lat']:.4f},{row['lon']:.4f}"
     return None
 
@@ -82,7 +99,8 @@ def _near_address(decisions: dict, rows: list) -> None:
 
 def run(conn: sqlite3.Connection) -> dict[str, int]:
     rows = conn.execute(
-        "SELECT source, source_id, address, unit, city, floor_plan, property_name, lat, lon, beds, price, term, operator "
+        "SELECT source, source_id, address, unit, city, floor_plan, property_name, kind, lat, lon, beds, price, term, "
+        "operator "
         "FROM listings"
     ).fetchall()
     last_rule = {
