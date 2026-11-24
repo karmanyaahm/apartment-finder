@@ -164,9 +164,13 @@ Python 3.12 (pinned through `uv`; the system Python is 3.10), `apify-client`, Fa
 
 ## Still open
 
-- Goal 1 budget; whether the last days need covering.
-- Apify token and spend cap (step 8). Google routing works (step 4 hand check done 2026-11-24).
-- Google bus stop list.
+Status 2026-11-24 night: steps 1 to 7 done; step 8 (intake) running chunk by chunk. `aptf-intake coverage` is the ledger of what is done and left.
+
+- Spend: Apify $1.08 of $5 left this cycle (resets Dec 23); Google 477 of 5,000 capped calls this month (inside the free tier).
+- Blockers: Airbnb map-box search only works for boxes around the place named in the URL (station boxes other than Palo Alto's); Apartments.com photos refuse hotlinking (needs mirroring through Apify); Prometheus and Landsby prices load with JavaScript (needs a browser-rendering actor); aggregators carry no community website URL (sites listed by hand in `config/direct_sites.toml`).
+- Left in the Mountain View chunk: Airbnb station boxes (partial), Craigslist for the Mountain View ZIPs and 94306 (partial). Other chunks: all TODO.
+- Google bus stop list (user).
+- BICYCLE SKU (Essentials or Enterprise) unconfirmed; bike calls capped at 900 a month until then.
 
 ## Decision log
 

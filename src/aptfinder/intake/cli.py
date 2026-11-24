@@ -52,7 +52,7 @@ def print_coverage(conn) -> None:
                         cells.append("TODO")
                 print(f"  {'':5s} {a.label[:24]:24s}" + "".join(f"{x:>13s}" for x in cells))
     print(f"\n{n_done} area-source pairs done, {left} left (TODO or PARTIAL).  * = earlier whole-city / box "
-          "query; PARTIAL = cap hit or actor failed, rerun with --reload or a higher --max-items.")
+          "query; PARTIAL = cap hit or actor failed; the next `run` picks TODO and PARTIAL areas up again.")
 
 
 def main(argv: list[str] | None = None) -> None:
