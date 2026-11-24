@@ -76,8 +76,10 @@ def group_plans(listings: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "n_units": len({x.get("unit") for x in f if x.get("unit")}),
             "earliest": avail[0] if avail else None,
             "sources": sorted({l["source"] for l in ls}),
-            "image": next((l["data"].get("extra", {}).get("floorplan_image") for l in ls
-                           if l["data"].get("extra", {}).get("floorplan_image")), None),
+            # the community's own drawing first; hotlink-blocked hosts last
+            "image": next((u for l in sorted(ls, key=lambda l: l["source"] != "direct")
+                           for u in [(l["data"].get("extra") or {}).get("floorplan_image")]
+                           if u and not any(h in u for h in HOTLINK_BLOCKED)), None),
             "listing_ids": [f"{l['source']}|{l['source_id']}" for l in ls],
         })
     return sorted(out, key=lambda p: (p["beds"] is None, p["beds"] or 0, p["baths"] or 0,

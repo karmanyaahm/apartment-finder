@@ -42,6 +42,21 @@ with sync_playwright() as p:
     for i in range(1, min(rows.count(), 6)):
         print("   ", rows.nth(i).inner_text().replace("\t", " | ")[:140])
     page.locator("#drawer").screenshot(path=f"{OUT}/real_2_drawer.png")
+    page.click("[data-close=drawer]")
+    page.fill("#q", "The Dean")
+    time.sleep(0.5)
+    page.locator(".card").first.click()
+    page.wait_for_selector("#drawer:not(.hidden) h2")
+    time.sleep(4)
+    print("drawer:", page.inner_text("#drawer h2"), "| photos loaded:",
+          page.evaluate("[...document.querySelectorAll('#drawer .media img')].filter(i => i.naturalWidth > 0).length"),
+          "| plan images loaded:", page.evaluate("[...document.querySelectorAll('#drawer .plan-img')].filter(i => i.naturalWidth > 0).length"))
+    page.locator("#drawer").screenshot(path=f"{OUT}/real_3_dean.png")
+    page.click("[data-close=drawer]")
     page.fill("#q", "")
+    page.click("#verify-btn")
+    page.wait_for_selector("#verify-body h2", timeout=60000)
+    print("verify:", page.inner_text("#verify-body h2"))
+    page.screenshot(path=f"{OUT}/real_4_verify.png")
     print("console errors:", errors[:8])
     browser.close()
