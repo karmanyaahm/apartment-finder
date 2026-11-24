@@ -11,6 +11,18 @@ uv run aptf-web               # dashboard at http://127.0.0.1:8765
 
 Other commands: `aptf-db`, `aptf-identity`, `aptf-commute`, `aptf-filter`, `aptf-verify`, `aptf-eval`. Goals and search areas live in `config/`. See [design.md](design.md) for the architecture.
 
+## Reference data (refresh by hand)
+
+These files are generated once and committed; nothing updates them automatically.
+
+- **Grocery stores** (`config/points/grocery_any.csv`, `grocery_chains.csv`), from OpenStreetMap through the Overpass API (free, fetched directly: reference data, not a listing site). Re-run when the search area in `config/area.toml` changes, or every few months:
+  ```sh
+  env -u PYTHONPATH uv run python scripts/osm_groceries.py   # then commit the two CSVs
+  ```
+- **Caltrain timetable** (`config/caltrain.toml`: ride-time offsets and headways per service pattern), worked out by hand from the [Caltrain GTFS feed](https://data.trilliumtransit.com/gtfs/caltrain-ca-us/caltrain-ca-us.zip) of 13-Nov-2026. **The feed is valid to 2027-01-31**; after a timetable change, update the offsets and headways (and the `source` line) by hand. There is no script.
+- **Caltrain stations** (`config/points/caltrain_stations.csv`) and **commute targets** (`config/points/commute_targets.csv`): hand-edited.
+- **Google bus stops** (`config/points/google_bus_stops.csv`): empty until a stop list is added by hand.
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
