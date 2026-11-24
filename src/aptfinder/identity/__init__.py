@@ -4,8 +4,16 @@ from __future__ import annotations
 
 import sqlite3
 
+from ..commute.geo import haversine_m
 from ..store import append_link
 from ..store.keys import place_key, unit_key
+
+# A listing with only coordinates joins the nearest address-keyed *building* within this distance:
+# Craigslist complexes (Novo, Highland Gardens, ...) otherwise never meet their Apartments.com rows.
+# Buildings only (a property name or 3+ listings): single-family houses sit closer than 80 m apart.
+# Airbnb is excluded: it deliberately offsets map pins, so distance says nothing.
+NEAR_M = 80.0
+NO_NEAR_MERGE = {"airbnb"}
 
 
 def decide(row: sqlite3.Row | dict) -> tuple[str, str, str, str] | None:
@@ -23,9 +31,44 @@ def decide(row: sqlite3.Row | dict) -> tuple[str, str, str, str] | None:
     return None
 
 
+def _near_address(decisions: dict, rows: list) -> None:
+    """Re-point coordinate-only decisions at the nearest address place within NEAR_M (in place)."""
+    pts: dict[str, list[tuple[float, float]]] = {}
+    named: set[str] = set()
+    for r in rows:
+        d = decisions.get((r["source"], r["source_id"]))
+        if d and d[0] == "addr_unit" and r["lat"] is not None:
+            pts.setdefault(d[1], []).append((r["lat"], r["lon"]))
+            if r["property_name"]:
+                named.add(d[1])
+    centroids = {pk: (sum(p[0] for p in v) / len(v), sum(p[1] for p in v) / len(v)) for pk, v in pts.items()
+                 if pk in named or len(v) >= 3}
+    cells: dict[tuple[int, int], list[str]] = {}
+    for pk, (la, lo) in centroids.items():
+        cells.setdefault((int(la * 500), int(lo * 500)), []).append(pk)  # ~200 m cells
+    for r in rows:
+        key = (r["source"], r["source_id"])
+        d = decisions.get(key)
+        if not d or d[0] != "geo_beds_price" or r["source"] in NO_NEAR_MERGE:
+            continue
+        cx, cy = int(r["lat"] * 500), int(r["lon"] * 500)
+        best, best_m = None, NEAR_M
+        for i in (-1, 0, 1):
+            for j in (-1, 0, 1):
+                for pk in cells.get((cx + i, cy + j), []):
+                    m = haversine_m((r["lat"], r["lon"]), centroids[pk])
+                    if m <= best_m:
+                        best, best_m = pk, m
+        if best:
+            suffix = d[2].split("/", 1)[1] if "/" in d[2] else ""
+            decisions[key] = ("geo_near_address", best, f"{best}/{suffix}" if suffix else best,
+                              f"no address; {best_m:.0f} m from address place")
+
+
 def run(conn: sqlite3.Connection) -> dict[str, int]:
     rows = conn.execute(
-        "SELECT source, source_id, address, unit, city, floor_plan, lat, lon, beds, price FROM listings"
+        "SELECT source, source_id, address, unit, city, floor_plan, property_name, lat, lon, beds, price "
+        "FROM listings"
     ).fetchall()
     last_rule = {
         (r["source"], r["source_id"]): (r["place_key"], r["unit_key"])
@@ -34,8 +77,10 @@ def run(conn: sqlite3.Connection) -> dict[str, int]:
             " rn FROM links l WHERE author != 'user') WHERE rn = 1")
     }
     counts = {"listings": len(rows), "linked": 0, "unchanged": 0, "unidentified": 0}
+    decisions = {(r["source"], r["source_id"]): decide(r) for r in rows}
+    _near_address(decisions, rows)
     for r in rows:
-        d = decide(r)
+        d = decisions[(r["source"], r["source_id"])]
         if d is None:
             counts["unidentified"] += 1
             continue

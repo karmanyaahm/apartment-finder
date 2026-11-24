@@ -223,3 +223,20 @@ def test_conflict_detection_and_resolution(conn):
 @pytest.mark.parametrize("goal", ["temp", "lease"])
 def test_repo_goals_have_labels(goal):
     assert load_goals().goals[goal].label
+
+
+def test_coordinate_only_listing_joins_nearby_address_place(conn):
+    r = start_run(conn, "intake", "x")
+    obs(conn, r, "apartments_com", "a1", 4000, address="2680 Fayette Dr, Mountain View, CA 94040",
+        lat=37.40507, lon=-122.11440, beds=1, property_name="Fayette Arms")
+    obs(conn, r, "zillow", "h1", 6000, address="12 House Ln, Mountain View, CA 94040", lat=37.4200, lon=-122.1000)
+    obs(conn, r, "craigslist", "c1", 3900, lat=37.40530, lon=-122.11420, beds=1)   # ~30 m away
+    obs(conn, r, "craigslist", "c3", 5900, lat=37.42010, lon=-122.10010, beds=3)   # 14 m from a house
+    obs(conn, r, "airbnb", "b1", 3000, lat=37.40510, lon=-122.11441, beds=1)        # pins are offset
+    obs(conn, r, "craigslist", "c2", 3900, lat=37.41000, lon=-122.11440, beds=1)   # ~550 m away
+    identity.run(conn)
+    pk = {row[0]: row[1] for row in conn.execute("SELECT source_id, place_key FROM listings")}
+    assert pk["c1"] == pk["a1"] and pk["c2"] != pk["a1"]
+    assert pk["c3"] != pk["h1"] and pk["b1"] != pk["a1"]
+    rule = conn.execute("SELECT author FROM current_links WHERE source_id='c1'").fetchone()[0]
+    assert rule == "geo_near_address"
