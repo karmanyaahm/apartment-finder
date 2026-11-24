@@ -1,0 +1,192 @@
+from __future__ import annotations
+
+import pytest
+
+from aptfinder import identity
+from aptfinder.config import GoalsConfig, load_goals
+from aptfinder.filter import evaluate_all
+from aptfinder.filter.rules import CHECK, FAIL, PASS, Ctx, evaluate
+from aptfinder.store import append_check, append_link, append_observation, append_trip, start_run
+from aptfinder.verify import accuracy, agreement, conflict_queue, sample_queue, wilson
+
+DOWNTOWN = "commute_targets:Downtown Palo Alto"
+
+
+def obs(conn, run, source, sid, price=None, basis="month", **data):
+    return append_observation(conn, run, source, sid, data, price=price, price_basis=basis)
+
+
+# ---------------------------------------------------------------- identity
+def test_identity_links_and_is_idempotent(conn):
+    r = start_run(conn, "intake", "zillow")
+    obs(conn, r, "zillow", "1", 5000, address="825 Menlo Ave APT F, Menlo Park, CA 94025", beds=3)
+    obs(conn, r, "apartments", "x", 5100, address="825 Menlo Avenue #F", city="Menlo Park", beds=3)
+    obs(conn, r, "airbnb", "a", 3000, lat=37.44, lon=-122.16, beds=1)
+    obs(conn, r, "craigslist", "c", 2000)  # nothing identifies it
+    c1 = identity.run(conn)
+    assert c1 == {"listings": 4, "linked": 3, "unchanged": 0, "unidentified": 1}
+    c2 = identity.run(conn)
+    assert c2["linked"] == 0 and c2["unchanged"] == 3
+    units = conn.execute("SELECT unit_key, n_listings FROM units ORDER BY n_listings DESC").fetchall()
+    assert units[0]["n_listings"] == 2 and units[0]["unit_key"].endswith("/f")
+    assert conn.execute("SELECT COUNT(*) FROM links").fetchone()[0] == 3
+
+
+def test_identity_never_overrules_user(conn):
+    r = start_run(conn, "intake", "zillow")
+    obs(conn, r, "zillow", "1", 5000, address="1 A St, Palo Alto")
+    identity.run(conn)
+    append_link(conn, "user", "zillow", "1", "p_manual", "p_manual", "split")
+    identity.run(conn)
+    assert conn.execute("SELECT place_key FROM listings").fetchone()[0] == "p_manual"
+
+
+# ---------------------------------------------------------------- rules
+def test_size_rule():
+    rule = load_goals().goals["lease"].rules[1]
+    assert rule["type"] == "size_options"
+    cases = {(3, 2): PASS, (3, 2.5): PASS, (3, 3): PASS, (4, 3): PASS, (4, 3.5): PASS,
+             (4, 2.5): FAIL, (3, 1.5): FAIL, (2, 2): FAIL, (5, 3): FAIL}
+    for (beds, baths), want in cases.items():
+        assert evaluate(rule, {"beds": beds, "baths": baths}, Ctx())[0] == want, (beds, baths)
+    assert evaluate(rule, {"beds": None, "baths": 2}, Ctx()) == (CHECK, "size 3bd/2+ba or 4bd/3+ba: beds unknown")
+    assert evaluate(rule, {"beds": 3, "baths": None}, Ctx())[0] == CHECK
+    assert evaluate(rule, {"beds": 2, "baths": None}, Ctx())[0] == FAIL  # 2bd fails whatever the baths
+
+
+def test_unknown_never_rejects():
+    goals = load_goals().goals
+    for goal in goals.values():
+        for rule in goal.rules:
+            assert evaluate(rule, {}, Ctx())[0] == CHECK, rule
+
+
+def test_price_per_bed_strict():
+    rule = {"type": "max", "field": "price_per_bed", "value": 2500, "strict": True}
+    assert evaluate(rule, {"price_per_bed": 2500}, Ctx())[0] == FAIL
+    assert evaluate(rule, {"price_per_bed": 2499}, Ctx())[0] == PASS
+    assert evaluate(rule, {"price_per_bed": 2000}, Ctx(untrusted={"price"}))[0] == CHECK
+
+
+def test_dates_cover():
+    rule = {"type": "dates_cover", "start": "2026-12-01", "end": "2027-01-01"}
+    assert evaluate(rule, {"query_checkin": "2026-12-01", "query_checkout": "2027-01-01"}, Ctx())[0] == PASS
+    assert evaluate(rule, {"available_from": "2027-01-01"}, Ctx())[0] == PASS
+    assert evaluate(rule, {"available_from": "2027-01-20"}, Ctx())[0] == FAIL
+    assert evaluate(rule, {"available_from": "2027-01-01", "available_to": "2027-02-01"}, Ctx())[0] == FAIL
+
+
+def test_commute_any_with_estimates_and_google():
+    rule = load_goals().goals["temp"].rules[3]
+
+    def ctx(**trips):
+        return Ctx(trips={(DOWNTOWN, m): {"minutes": v[0], "provider": v[1]} for m, v in trips.items()})
+
+    assert evaluate(rule, {}, ctx(bike=(7.9, "google")))[0] == PASS
+    assert evaluate(rule, {}, ctx(bike=(8.1, "google"), walk=(30, "google"), transit=(26, "google")))[0] == FAIL
+    assert evaluate(rule, {}, ctx(bike=(8.1, "google"), walk=(30, "google")))[0] == CHECK  # transit missing
+    # estimates: decisive only far from the threshold
+    assert evaluate(rule, {}, ctx(bike=(5, "estimate")))[0] == PASS
+    assert evaluate(rule, {}, ctx(bike=(9, "estimate"), walk=(30, "estimate"), transit=(40, "google")))[0] == CHECK
+    assert evaluate(rule, {}, ctx(bike=(13, "estimate"), walk=(40, "estimate"), transit=(40, "google")))[0] == FAIL
+
+
+def test_amenity_annotation_overrides():
+    rule = {"type": "amenity", "name": "gym"}
+    assert evaluate(rule, {"amenities": '["Fitness center", "Pool"]'}, Ctx())[0] == FAIL
+    assert evaluate(rule, {"amenities": '["Gym", "Pool"]'}, Ctx())[0] == PASS
+    assert evaluate(rule, {}, Ctx(annotations={"gym": {"rating": 4}}))[0] == PASS
+
+
+# ---------------------------------------------------------------- evaluate_all on a db
+def _lease_goals() -> GoalsConfig:
+    return load_goals()
+
+
+def test_evaluate_all_place_takes_best_listing(conn):
+    r = start_run(conn, "intake", "zillow")
+    obs(conn, r, "zillow", "1", 5000, address="1 A St, Mountain View", unit="1", beds=3, baths=2, term="long")
+    obs(conn, r, "zillow", "2", 9000, address="1 A St, Mountain View", unit="2", beds=3, baths=2, term="long")
+    obs(conn, r, "zillow", "3", 9000, address="2 B St, Mountain View", beds=2, baths=1, term="long")
+    obs(conn, r, "zillow", "4", None, address="3 C St, Mountain View", beds=3, baths=2, term="long")
+    identity.run(conn)
+    res = evaluate_all(conn, _lease_goals())
+    places = res["places"]["lease"]
+    by_addr = {conn.execute("SELECT address FROM places WHERE place_key=?", (pk,)).fetchone()[0]: v["status"]
+               for pk, v in places.items()}
+    assert by_addr == {"1 A St, Mountain View": PASS, "2 B St, Mountain View": FAIL,
+                       "3 C St, Mountain View": CHECK}
+    # filters report, they do not drop: every listing has a result
+    assert len(res["listings"]["lease"]) == 4
+
+
+def test_low_accuracy_source_becomes_needs_check(conn):
+    r = start_run(conn, "intake", "badsource")
+    oids = [obs(conn, r, "badsource", str(i), 4000, address=f"{i} Z St, Palo Alto", beds=3, baths=2, term="long")
+            for i in range(1, 7)]
+    identity.run(conn)
+    for i, oid in enumerate(oids[:5]):
+        append_check(conn, "user", "sample", "price", "wrong" if i < 3 else "correct", observation_id=oid,
+                     stored_value=4000, true_value=9000)
+    acc = accuracy(conn)
+    assert acc[("badsource", "price")]["n"] == 5
+    res = evaluate_all(conn, _lease_goals())["listings"]["lease"]
+    # listing 6 is unchecked but its source's price accuracy is 2/5 < 0.8
+    assert res[("badsource", "6")]["status"] == CHECK
+
+
+# ---------------------------------------------------------------- verify
+def test_wilson():
+    lo, hi = wilson(19, 20)
+    assert 0.75 < lo < 0.8 and hi > 0.99
+    assert wilson(0, 0) == (0.0, 1.0)
+
+
+def test_sample_even_across_sources_and_repeatable(conn):
+    r = start_run(conn, "intake", "big")
+    for i in range(50):
+        obs(conn, r, "big", str(i), 1000, address=f"{i} Big St, Palo Alto")
+    for i in range(3):
+        obs(conn, r, "small", str(i), 1000, address=f"{i} Small St, Palo Alto")
+    identity.run(conn)
+    q1 = sample_queue(conn, seed=7, include_trips=False)
+    q2 = sample_queue(conn, seed=7, include_trips=False)
+    assert q1 == q2
+    first6 = [i["source"] for i in q1[:6]]
+    assert first6.count("small") == 3 and first6.count("big") == 3
+    assert sample_queue(conn, seed=8, include_trips=False) != q1
+
+
+def test_trips_sampled_by_provider_mode(conn):
+    for i in range(4):
+        append_trip(conn, f"p{i}", DOWNTOWN, "bike", 5 + i, 1000, [], None, "google")
+    append_trip(conn, "p0", DOWNTOWN, "walk", 20, 1000, [], None, "estimate")
+    q = sample_queue(conn, seed=1)
+    assert {i["provider"] + i["mode"] for i in q[:2]} == {"googlebike", "estimatewalk"}
+
+
+def test_conflict_detection_and_resolution(conn):
+    r = start_run(conn, "intake", "zillow")
+    a = obs(conn, r, "zillow", "1", 5000, address="49 Showers Dr, Mountain View", beds=3, baths=2)
+    b = obs(conn, r, "apartments", "9", 5400, address="49 Showers Drive, Mountain View", beds=3, baths=2.5)
+    obs(conn, r, "zillow", "2", 5000, address="5 Agree St, Mountain View", beds=3)
+    obs(conn, r, "apartments", "3", 5010, address="5 Agree St, Mountain View", beds=3)  # within 1%
+    identity.run(conn)
+    q = conflict_queue(conn)
+    assert len(q) == 1 and set(q[0]["fields"]) == {"price_month", "baths"}
+    ag = agreement(conn)
+    assert ag["price_month"] == {"agree": 1, "compared": 2}
+    for oid, p in ((a, 5000), (b, 5400)):
+        append_check(conn, "user", "conflict", "price", "correct" if p == 5000 else "wrong",
+                     observation_id=oid, stored_value=p, true_value=5000)
+    assert conflict_queue(conn)[0]["fields"] == ["baths"]
+    append_check(conn, "user", "conflict", "baths", "correct", observation_id=a, stored_value=2)
+    append_check(conn, "user", "conflict", "baths", "cannot_tell", observation_id=b, stored_value=2.5)
+    assert conflict_queue(conn) == []
+    # the wrong price check overrides apartments' price in the views
+    assert conn.execute("SELECT price FROM listings WHERE source='apartments' AND source_id='9'").fetchone()[0] == 5000
+
+
+@pytest.mark.parametrize("goal", ["temp", "lease"])
+def test_repo_goals_have_labels(goal):
+    assert load_goals().goals[goal].label
