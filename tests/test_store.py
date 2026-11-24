@@ -181,3 +181,12 @@ def test_address_parsing_and_keys():
     assert unit_key(k1, "825 Menlo Ave APT F, Menlo Park", None, None) == f"{k1}/f"
     assert place_key(None, None, 37.40001, -122.1) == place_key(None, None, 37.40004, -122.10002)
     assert place_key(None, None, None, None) is None
+
+
+def test_init_db_is_noop_when_schema_unchanged(conn):
+    v = conn.execute("PRAGMA user_version").fetchone()[0]
+    assert v != 0
+    conn.execute("PRAGMA user_version = 1")
+    init_db(conn)  # changed version -> rebuild, restores the hash
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == v
+    assert conn.execute("SELECT COUNT(*) FROM listings").fetchone()[0] == 0

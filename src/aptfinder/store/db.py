@@ -30,8 +30,15 @@ def connect(path: str | Path) -> sqlite3.Connection:
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    conn.executescript(ddl())
-    conn.commit()
+    """Create tables, triggers and views. A no-op when the schema is unchanged (hash in user_version), and
+    one transaction when it changed, so other processes never see the views missing mid-rebuild."""
+    import hashlib
+
+    script = ddl()
+    version = int(hashlib.sha256(script.encode()).hexdigest()[:7], 16)  # fits a 32-bit signed int
+    if conn.execute("PRAGMA user_version").fetchone()[0] == version:
+        return
+    conn.executescript(f"BEGIN IMMEDIATE;\n{script}\nPRAGMA user_version = {version};\nCOMMIT;")
 
 
 def _j(value: Any) -> str:
