@@ -108,7 +108,9 @@ All code lives in one Python package `aptfinder` (`src/aptfinder/`), one subpack
 - Cache: the module owns one table, `commute_legs`, in the database path it is given, keyed on origin and destination rounded to 4 decimals, mode, departure assumption and provider. Every single leg goes through it; composed modes are built from cached legs, so station-to-workplace legs are fetched once ever and each new apartment costs only its own legs. Callers never manage cache state.
 - Modes: `walk`, `bike`, `drive` (no traffic), `transit`, `bike_train_bike` (bike to each of the nearest k stations, in-train time from `config/caltrain.toml` plus half the headway as wait, bike from the far station; fastest kept), `bike_bus_bike` (Google transit route with walking legs re-timed as bike legs; labelled approximate). Both composed modes also consider biking the whole way, so they are never slower than plain bike.
 - `nearest(origin, points, mode, k)`: shortlist by straight line, route to the top k.
+- Wait at a station is half the peak gap between trains across all patterns (`peak_trains_per_hour`); `bike_bus_bike` adds the transfer/wait time Google's route includes beyond its step durations.
 - Must not: read or write any table but `commute_legs`.
+- **Glue (`aptfinder/trips.py`, CLI `aptf-commute`)** is the only code that joins commute with the store: `route` for an ad-hoc A to B, `compute` to append `trips` for places per `config/point_sets.toml`. The free estimate provider covers every place; a paid provider respects each set's `prefilter_km` and per-mode `max_km` (skipped when routing on demand) and a `--max-calls` cap per run, with calls and estimated cost logged in `runs`. A trip row is appended only when none exists for that place, point, mode and provider or its minutes changed.
 
 ### filter (`aptf-filter`)
 - Goal: evaluate each goal over the derived views and `trips`.
@@ -158,7 +160,7 @@ Python 3.12 (pinned through `uv`; the system Python is 3.10), `apify-client`, Fa
 ## Still open
 
 - Goal 1 budget; whether the last days need covering.
-- Apify token and spend cap (step 8); Google Maps key (step 4 hand check).
+- Apify token and spend cap (step 8). Google key: enable the Routes API on it, then run `aptf-eval commute-check --provider google` for the step 4 hand check.
 - Google bus stop list.
 
 ## Decision log
@@ -187,4 +189,6 @@ Each entry: date, decision, why, what it replaced.
 - **2026-11-23: Python 3.12 via `uv`, FastAPI, plain JS plus Leaflet.** One language for every component; no front-end build step.
 - **2026-11-23: Caltrain set is 8 stations, Redwood City to Lawrence.** User's choice. Atherton closed 2020; Stanford is event-only and left out; Lawrence added because it is the nearest station for east Sunnyvale (the benchmark uses it). Ride times and tiers from the Caltrain GTFS feed of 13-Nov-2026 (valid to 2027-01-31; recheck after). Limited trains stop everywhere in this segment at Local timings, so the train table has two patterns: local and express. Replaced: "7 stations, Redwood City to Sunnyvale".
 - **2026-11-23: Rengstorff industrial complex target at 1000 N Rengstorff Ave, Mountain View, marked unverified.** User's choice; only aggregator sites give the street address.
+- **2026-11-23: Commute glue lives in `aptfinder/trips.py`; `aptf-commute` points there.** Keeps the commute package free of project imports while still giving it a CLI. Paid routing gets per-mode straight-line limits (`max_km`) and a call cap, because routing every place to every target by every mode costs about 20 calls per place.
+- **2026-11-23: Benchmark geocoded once with Nominatim into `eval/benchmark_geocoded.csv` (committed).** Free, and the commute check and recall fallback need coordinates. First commute check with the free estimate: walk to Caltrain mean error 1.7 min (13 of 22 within 2 min), drive to Meta mean error 9.6 min (straight line ignores freeways). Google check pending: the supplied key returned PERMISSION_DENIED for the Routes API.
 - **2026-11-23: Rengstorff industrial complex replaced by "Rengstorff industrial complex", 1000 N Rengstorff Ave, Mountain View.** User's choice: a stand-in for an office that may go in the industrial area south of the Googleplex. Replaced: the Rengstorff industrial complex target.

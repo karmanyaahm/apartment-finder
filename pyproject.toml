@@ -21,7 +21,7 @@ dev = ["pytest>=8.3"]
 aptf-db = "aptfinder.store.cli:main"
 aptf-intake = "aptfinder.intake.cli:main"
 aptf-identity = "aptfinder.identity.cli:main"
-aptf-commute = "aptfinder.commute.cli:main"
+aptf-commute = "aptfinder.trips:main"
 aptf-filter = "aptfinder.filter.cli:main"
 aptf-verify = "aptfinder.verify.cli:main"
 aptf-web = "aptfinder.web.cli:main"
