@@ -181,7 +181,7 @@ function renderList() {
   $("#cards").innerHTML = list.map((p) => {
     const st = placeStatus(p);
     const mins = minutesFor(p);
-    const chips = Object.entries(p.goals).map(([g, r]) => `<span class="chip ${r.status}" title="${esc(r.reasons.join("\n"))}">${esc(g)}: ${esc(STATUS_LABEL[r.status])}</span>`).join("");
+    const chips = Object.entries(p.goals).filter(([g]) => S.goal === "all" || g === S.goal).map(([g, r]) => `<span class="chip ${r.status}" title="${esc(r.reasons.join("\n"))}">${esc(g)}: ${esc(STATUS_LABEL[r.status])}</span>`).join("");
     const bb = p.beds.length ? `${p.beds.map((b) => (b === 0 ? "studio" : b + "bd")).join("/")} · ${p.baths.join("/")}ba` : "beds ?";
     return `<div class="card ${st === "fail" || p.todo ? "dim" : ""} ${S.selected === p.place_key ? "sel" : ""}" data-pk="${esc(p.place_key)}">
       <h4>${esc(p.label)} ${stars(p.rating)}</h4>
@@ -304,12 +304,12 @@ async function openPlace(pk) {
   const d = await api(`/api/places/${encodeURIComponent(pk)}`);
   const p = d.place;
   const label = p.property_name || p.address || d.listings.find((l) => l.fields.title)?.fields.title || pk;
-  const goals = Object.entries(d.goals).filter(([, r]) => r).map(([g, r]) => `
+  const goals = Object.entries(d.goals).filter(([g, r]) => r && (S.goal === "all" || g === S.goal)).map(([g, r]) => `
     <div><span class="chip ${r.status}">${esc(g)}: ${esc(STATUS_LABEL[r.status])}</span>
       ${r.reasons.map(([s, t]) => `<div class="reason ${s}">${s === "pass" ? "✓" : s === "fail" ? "✗" : "?"} ${esc(t)}</div>`).join("")}
       ${r.nice.length ? `<div class="small muted">nice to have: ${r.nice.map(([s, t]) => `${s === "pass" ? "✓" : s === "fail" ? "✗" : "?"} ${esc(t)}`).join(" · ")}</div>` : ""}
     </div>`).join("");
-  const photos = (d.photos || []).map((ph) => `<a href="${esc(ph.url)}" target="_blank" rel="noopener noreferrer"><img loading="lazy" src="${esc(ph.url)}" alt="photo from ${esc(ph.source)}" title="${esc(ph.source)}" onerror="this.parentNode.remove()"></a>`)
+  const photos = (d.photos || []).map((ph) => `<figure class="ph"><a href="${esc(ph.url)}" target="_blank" rel="noopener noreferrer"><img loading="lazy" src="${esc(ph.url)}" alt="photo from ${esc(ph.site || ph.source)}" onerror="this.closest('figure').remove()"></a>${ph.page ? `<a class="src" href="${esc(ph.page)}" target="_blank" rel="noopener noreferrer" title="Open the page this photo came from">${esc(ph.site || ph.source)} ↗</a>` : `<span class="src">${esc(ph.source)}</span>`}</figure>`)
     .concat(d.listings.flatMap((l) => l.media.map((f) => `<a href="/media/${encodeURIComponent(f)}" target="_blank" rel="noopener"><img src="/media/${encodeURIComponent(f)}" alt="file from ${esc(l.source)}"></a>`)));
   const rng = (a, f) => (!a ? '<span class="muted">?</span>' : a[0] === a[1] ? f(a[0]) : `${f(a[0])}–${f(a[1])}`);
   const plans = d.plans || [];
@@ -327,7 +327,7 @@ async function openPlace(pk) {
       <td>${pl.image ? `<a href="${esc(pl.image)}" target="_blank" rel="noopener noreferrer"><img class="plan-img" loading="lazy" src="${esc(pl.image)}" alt="floor plan" onerror="this.parentNode.remove()"></a>` : ""}</td>
     </tr>`).join("")}
   </table></div>` : '<p class="muted small">No plan information.</p>';
-  const unitRows = d.listings.map((l) => {
+  const unitRows = d.listings.map((l, i) => {
     const f = l.fields;
     const c = (k) => ck(l.checks[k], l.overridden.includes(k));
     return `<tr class="${l.active ? "" : "inactive"}">
@@ -338,16 +338,23 @@ async function openPlace(pk) {
       <td>${fmtField("price", f.price)}${f.price_basis && f.price_basis !== "month" ? ` <span class="muted">/${esc(f.price_basis)}</span>` : ""}${c("price")}</td>
       <td>${esc(f.available_from || "")}${c("available_from")}</td>
       <td class="muted">${esc((l.first_seen || "").slice(5, 10))}→${esc((l.last_seen || "").slice(5, 10))}${l.active ? "" : " inactive"}</td>
-      <td><button class="small" data-split="${esc(l.source)}|${esc(l.source_id)}" title="Record that this listing is a different place">split</button></td>
-    </tr>`;
+      <td class="nowrap"><button class="small" data-raw="${i}" title="Show what we parsed and what the source sent">raw</button>
+        <button class="small" data-split="${esc(l.source)}|${esc(l.source_id)}" title="Record that this listing is a different place">split</button></td>
+    </tr>
+    <tr class="raw-row hidden" data-raw-row="${i}"><td colspan="9">
+      <div class="small muted">${esc(l.source)} ${esc(l.source_id)} · latest of ${l.n_obs} observation${l.n_obs === 1 ? "" : "s"} · parsed fields:</div>
+      <pre class="raw">${esc(JSON.stringify(l.data, null, 2))}</pre>
+      ${l.raw ? `<div class="small muted">as the source sent it:</div><pre class="raw">${esc(l.raw)}</pre>` : ""}
+    </td></tr>`;
   }).join("");
   const listingTable = `<details${d.listings.length <= 4 ? " open" : ""}><summary>Units &amp; listings (${d.listings.length})</summary>
     <div class="scroll-x"><table>
     <tr><th>source</th><th>unit</th><th>plan</th><th>bd / ba</th><th>sqft</th><th>price</th><th>available</th><th>seen</th><th></th></tr>
     ${unitRows}</table></div>
-    <p class="muted small">✓ checked correct · ✗ checked wrong · ✎ corrected value shown · · not hand-checked.</p></details>`;
+    <p class="muted small">✓ checked correct · ✗ checked wrong · ✎ corrected value shown · · not hand-checked. <b>raw</b> opens a listing's parsed and source data.</p></details>`;
   $("#drawer-body").innerHTML = `
     <h2>${esc(label)} ${stars(d.annotations.filter((a) => a.attribute === "overall" && a.rating).slice(-1)[0]?.rating)}</h2>
+    ${(d.websites || []).length ? `<div class="website">${d.websites.map((w) => `<a href="${esc(w.url)}" target="_blank" rel="noopener noreferrer">🌐 ${esc(w.site)} ↗</a>`).join(" ")}</div>` : '<div class="website muted small">no website found yet</div>'}
     <div class="muted small">${esc(p.address || "address unknown")} ${p.city ? "· " + esc(p.city) : ""} · ${esc(pk)}</div>
     <h3>Goals</h3>${goals}
     ${photos.length ? `<h3>Photos (${photos.length})</h3><div class="media">${photos.join("")}</div>` : '<p class="muted small">No photos from any source.</p>'}
@@ -357,7 +364,6 @@ async function openPlace(pk) {
     <h3>Commute <button id="route-btn" class="small">${S.meta.google ? "Route with Google" : "Recompute (estimate)"}</button></h3>${matrixTable(d)}
     <h3>Nearby</h3>${nearestBlock(d)}
     <h3>Your notes & ratings</h3>${attributesBlock(d, pk)}
-    <h3>Raw data</h3>${d.listings.slice(0, 12).map((l) => `<details><summary>${esc(l.source)} ${esc(l.source_id)} (latest observation, ${l.n_obs} seen)</summary><pre class="raw">${esc(JSON.stringify(l.data, null, 2))}</pre>${l.raw ? `<pre class="raw">${esc(l.raw)}</pre>` : ""}</details>`).join("")}
   `;
   $("#drawer").classList.remove("hidden");
   wireDrawer(pk);
@@ -385,6 +391,11 @@ function wireDrawer(pk) {
     S.meta.attributes.push(a);
     openPlace(pk);
   });
+  $$("#drawer [data-raw]").forEach((b) => b.addEventListener("click", () => {
+    const row = $(`#drawer [data-raw-row="${b.dataset.raw}"]`);
+    row.classList.toggle("hidden");
+    b.classList.toggle("on", !row.classList.contains("hidden"));
+  }));
   $$("#drawer [data-split]").forEach((b) => b.addEventListener("click", async () => {
     const [source, source_id] = b.dataset.split.split("|");
     if (!confirm(`Record that ${source} ${source_id} is a different place from the others here?`)) return;
@@ -508,6 +519,7 @@ async function boot() {
     $$("button", gs).forEach((x) => x.classList.toggle("on", x === b));
     if (S.goal === "temp") $("#sort").value = "price"; // temp: cheaper is better within the ~$4k budget
     renderList();
+    if (S.selected && !$("#drawer").classList.contains("hidden")) openPlace(S.selected); // show only this goal
   }));
   $("#target").innerHTML = S.meta.targets.map((t) => `<option value="${esc(t)}">${esc(t.split(":")[1])}</option>`).join("");
   $("#mode").innerHTML = S.meta.modes.map((m) => `<option value="${esc(m)}">${esc(MODE_LABEL[m])}</option>`).join("");

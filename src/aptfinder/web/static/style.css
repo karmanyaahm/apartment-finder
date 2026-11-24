@@ -73,7 +73,14 @@ th { color: var(--muted); font-weight: 500; }
 .reason { font-size: 12px; margin: 2px 0; }
 .reason.fail { color: var(--bad); } .reason.needs_check { color: var(--check); }
 .media { display: flex; gap: 8px; overflow-x: auto; }
-.media img { height: 140px; border-radius: 6px; border: 1px solid var(--line); background: #fff; }
+.media img { height: 140px; border-radius: 6px; border: 1px solid var(--line); background: #fff; display: block; }
+.media figure.ph { position: relative; margin: 0; flex: none; }
+.media .src { position: absolute; right: 4px; bottom: 4px; font-size: 11px; line-height: 1.3; padding: 1px 5px;
+  border-radius: 4px; background: rgba(0, 0, 0, .62); color: #fff; text-decoration: none; max-width: 90%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.media a.src:hover { background: rgba(0, 0, 0, .85); text-decoration: underline; }
+.website { margin: 2px 0 4px; font-size: 14px; }
+.website a { margin-right: 10px; }
 .attr { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; margin: 6px 0; }
 .attr .head { display: flex; align-items: center; gap: 8px; }
 .attr .rate button { border: none; background: none; padding: 0 1px; font-size: 16px; color: var(--muted); }
@@ -108,3 +115,7 @@ tr.inactive td { opacity: .5; }
 details > summary { cursor: pointer; margin: 14px 0 6px; font-size: 14px; text-transform: uppercase; letter-spacing: .04em;
   color: var(--muted); }
 .chip.todo { background: transparent; border: 1px dashed var(--muted); color: var(--muted); }
+
+.raw-row.hidden { display: none; }
+.raw-row pre.raw { max-height: 320px; overflow: auto; margin: 4px 0; }
+td.nowrap { white-space: nowrap; }

@@ -104,8 +104,28 @@ def gather_photos(listings: list[dict[str, Any]], limit: int = 30) -> list[dict[
         for u in (l["data"].get("extra") or {}).get("images") or []:
             if u and u not in seen:
                 seen.add(u)
-                out.append({"url": u, "source": l["source"]})
+                # `page`: the listing or site page the photo was found on; `site`: that page's host, for the overlay
+                out.append({"url": u, "source": l["source"], "page": l.get("url"), "site": site_name(l.get("url"))})
     return out[:limit]
+
+
+def site_name(url: str | None) -> str | None:
+    if not url:
+        return None
+    from urllib.parse import urlsplit
+
+    return urlsplit(url).netloc.lower().removeprefix("www.") or None
+
+
+def websites(listings: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """The building's own website(s): community-site rows first, then a website an aggregator gave."""
+    seen, out = set(), []
+    for l in sorted(listings, key=lambda l: l["source"] != "direct"):
+        url = l.get("url") if l["source"] == "direct" else (l["data"].get("extra") or {}).get("website")
+        if url and site_name(url) not in seen:
+            seen.add(site_name(url))
+            out.append({"url": url, "site": site_name(url)})
+    return out
 
 
 class AnnotationIn(BaseModel):
@@ -279,6 +299,7 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
             "goals": {gid: res["places"][gid].get(place_key) for gid in res["places"]},
             "plans": group_plans(out_listings),
             "photos": gather_photos(out_listings),
+            "websites": websites(out_listings),
             "listings": out_listings,
             "matrix": matrix,
             "nearest": nearest,

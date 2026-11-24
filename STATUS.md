@@ -2,7 +2,7 @@
 
 `design.md` is the full reference: architecture, schema and a dated decision log. This page is the short version: how it works, what changed today, what's blocked, and what's next.
 
-Dashboard (real data): http://127.0.0.1:8766 · old demo/seed data: http://127.0.0.1:8765
+Dashboard (real data): http://127.0.0.1:8766
 
 ## Where things stand
 
