@@ -58,7 +58,7 @@ Keys are deterministic so annotations and trips survive any rebuild: `place_key`
 - `config/goals.toml`: goal definitions as a list of typed rules per goal (hard rules and nice-to-haves), plus verification thresholds.
 - `config/area.toml`: cities and bounding box.
 - `config/points/*.csv`: one file per point set, columns `set,name,lat,lon` plus free columns. The single concept for anything a place can be near or travel to:
-  - `commute_targets.csv`: Googleplex, Meta HQ, Downtown Palo Alto, Rengstorff industrial complex.
+  - `commute_targets.csv`: Googleplex, Meta HQ, Downtown Palo Alto, Rengstorff industrial complex (1000 N Rengstorff Ave, Mountain View; a stand-in for a possible office).
   - `caltrain_stations.csv`: Redwood City, Menlo Park, Palo Alto, California Ave, San Antonio, Mountain View, Sunnyvale, Lawrence. Extra columns `service` (best tier that stops there: `express` or `local`), `patterns` and `other_transit`.
   - `grocery_chains.csv` (Walmart, Safeway, Whole Foods, Trader Joe's) and `grocery_any.csv` (every supermarket and grocery), generated once from OpenStreetMap by `scripts/osm_groceries.py` and committed.
   - `google_bus_stops.csv`: empty until the user supplies the list.
@@ -187,3 +187,4 @@ Each entry: date, decision, why, what it replaced.
 - **2026-11-23: Python 3.12 via `uv`, FastAPI, plain JS plus Leaflet.** One language for every component; no front-end build step.
 - **2026-11-23: Caltrain set is 8 stations, Redwood City to Lawrence.** User's choice. Atherton closed 2020; Stanford is event-only and left out; Lawrence added because it is the nearest station for east Sunnyvale (the benchmark uses it). Ride times and tiers from the Caltrain GTFS feed of 13-Nov-2026 (valid to 2027-01-31; recheck after). Limited trains stop everywhere in this segment at Local timings, so the train table has two patterns: local and express. Replaced: "7 stations, Redwood City to Sunnyvale".
 - **2026-11-23: Rengstorff industrial complex target at 1000 N Rengstorff Ave, Mountain View, marked unverified.** User's choice; only aggregator sites give the street address.
+- **2026-11-23: Rengstorff industrial complex replaced by "Rengstorff industrial complex", 1000 N Rengstorff Ave, Mountain View.** User's choice: a stand-in for an office that may go in the industrial area south of the Googleplex. Replaced: the Rengstorff industrial complex target.
