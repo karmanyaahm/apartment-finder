@@ -117,4 +117,8 @@ def load_areas(config_dir: Path | None = None) -> tuple[list[str], list[Area]]:
             for c in raw.get("city", [])]
     out += [Area(kind="box", id=b["id"], label=f"{b['station']} station zone", chunks=[b["chunk"]], bbox=b["bbox"])
             for b in raw.get("box", [])]
+    sites_path = (config_dir or settings.CONFIG_DIR) / "direct_sites.toml"
+    if sites_path.exists():
+        out += [Area(kind="site", id=d["id"], label=d.get("name", d["id"]), chunks=[d["chunk"]] if d.get("chunk") else [])
+                for d in _toml(sites_path).get("site", [])]
     return raw.get("chunks", []), out

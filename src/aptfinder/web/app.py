@@ -32,9 +32,13 @@ LISTING_FIELDS = ["price", "price_basis", "price_month", "price_per_bed", "beds"
 
 
 def _plan_key(f: dict[str, Any]) -> str:
+    """Same plan across sources = same beds, baths and size (to 10 sqft); the name only when size is unknown
+    (sources name plans differently: Avalon 'C1', Apartments.com none)."""
     beds, baths = f.get("beds"), f.get("baths")
     size = f"{'studio' if beds == 0 else (f'{beds:g}bd' if beds is not None else '?bd')}/" \
            f"{f'{baths:g}' if baths is not None else '?'}ba"
+    if f.get("sqft"):
+        return f"{size}|{round(f['sqft'] / 10) * 10:.0f}sqft"
     return f"{size}|{(f.get('floor_plan') or '').strip().lower()}"
 
 
@@ -61,8 +65,9 @@ def group_plans(listings: list[dict[str, Any]]) -> list[dict[str, Any]]:
         avail = sorted(x["available_from"] for x in f if x.get("available_from"))
         active = [l for l in ls if l["active"]]
         out.append({
-            "key": key, "name": next((x["floor_plan"] for x in f if x.get("floor_plan")
-                                      and not re.fullmatch(r"(studio|\d+bd)", x["floor_plan"])), None),
+            "key": key, "name": next((l["fields"]["floor_plan"] for l in sorted(ls, key=lambda l: l["source"] != "direct")
+                                      if l["fields"].get("floor_plan")
+                                      and not re.fullmatch(r"(studio|\d+bd)", l["fields"]["floor_plan"])), None),
             "beds": f[0].get("beds"), "baths": next((x["baths"] for x in f if x.get("baths") is not None), None),
             "sqft": [min(sqft), max(sqft)] if sqft else None,
             "price_month": [min(prices), max(prices)] if prices else None,

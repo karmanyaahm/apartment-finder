@@ -234,7 +234,8 @@ def apartments2_input(cfg: dict[str, Any], areas: list) -> dict[str, Any]:
 def apartments2_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] | None:
     pid = item.get("listingId")
     if not pid:
-        return None
+        # raw files from the earlier epctex actor (run 3) have a different shape; keep them reparseable
+        return apartments_parse(item, cfg) if item.get("id") and "rentals" in item else None
     loc = item.get("location") or {}
     amen = [v for g in item.get("amenities") or [] for v in g.get("value") or [] if not str(v).startswith("**")]
     addr = f"{item.get('listingAddress')}, {item.get('listingCity')}, {item.get('listingState')} {item.get('listingZip')}"

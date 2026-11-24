@@ -17,7 +17,7 @@ from ..store import connect, init_db
 from . import ADAPTERS
 from .base import coverage, done, reparse, run_source
 
-SHORT = {"zillow": "zillow", "apartments_com": "apts.com", "craigslist": "craigsl", "furnishedfinder": "ff",
+SHORT = {"direct": "direct", "zillow": "zillow", "apartments_com": "apts.com", "craigslist": "craigsl", "furnishedfinder": "ff",
          "airbnb": "airbnb"}
 
 
@@ -26,7 +26,8 @@ def print_coverage(conn) -> None:
     cov = coverage(conn)
     kinds = {"zip": [s for s, a in ADAPTERS.items() if a.area_kind == "zip"],
              "city": [s for s, a in ADAPTERS.items() if a.area_kind == "city"],
-             "box": [s for s, a in ADAPTERS.items() if a.area_kind == "box"]}
+             "box": [s for s, a in ADAPTERS.items() if a.area_kind == "box"],
+             "site": [s for s, a in ADAPTERS.items() if a.area_kind == "site"]}
     left = n_done = 0
     for chunk in chunks:
         print(f"\n=== chunk {chunk}")
