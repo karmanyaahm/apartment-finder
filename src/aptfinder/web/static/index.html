@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Apartment Finder</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M2 8 8 2l6 6v6H2z' fill='%232457c5'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <strong class="brand">Apartment finder</strong>
+    <span id="dbname" class="muted"></span>
+    <div class="seg" id="goal-switch"></div>
+    <div class="seg" id="base-switch">
+      <button data-base="sat" class="on">Satellite</button><button data-base="osm">Map</button>
+    </div>
+    <button id="verify-btn" class="accent">Verify <span id="queue-count"></span></button>
+    <div id="status-strip" class="status-strip"></div>
+  </header>
+
+  <main>
+    <section id="map"></section>
+    <section id="side">
+      <div class="controls">
+        <input id="q" type="search" placeholder="Search address, name, source">
+        <div class="row">
+          <label>Sort
+            <select id="sort">
+              <option value="status">status</option>
+              <option value="price">price / month</option>
+              <option value="ppb">price / bed</option>
+              <option value="beds">beds</option>
+              <option value="minutes">minutes to target</option>
+              <option value="rating">rating</option>
+              <option value="nice">nice-to-haves</option>
+            </select>
+          </label>
+          <label>Target <select id="target"></select></label>
+          <label>Mode <select id="mode"></select></label>
+        </div>
+        <div class="row">
+          <label><input type="checkbox" class="st" value="pass" checked> pass</label>
+          <label><input type="checkbox" class="st" value="needs_check" checked> needs check</label>
+          <label><input type="checkbox" class="st" value="fail" checked> fail</label>
+          <label>min beds <input id="minbeds" type="number" min="0" max="6" step="1" style="width:3.5em"></label>
+          <label>max $/bed <input id="maxppb" type="number" min="0" step="100" style="width:5.5em"></label>
+          <label><input type="checkbox" id="inactive"> inactive</label>
+        </div>
+      </div>
+      <div id="count" class="muted small"></div>
+      <div id="cards"></div>
+    </section>
+  </main>
+
+  <aside id="drawer" class="drawer hidden" aria-label="Place details">
+    <button class="close" data-close="drawer" aria-label="Close">×</button>
+    <div id="drawer-body"></div>
+  </aside>
+
+  <div id="verify" class="overlay hidden" role="dialog" aria-label="Verify">
+    <div class="panel">
+      <button class="close" data-close="verify" aria-label="Close">×</button>
+      <div id="verify-body"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -134,6 +134,10 @@ All code lives in one Python package `aptfinder` (`src/aptfinder/`), one subpack
 - Status strip from `runs` and `checks`.
 - Verify mode: conflict queue then sample queue, one listing at a time, fields side by side across sources, correct / wrong / cannot tell per field.
 - Must not: be exposed beyond localhost without Cloudflare Access or equivalent (it has write endpoints).
+- Run: `aptf-web` (real data) or `aptf-web --seed` (demo data in `data/seed.db`, rebuilt with `aptf-db seed --fresh`), then open http://127.0.0.1:8765.
+- API: `GET /api/meta|points|places|places/{key}|status|verify/next?seed=&skip=`; `POST /api/annotations|checks|links|trips/{key}`. Every write goes through `store.append_*`. A check's `stored_value` is read from the database, never taken from the client. A split appends a `user` link to a new place key `u_<hash>`.
+- Service worker: map tiles and CDN assets cache-first; same-origin requests (page, API, media) network-first with the cache as the offline fallback, so a reload with the network off shows the last data.
+- Filters on the card list also govern which pins are drawn; all three statuses are shown by default, with fails dimmed.
 
 ### eval (`aptf-eval`)
 - Goal: the discovery benchmark for goal 2.
@@ -194,4 +198,5 @@ Each entry: date, decision, why, what it replaced.
 - **2026-11-23: Estimate trips decide a commute rule only far from the threshold.** A straight-line estimate passes at or under 0.67 times the limit, fails at or over 1.5 times, and is `needs_check` in between; Google trips are preferred whenever present. A rough number must not reject a place that real routing might pass.
 - **2026-11-23: Place outcome = best listing outcome (pass, then needs_check, then fail; ties broken by nice-to-have count).** A building with one qualifying unit qualifies.
 - **2026-11-23: User ratings of an amenity attribute override the scraped amenity list** (rating 3 or more counts as having it). The user's direct knowledge beats the listing text.
+- **2026-11-23: Dashboard checked in headless Chrome (Playwright, system Chrome) instead of the DevTools MCP**, which failed to attach. Verified: satellite tiles load, goal switching, drawer, rating and comment append, verify mode shows the seeded conflict first, reload with the network off renders all places and cached tiles, no horizontal scroll at 390 px, no console errors.
 - **2026-11-23: Rengstorff industrial complex replaced by "Rengstorff industrial complex", 1000 N Rengstorff Ave, Mountain View.** User's choice: a stand-in for an office that may go in the industrial area south of the Googleplex. Replaced: the Rengstorff industrial complex target.

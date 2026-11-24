@@ -90,7 +90,7 @@ def compute_for_place(conn: sqlite3.Connection, commute: Commute, place: sqlite3
                 if prev is not None and prev["minutes"] == t.minutes:
                     continue
                 append_trip(conn, place["place_key"], p.id, mode, t.minutes, t.distance_m, t.legs,
-                            t.depart, t.provider, commit=False)
+                            t.depart, t.provider)  # commit now: the commute cache writes via its own connection
                 n += 1
     conn.commit()
     return n

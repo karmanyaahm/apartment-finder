@@ -75,7 +75,9 @@ def evaluate(rule: dict[str, Any], row: dict[str, Any], ctx: Ctx) -> tuple[str, 
             return CHECK, f"{label}: {f} unknown"
         if (u := _untrusted(ctx, f)):
             return CHECK, f"{label}: {u}"
-        ok = (bool(v) == rule["value"]) if isinstance(rule["value"], bool) else (v == rule["value"])
+        if isinstance(rule["value"], bool):
+            v = bool(v)  # SQLite returns JSON booleans as 0/1
+        ok = v == rule["value"]
         return (PASS, label) if ok else (FAIL, f"{label}: is {v}")
 
     if t == "max":
