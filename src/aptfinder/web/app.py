@@ -259,6 +259,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                                   "unit_key": r["unit_key"], "source": r["source"],
                                   "source_id": r["source_id"]}
             title = next((x["title"] for x in rows if x.get("title")), None)
+            cover = gather_photos([{**x, "data": json.loads(x["data"])} for x in rows], limit=1)
             a = anns.get(pk, {})
             chunk = chunk_of(p["lat"], p["lon"])
             out.append({
@@ -266,6 +267,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 "chunk": chunk, "todo": not is_active(chunk),
                 "label": place_label(p) or title or pk,
                 "title": title,
+                "photo": cover[0]["url"] if cover else None,  # map hover
                 "beds": sorted({x["beds"] for x in rows if x["beds"] is not None}),
                 "baths": sorted({x["baths"] for x in rows if x["baths"] is not None}),
                 "goals": goals,

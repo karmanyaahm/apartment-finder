@@ -124,7 +124,8 @@ function drawMarkers(list) {
     const m = L.circleMarker([p.lat, p.lon], {
       radius: st === "fail" ? 6 : 9, color: "#fff", weight: 2, fillColor: c[st],
       fillOpacity: st === "fail" ? 0.45 : 0.95, opacity: st === "fail" ? 0.5 : 1,
-    }).bindTooltip(`${esc(p.label)}<br>${esc(STATUS_LABEL[st])}`);
+    }).bindTooltip(() => (p.photo ? `<img class="tip-photo" src="${esc(p.photo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : "")
+      + `${esc(p.label)}<br>${esc(STATUS_LABEL[st])}`);
     m.on("click", () => openPlace(p.place_key));
     m.addTo(S.placeLayer);
     S.markers[p.place_key] = m;

@@ -126,3 +126,12 @@ def test_redacted_view_replaces_strings_and_refuses_writes(tmp_path):
     body = c.get("/api/places").text
     assert "Showers" not in body and "S████" in body and "Downtown Palo Alto" not in body
     assert c.post("/api/annotations", json={}).status_code == 403
+
+
+def test_places_carry_a_cover_photo_for_the_map(client):
+    c, _ = client
+    places = c.get("/api/places").json()
+    assert all("photo" in p for p in places)
+    for p in places:
+        d = c.get(f"/api/places/{p['place_key']}").json()
+        assert p["photo"] == (d["photos"][0]["url"] if d["photos"] else None)
