@@ -181,3 +181,13 @@ def test_plan_offers_never_mix():
     keys = {plan_key({**base, "term": "long"}), plan_key({**base, "term": "long", "furnished": True}),
             plan_key({**base, "term": "short", "furnished": True})}
     assert len(keys) == 3
+
+
+def test_zillow_baths_from_full_and_half_counts():
+    item = {"rawData": {"property": {"zpid": 7, "address": {"streetAddress": "1 A St", "city": "Mountain View",
+            "state": "CA", "zipcode": "94041"}, "bedrooms": 4, "bathrooms": 4, "price": 6500,
+            "factsAndFeatures": {"fullBathroomCount": 2, "halfBathroomCount": 1}}}}
+    (p,) = ADAPTERS["zillow"].parse(item, {})
+    assert p.data.baths == 2.5 and p.data.extra["baths_total"] == 4  # not 4: 2 full + 1 half
+    item["rawData"]["property"]["factsAndFeatures"] = {}
+    assert ADAPTERS["zillow"].parse(item, {})[0].data.baths == 4  # no breakdown: the total

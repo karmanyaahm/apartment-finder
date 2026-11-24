@@ -118,8 +118,14 @@ def zillow_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] | No
                                      **base)))
         return out
     addr = f"{street}, {a.get('city')}, {a.get('state')} {a.get('zipcode')}"
+    # Zillow's `bathrooms` counts every bathroom (2 full + 1 half shows as 3, sometimes more); the facts give
+    # full and half separately, so baths = full + half / 2 when the full count is there
+    ff = p.get("factsAndFeatures") or {}
+    full, half = ff.get("fullBathroomCount"), ff.get("halfBathroomCount")
+    baths = full + (half or 0) / 2 if isinstance(full, (int, float)) and full > 0 else p.get("bathrooms")
+    extra = {**extra, "baths_total": p.get("bathrooms"), "baths_full": full, "baths_half": half}
     return [Parsed(source_id=str(zpid), url=url, price=money(price), price_basis="month",
-                   data=ObservationData(address=addr, beds=p.get("bedrooms"), baths=p.get("bathrooms"),
+                   data=ObservationData(address=addr, beds=p.get("bedrooms"), baths=baths,
                                         sqft=p.get("livingArea"), extra=extra, **base))]
 
 
