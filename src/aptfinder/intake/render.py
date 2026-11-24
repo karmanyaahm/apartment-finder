@@ -60,8 +60,12 @@ PAGE_FUNCTION = r"""async function pageFunction(context) {
   if (!request.userData.child) {
     const links = await page.$$eval('a[href]', (as) => as.map((a) => [a.href, (a.innerText || '').trim()]));
     const here = page.url().split('#')[0];
-    const origin = new URL(here).origin;
-    const fp = links.find(([h, t]) => h.startsWith(origin) && /floor-?plans|floorplans|availability/i.test(h + ' ' + t)
+    // stay inside this community's own pages: on an operator's site (greystar.com/<community>/...) a same-site link
+    // can lead to another building (Central Park at Whisman's page linked to Encasa in Sunnyvale, 2026-11-24)
+    const u = new URL(here);
+    const seg = u.pathname.split('/').filter(Boolean)[0];
+    const scope = u.origin + (seg ? '/' + seg : '');
+    const fp = links.find(([h, t]) => h.startsWith(scope) && /floor-?plans|floorplans|availability/i.test(h + ' ' + t)
                                       && !/apply|tour|contact/i.test(h) && h.split('#')[0] !== here);
     if (fp) await context.enqueueRequest({ url: fp[0], userData: { child: true, site: request.userData.site } });
   }
