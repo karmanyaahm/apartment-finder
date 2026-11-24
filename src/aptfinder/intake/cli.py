@@ -4,6 +4,7 @@
   aptf-intake run zillow --chunk palo_alto     # every not-yet-covered area of that chunk, one batched run
   aptf-intake run zillow --area 94301 --area 94025 [--reload]
   aptf-intake reparse <source> <raw file>      # re-ingest saved output with the current parser (free)
+  aptf-intake discover-sites --chunk mountain_view [--limit 5] [--dry-run]   # find community websites
 """
 
 from __future__ import annotations
@@ -71,6 +72,15 @@ def main(argv: list[str] | None = None) -> None:
     rp = sub.add_parser("reparse", help="re-ingest a saved raw file with the current parser (no new scrape)")
     rp.add_argument("source", choices=sorted(ADAPTERS))
     rp.add_argument("raw_file")
+    ds = sub.add_parser("discover-sites", help="find community websites with a local headless Claude (web search "
+                                               "only), then fetch and address-check them through Apify")
+    ds.add_argument("--chunk", action="append", required=True)
+    ds.add_argument("--limit", type=int, default=10)
+    ds.add_argument("--batch", type=int, default=5, help="buildings per Claude call")
+    ds.add_argument("--model", default="sonnet")
+    ds.add_argument("--max-usd", type=float, default=0.5, help="cap on Claude spend for this command")
+    ds.add_argument("--no-fetch", action="store_true", help="record proposals only; no Apify fetch")
+    ds.add_argument("--dry-run", action="store_true", help="list the buildings that would be searched")
     args = ap.parse_args(argv)
 
     conn = connect(args.db)
@@ -80,6 +90,17 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.cmd == "reparse":
         print(json.dumps(reparse(conn, ADAPTERS[args.source], args.raw_file), indent=1))
+        return
+
+    if args.cmd == "discover-sites":
+        from .discover import Blocker, discover
+
+        try:
+            res = discover(conn, args.chunk, limit=args.limit, batch=args.batch, model=args.model,
+                           max_usd=args.max_usd, dry_run=args.dry_run, fetch=not args.no_fetch)
+        except Blocker as e:
+            raise SystemExit(f"BLOCKED: {e}")
+        print(json.dumps(res, indent=1))
         return
 
     adapter = ADAPTERS[args.source]

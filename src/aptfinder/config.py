@@ -110,6 +110,26 @@ class Area(BaseModel):
     slug: str | None = None  # box: Airbnb place slug for the search URL (default Palo-Alto--CA)
 
 
+def load_sites(config_dir: Path | None = None) -> dict[str, dict[str, Any]]:
+    """Community websites: hand-listed ones (config/direct_sites.toml) plus ones found by `aptf-intake
+    discover-sites` (config/discovered_sites.toml, machine-appended). A discovered site is left out once a
+    `[[check]]` failed it, or when a hand entry has the same id, URL or place; it carries `verify_address`."""
+    d = config_dir or settings.CONFIG_DIR
+    out: dict[str, dict[str, Any]] = {}
+    if (d / "direct_sites.toml").exists():
+        out = {s["id"]: s for s in _toml(d / "direct_sites.toml").get("site", [])}
+    if (d / "discovered_sites.toml").exists():
+        raw = _toml(d / "discovered_sites.toml")
+        failed = {c["id"] for c in raw.get("check", []) if not c.get("ok")}
+        urls = {s["url"].rstrip("/") for s in out.values()}
+        places = {s.get("place_key") for s in out.values()} - {None}
+        for s in raw.get("found", []):
+            if s["id"] in failed or s["id"] in out or s["url"].rstrip("/") in urls or s.get("place_key") in places:
+                continue
+            out[s["id"]] = {**s, "verify_address": True}
+    return out
+
+
 def load_areas(config_dir: Path | None = None) -> tuple[list[str], list[Area]]:
     raw = _toml((config_dir or settings.CONFIG_DIR) / "areas.toml")
     out = [Area(kind="zip", id=z["code"], label=f"{z['code']} {z['city']}", chunks=z["chunks"], city=z["city"])
@@ -119,8 +139,6 @@ def load_areas(config_dir: Path | None = None) -> tuple[list[str], list[Area]]:
     out += [Area(kind="box", id=b["id"], label=f"{b['station']} station zone", chunks=[b["chunk"]], bbox=b["bbox"],
                  slug=b.get("slug"))
             for b in raw.get("box", [])]
-    sites_path = (config_dir or settings.CONFIG_DIR) / "direct_sites.toml"
-    if sites_path.exists():
-        out += [Area(kind="site", id=d["id"], label=d.get("name", d["id"]), chunks=[d["chunk"]] if d.get("chunk") else [])
-                for d in _toml(sites_path).get("site", [])]
+    out += [Area(kind="site", id=d["id"], label=d.get("name", d["id"]), chunks=[d["chunk"]] if d.get("chunk") else [])
+            for d in load_sites(config_dir).values()]
     return raw.get("chunks", []), out

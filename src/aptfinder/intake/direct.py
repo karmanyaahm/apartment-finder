@@ -10,11 +10,10 @@ from __future__ import annotations
 
 import json
 import re
-import tomllib
 from functools import lru_cache
 from typing import Any
 
-from .. import settings
+from ..config import load_sites
 from ..store.models import ObservationData
 from .base import Adapter, Parsed, money
 
@@ -41,17 +40,14 @@ PAGE_FUNCTION = r"""async function pageFunction(context) {
   });
   return { url: context.request.loadedUrl || context.request.url, requested: context.request.url,
            status: context.response && context.response.status, title: $('title').text(), scripts,
-           images: images.slice(0, 400) };
+           images: images.slice(0, 400), site: (context.request.userData || {}).site || null,
+           text: $('body').text().replace(/\s+/g, ' ').slice(0, 100000) };
 }"""
 
 
 @lru_cache(maxsize=1)
 def sites() -> dict[str, dict[str, Any]]:
-    path = settings.CONFIG_DIR / "direct_sites.toml"
-    if not path.exists():
-        return {}
-    with open(path, "rb") as f:
-        return {s["id"]: s for s in tomllib.load(f).get("site", [])}
+    return load_sites()
 
 
 def build_input(cfg: dict[str, Any], areas: list) -> dict[str, Any]:
@@ -61,6 +57,8 @@ def build_input(cfg: dict[str, Any], areas: list) -> dict[str, Any]:
 
 
 def _site_for(item: dict[str, Any]) -> dict[str, Any] | None:
+    if item.get("site") in sites():  # the request's own tag survives redirects
+        return sites()[item["site"]]
     for s in sites().values():
         if item.get("requested", "").rstrip("/") == s["url"].rstrip("/") or item.get("url", "").rstrip("/") == \
                 s["url"].rstrip("/"):
@@ -243,10 +241,32 @@ PARSERS = {"avalon": parse_avalon, "jd_floorplans": parse_jd_floorplans, "promet
            "photos": parse_photos}
 
 
+# --------------------------------------------------------------------- is this page the building's own site?
+DIRECTIONS = {"n", "s", "e", "w", "north", "south", "east", "west"}
+SUFFIXES = {"st", "street", "ave", "avenue", "rd", "road", "blvd", "dr", "drive", "ct", "court", "way", "ln", "lane",
+            "pl", "place", "real", "ter", "cir", "pkwy", "hwy", "el", "la", "de", "del"}
+
+
+def address_on_page(item: dict[str, Any], address: str | None) -> bool | None:
+    """True when the page shows the street number and the street's main name word (e.g. 2400 and 'camino' for
+    '2400 W El Camino Real'); None when it cannot be told (no address, or an older raw file without page text)."""
+    if not address or not item.get("text"):
+        return None
+    street = address.split(",")[0].lower()
+    num = re.match(r"\s*(\d+)", street)
+    words = [w for w in re.findall(r"[a-z]+", street) if w not in DIRECTIONS and w not in SUFFIXES]
+    if not num or not words:
+        return None
+    hay = (item["text"] + " " + " ".join(s["text"] for s in item.get("scripts") or [] if "ld+json" in s["type"])).lower()
+    return bool(re.search(rf"\b{num.group(1)}\b", hay)) and max(words, key=len) in hay
+
+
 def parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] | None:
     site = _site_for(item)
     if not site:
         return None
+    if site.get("verify_address") and address_on_page(item, site.get("address")) is False:
+        return None  # found by search but not this building's page: never attach it (discover records the check)
     return PARSERS[site["platform"]](item, site) or None
 
 
