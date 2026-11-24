@@ -221,6 +221,7 @@ SELECT lo.source, lo.source_id, lo.url, lo.id AS obs_id, lo.run_id, lo.observed_
             WHEN json_extract(lo.data, '$.extra.area') IS NOT NULL AND EXISTS (
                 SELECT 1 FROM runs r
                 WHERE r.source = lo.source AND r.component = 'intake' AND r.status = 'ok' AND r.id > lo.run_id
+                  AND r.source <> 'airbnb'  -- ranked search: absence proves nothing (intake.base.RANKED_SOURCES)
                   AND json_extract(r.counts, '$.areas."' || json_extract(lo.data, '$.extra.area') || '".state')
                       IN ('complete', 'empty')) THEN 0
             -- superseded by a later reparse of the same raw file that no longer produced this listing

@@ -191,6 +191,8 @@ def run_source(conn: sqlite3.Connection, adapter: Adapter, areas: list[Area], *,
                     parsed.append((q, aid))
             exhausted = len(run.items) < cap_each * len(group)
             states = _area_states(per_area, cap_each, exhausted, ok)
+            if adapter.name in RANKED_SOURCES:
+                states = {a: ("partial" if s == "complete" else s) for a, s in states.items()}
             if run.items and not parsed:  # nothing usable came back: never coverage
                 states = {aid: "failed" for aid in gids}
                 warnings.append(f"{', '.join(gids)}: no item could be parsed; areas not credited")
@@ -247,6 +249,9 @@ def _overlap(a: list[float], b: list[float]) -> float:
 
 
 LEGACY_PARTIAL = {"craigslist"}  # its whole-city run hit the 300-item cap
+# Sources whose area search returns a ranked subset, not everything in the area: a run never proves the area
+# complete (Airbnb's Mountain View box run 61 returned 33 of the 51 listings known inside the box).
+RANKED_SOURCES = {"airbnb"}
 
 
 def coverage(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
@@ -271,7 +276,8 @@ def coverage(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
             per = counts.get("areas") or {aid: {"state": "complete", "items": None} for aid in params["areas"]}
             for aid, a in per.items():
                 if a.get("state") in ("complete", "empty", "partial"):
-                    out[(r["source"], aid)] = {**base, "state": a["state"], "items": a.get("items"),
+                    st = "partial" if r["source"] in RANKED_SOURCES and a["state"] == "complete" else a["state"]
+                    out[(r["source"], aid)] = {**base, "state": st, "items": a.get("items"),
                                                "legacy": False}
             continue
         cities = set(params.get("cities") or [])  # legacy whole-city / box runs
@@ -280,7 +286,7 @@ def coverage(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
                        and "Palo Alto box" in cities and _overlap(a.bbox, legacy_box) >= 0.9]
         else:
             covered = [a.id for a in areas if a.kind == kind and a.city in (cities & LEGACY_CITY_COVERS)]
-        state = "partial" if r["source"] in LEGACY_PARTIAL else "complete"
+        state = "partial" if r["source"] in LEGACY_PARTIAL | RANKED_SOURCES else "complete"
         for aid in covered:
             out[(r["source"], aid)] = {**base, "state": state, "items": None, "legacy": True}
     return out
