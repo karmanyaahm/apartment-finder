@@ -165,6 +165,8 @@ def extract(conn, source: str, *, limit: int, batch: int, model: str, max_usd: f
                     extra[k] = v
                     got.append(k)
             elif d.get(k) is None:
+                if k == "address" and "," not in v and d.get("city"):
+                    v = f"{v}, {str(d['city']).title()}"  # "850 Calderon Ave" -> "..., Mountain View"
                 d[k] = v
                 got.append(k)
         extra["extracted"] = {"fields": got, "model": model, "run_id": run}
