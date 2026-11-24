@@ -113,11 +113,24 @@ def _records(config_dir: Path | None = None) -> dict[str, list[dict[str, Any]]]:
         return tomllib.load(f)
 
 
-def candidates(conn, chunks: list[str]) -> list[dict[str, Any]]:
-    """Named buildings in the chunks with no community site yet, not searched before; most listings first."""
+MODEL_RANK = {"haiku": 1, "sonnet": 2, "opus": 3}
+
+
+def _rank(model: str | None) -> int:
+    return next((v for k, v in MODEL_RANK.items() if k in (model or "").lower()), 0)
+
+
+def candidates(conn, chunks: list[str], model: str = "sonnet") -> list[dict[str, Any]]:
+    """Named buildings in the chunks with no community site yet, not searched before by this model or a
+    stronger one (a weaker model's "no site" does not block a stronger search); most listings first."""
     rec = _records()
-    seen = {r.get("place_key") for r in rec.get("miss", [])}
-    seen |= {r.get("place_key") for r in rec.get("found", []) if str(r.get("found_by", "")).startswith("claude")}
+    run_model = {r["id"]: json.loads(r["params"] or "{}").get("model")
+                 for r in conn.execute("SELECT id, params FROM runs WHERE component = 'discover'")}
+    def searched_well(r: dict[str, Any]) -> bool:
+        return _rank(r.get("model") or run_model.get(r.get("run_id"))) >= _rank(model)
+    seen = {r.get("place_key") for r in rec.get("miss", []) if searched_well(r)}
+    seen |= {r.get("place_key") for r in rec.get("found", [])
+             if str(r.get("found_by", "")).startswith("claude") and searched_well(r)}
     have = {s.get("place_key") for s in load_sites().values()}  # passed or not yet checked
     have |= {r["place_key"] for r in conn.execute("SELECT DISTINCT place_key FROM listings WHERE source = 'direct'")}
     out = []
@@ -170,7 +183,7 @@ def _slug(name: str, taken: set[str]) -> str:
 
 def discover(conn, chunks: list[str], *, limit: int, batch: int, model: str, max_usd: float,
              dry_run: bool = False, fetch: bool = True) -> dict[str, Any]:
-    cands = candidates(conn, chunks)[:limit]
+    cands = candidates(conn, chunks, model)[:limit]
     est = round(0.025 * len(cands) / max(1, batch) * min(batch, 3), 2)  # trial: ~$0.024 per one-building call
     if dry_run or not cands:
         return {"buildings": [f'{c["name"]} | {c["address"]}' for c in cands], "estimated_usd": est}
@@ -194,7 +207,7 @@ def discover(conn, chunks: list[str], *, limit: int, batch: int, model: str, max
             a = by_key.get(c["key"]) or {"url": None, "note": "no answer for this key"}
             url, why = clean_url(a.get("url"))
             base = {"place_key": c["key"], "name": c["name"], "address": c["address"], "chunk": c["chunk"],
-                    "found_at": now, "run_id": run, "note": (a.get("note") or "")[:300]}
+                    "found_at": now, "run_id": run, "model": model, "note": (a.get("note") or "")[:300]}
             if url:
                 sid = _slug(c["name"], taken)
                 taken.add(sid)

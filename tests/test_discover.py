@@ -47,3 +47,23 @@ def test_address_on_page():
     assert direct.address_on_page(page, "2400 W El Camino Real, Mountain View, CA 94040") is True
     assert direct.address_on_page(page, "100 Moffett Blvd, Mountain View, CA 94043") is False
     assert direct.address_on_page({"scripts": []}, "2400 W El Camino Real") is None
+
+
+def test_a_weaker_models_miss_does_not_block_a_stronger_search(conn, tmp_path, monkeypatch):
+    import shutil
+
+    from aptfinder import identity, settings
+    from aptfinder.intake.discover import candidates
+    from aptfinder.store import append_observation, start_run
+
+    shutil.copytree(settings.ROOT / "config.example", tmp_path / "cfg")
+    monkeypatch.setattr(settings, "CONFIG_DIR", tmp_path / "cfg")
+    run = start_run(conn, "intake", "apartments_com", {})
+    append_observation(conn, run, "apartments_com", "h1", {
+        "property_name": "Harken", "address": "100 View St, Mountain View, CA 94041", "lat": 37.3947, "lon": -122.0763})
+    identity.run(conn)
+    (tmp_path / "cfg" / "discovered_sites.toml").write_text(
+        '[[miss]]\nplace_key = "%s"\nmodel = "haiku"\nreason = "no site found"\n'
+        % conn.execute("SELECT place_key FROM places").fetchone()[0])
+    assert [c["name"] for c in candidates(conn, ["mountain_view"], "sonnet")] == ["Harken"]
+    assert candidates(conn, ["mountain_view"], "haiku") == []
