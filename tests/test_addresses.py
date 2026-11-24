@@ -23,3 +23,17 @@ def test_a_one_number_range_from_haiku_gets_the_parsers_key():
     p = check_parts({"number": "881-881", "predirectional": "E", "street_name": "El Camino Real", "city": "Mountain View"},
                     "881-881 E El Camino Real, Mountain View, CA 94040")
     assert place_key_from(p, None) == place_key("881 E El Camino Real, Mountain View, CA 94040", None, None, None)
+
+
+def test_google_reading_is_used_only_for_a_precise_match_with_the_same_number():
+    from aptfinder.identity.addresses import geocode_parts
+
+    res = {"types": ["street_address"], "place_id": "X", "formatted_address": "101 Infinity Way, Mountain View, CA 94043",
+           "address_components": [{"long_name": "101", "types": ["street_number"]},
+                                  {"long_name": "Infinity Way", "types": ["route"]},
+                                  {"long_name": "Mountain View", "types": ["locality", "political"]},
+                                  {"long_name": "94043", "types": ["postal_code"]}]}
+    p = geocode_parts(res, "101 Infinity Wy, Mountain View, CA 94043")
+    assert place_key_from(p, None) == place_key("101 Infinity Way, Mountain View, CA 94043", None, None, None)
+    assert geocode_parts(res, "103 Infinity Wy, Mountain View") is None  # Google matched a different number
+    assert geocode_parts({**res, "types": ["route"]}, "101 Infinity Wy") is None  # street-level only
