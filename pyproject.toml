@@ -2,6 +2,8 @@
 name = "aptfinder"
 version = "0.1.0"
 description = "Local apartment finder: append-only listing store, goal filters, map dashboard"
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "pydantic>=2.9",
