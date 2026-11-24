@@ -8,6 +8,7 @@
 6. **No direct scraping of listing sites from this machine.** Every listing source, including property and operator websites, goes through Apify actors. Non-listing reference data (OpenStreetMap, Caltrain timetable) may be fetched directly.
 7. **Never contact a landlord**, submit a form, apply, or send a message on the user's behalf.
 8. **If a source returns bad, empty or suspicious data, stop and tell the user.** Do not work around it quietly.
-9. **Secrets** (`APIFY_TOKEN`, `GOOGLE_MAPS_API_KEY`) come from `.env`, never from code or commits. Respect the per-run spend cap.
-10. **The `commute` package stays independent:** no imports from the rest of the project, no knowledge of apartments, goals or the main schema.
-11. Run `env -u PYTHONPATH uv run pytest` before committing (this machine's ROS `PYTHONPATH` otherwise injects broken pytest plugins). Commit at each step of the order of work in `design.md`.
+9. **When blocked, name the blocker; don't detour.** If something is blocked (a broken actor, a missing permission or key, a plan limit, a site that changed), stop and state the blocker plainly: what failed, the exact error, and what would unblock it. Do not build workarounds, alternative scrapers or exploratory probes unless the user asks for that specific path. Detours waste time, tokens and money.
+10. **Secrets** (`APIFY_TOKEN`, `GOOGLE_MAPS_API_KEY`) come from `.env`, never from code or commits. Respect the per-run spend cap.
+11. **The `commute` package stays independent:** no imports from the rest of the project, no knowledge of apartments, goals or the main schema.
+12. Run `env -u PYTHONPATH uv run pytest` before committing (this machine's ROS `PYTHONPATH` otherwise injects broken pytest plugins). Commit at each step of the order of work in `design.md`.
