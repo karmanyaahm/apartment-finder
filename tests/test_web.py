@@ -165,3 +165,19 @@ def test_index_versions_its_assets(client):
     r = c.get("/")
     assert r.headers["cache-control"] == "no-cache"
     assert 'static/app.js?v=' in r.text and 'static/style.css?v=' in r.text
+
+
+def test_drawer_cache_sees_new_writes_at_once(client):
+    c, _ = client
+    pk = c.get("/api/places").json()[0]["place_key"]
+    assert c.get(f"/api/places/{pk}").json()["annotations"] == []  # warms the cache
+    c.post("/api/annotations", json={"entity_key": pk, "attribute": "overall", "rating": 4})
+    assert [a["rating"] for a in c.get(f"/api/places/{pk}").json()["annotations"]] == [4]
+
+
+def test_raw_is_fetched_per_listing_on_demand(client):
+    c, _ = client
+    pk = c.get("/api/places").json()[0]["place_key"]
+    d = c.get(f"/api/places/{pk}").json()
+    assert all("raw" not in l for l in d["listings"])  # not shipped with the drawer any more
+    assert c.get("/api/raw", params={"source": "nope", "source_id": "x"}).status_code == 404

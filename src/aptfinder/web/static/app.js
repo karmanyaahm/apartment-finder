@@ -361,7 +361,7 @@ async function openPlace(pk) {
     <tr class="raw-row hidden" data-raw-row="${i}"><td colspan="9">
       <div class="small muted">${esc(l.source)} ${esc(l.source_id)} · latest of ${l.n_obs} observation${l.n_obs === 1 ? "" : "s"} · parsed fields:</div>
       <pre class="raw">${esc(JSON.stringify(l.data, null, 2))}</pre>
-      ${l.raw ? `<div class="small muted">as the source sent it:</div><pre class="raw">${esc(l.raw)}</pre>` : ""}
+      ${l.has_raw ? `<div class="small muted">as the source sent it:</div><pre class="raw" data-raw-src="${esc(l.source)}|${esc(l.source_id)}">loading…</pre>` : ""}
     </td></tr>`;
   }).join("");
   const listingTable = `<details${d.listings.length <= 4 ? " open" : ""}><summary>Units &amp; listings (${d.listings.length})</summary>
@@ -416,6 +416,15 @@ function wireDrawer(pk) {
     const row = $(`#drawer [data-raw-row="${b.dataset.raw}"]`);
     row.classList.toggle("hidden");
     b.classList.toggle("on", !row.classList.contains("hidden"));
+    // the source's own item is fetched only when first opened (raw files are large)
+    const pre = $("[data-raw-src]", row);
+    if (pre && !pre.dataset.loaded && !row.classList.contains("hidden")) {
+      pre.dataset.loaded = "1";
+      const [source, ...rest] = pre.dataset.rawSrc.split("|");
+      api(`api/raw?source=${encodeURIComponent(source)}&source_id=${encodeURIComponent(rest.join("|"))}`)
+        .then((r) => { pre.textContent = JSON.stringify(r.item, null, 2); })
+        .catch((e) => { pre.textContent = "not available: " + e.message; });
+    }
   }));
   $$("#drawer [data-split]").forEach((b) => b.addEventListener("click", async () => {
     const [source, source_id] = b.dataset.split.split("|");

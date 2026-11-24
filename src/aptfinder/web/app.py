@@ -32,6 +32,13 @@ LISTING_FIELDS = ["price", "price_basis", "price_month", "price_per_bed", "beds"
                   "property_name", "operator", "title", "amenities", "floor_plan"]
 
 
+def _group_listings(conn) -> dict[str, list[dict[str, Any]]]:
+    out: dict[str, list[dict[str, Any]]] = {}
+    for r in conn.execute("SELECT * FROM listings WHERE place_key IS NOT NULL ORDER BY source, source_id"):
+        out.setdefault(r["place_key"], []).append(dict(r))
+    return out
+
+
 def group_plans(listings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Floor plans of a place: listings grouped by beds, baths and plan name across all sources."""
     listings = [l for l in listings if l["fields"].get("kind") != "site_info"]  # photos and link only
@@ -204,6 +211,29 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             headers = {k: v for k, v in resp.headers.items() if k.lower() != "content-length"}
             return Response(body, status_code=resp.status_code, headers=headers, media_type=resp.media_type)
 
+    memo: dict[str, tuple[Any, Any]] = {}
+
+    def data_version() -> tuple:
+        """Changes whenever anything the pages show can change: a new row in any log, or an edited config file.
+        Cheap (max rowid per table, file mtimes), so whole-database results are reused until it moves."""
+        row = conn.execute(
+            "SELECT (SELECT MAX(id) FROM observations), (SELECT MAX(id) FROM links), (SELECT MAX(id) FROM trips), "
+            "(SELECT MAX(id) FROM checks), (SELECT MAX(id) FROM annotations), (SELECT MAX(id) FROM runs), "
+            "(SELECT finished_at FROM runs ORDER BY id DESC LIMIT 1)").fetchone()
+        cfg = tuple(f.stat().st_mtime_ns for f in sorted(settings.CONFIG_DIR.rglob("*")) if f.is_file())
+        return tuple(row) + cfg
+
+    def cached(name: str, fn):
+        """fn() under the lock, reused while data_version() is unchanged."""
+        with lock:
+            v = data_version()
+            hit = memo.get(name)
+            if hit and hit[0] == v:
+                return hit[1]
+            val = fn()
+            memo[name] = (v, val)
+            return val
+
     def q(sql: str, args: tuple = ()) -> list[dict[str, Any]]:
         with lock:
             return [dict(r) for r in conn.execute(sql, args).fetchall()]
@@ -240,9 +270,8 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
 
     @app.get("/api/places")
     def places() -> list[dict[str, Any]]:
-        with lock:
-            res = evaluate_all(conn)
-            trips = best_trips(conn)
+        res = cached("evaluate_all", lambda: evaluate_all(conn))
+        trips = cached("best_trips", lambda: best_trips(conn))
         listings = q("SELECT * FROM listings WHERE place_key IS NOT NULL")
         by_place: dict[str, list[dict[str, Any]]] = {}
         for row in listings:
@@ -280,17 +309,35 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             })
         return out
 
+    @app.get("/api/raw")
+    def raw_item(source: str, source_id: str) -> dict[str, Any]:
+        """The item the source sent for one listing, read from its raw file only when asked (the drawer's
+        "raw" button), instead of shipping raw files with every drawer."""
+        rows = q("SELECT raw_path FROM latest_obs WHERE source = ? AND source_id = ?", (source, source_id))
+        if not rows or not rows[0]["raw_path"] or not Path(rows[0]["raw_path"]).exists():
+            raise HTTPException(404, "no raw data for this listing")
+        blob = json.loads(Path(rows[0]["raw_path"]).read_text())
+        items = blob.get("items", blob) if isinstance(blob, dict) else blob
+        root = source_id.split(":", 1)[0]
+        item = next((i for i in items if f'"{root}"' in json.dumps(i)), None) or \
+            next((i for i in items if root in json.dumps(i)), None)
+        if item is None:
+            raise HTTPException(404, "listing not found in its raw file")
+        return {"raw_path": rows[0]["raw_path"], "item": item}
+
     @app.get("/api/places/{place_key}")
     def place_detail(place_key: str) -> dict[str, Any]:
-        rows = q("SELECT * FROM places WHERE place_key = ?", (place_key,))
-        if not rows:
+        # the places and listings views are computed over everything; read them once per data version
+        places_by_key = cached("places_by_key", lambda: {
+            r["place_key"]: dict(r) for r in conn.execute("SELECT * FROM places")})
+        if place_key not in places_by_key:
             raise HTTPException(404, "no such place")
-        place = dict(rows[0])
+        place = dict(places_by_key[place_key])
         place["label"] = place_label(place)
-        listings = q("SELECT * FROM listings WHERE place_key = ? ORDER BY source, source_id", (place_key,))
-        with lock:
-            res = evaluate_all(conn)
-            trips = best_trips(conn).get(place_key, {})
+        by_place = cached("listings_by_place", lambda: _group_listings(conn))
+        listings = by_place.get(place_key, [])
+        res = cached("evaluate_all", lambda: evaluate_all(conn))
+        trips = cached("best_trips", lambda: best_trips(conn)).get(place_key, {})
         out_listings = []
         for l in listings:
             checks = {c["field"]: c["verdict"] for c in q(
@@ -300,9 +347,6 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                         "json_extract(data, '$.available_from') AS available_from, content_hash "
                         "FROM observations WHERE source = ? AND source_id = ? ORDER BY observed_at, id",
                         (l["source"], l["source_id"]))
-            raw = None
-            if l.get("raw_path") and Path(l["raw_path"]).exists():
-                raw = Path(l["raw_path"]).read_text()[:200_000]
             goal_results = {gid: res["listings"][gid].get((l["source"], l["source_id"])) for gid in res["listings"]}
             out_listings.append({
                 "source": l["source"], "source_id": l["source_id"], "url": l["url"], "obs_id": l["obs_id"],
@@ -312,7 +356,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 "overridden": (l["overridden"] or "").split(",") if l["overridden"] else [],
                 "checks": checks,
                 "media": json.loads(l["media"]) if l.get("media") else [],
-                "history": history, "data": json.loads(l["data"]), "raw": raw,
+                "history": history, "data": json.loads(l["data"]), "has_raw": bool(l.get("raw_path")),
                 "goals": goal_results,
             })
         nearest = {}
@@ -329,8 +373,9 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             v["legs"] = json.loads(v["legs"]) if isinstance(v["legs"], str) else v["legs"]
         anns = q("SELECT * FROM annotations WHERE entity_type = 'place' AND entity_key = ? ORDER BY id",
                  (place_key,))
+        web = cached("website_status", lambda: pipeline.website_status(conn))
         with lock:
-            pstatus = pipeline.place_status(conn, place_key)
+            pstatus = pipeline.place_status(conn, place_key, web=web)
         return {
             "pipeline": pstatus,
             "place": place,

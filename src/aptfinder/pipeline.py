@@ -384,7 +384,8 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
             "stuck_runs": stuck}
 
 
-def place_status(conn: sqlite3.Connection, place_key: str, now: datetime | None = None) -> dict[str, Any]:
+def place_status(conn: sqlite3.Connection, place_key: str, now: datetime | None = None,
+                 web: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     """One place: each source's last sighting (stale after STALE_DAYS), its own website, whether its text was
     read, and whether its commute times are estimates or Google routes. A stay place (`<building>~<operator>`)
     takes the website and trips of its building."""
@@ -398,7 +399,9 @@ def place_status(conn: sqlite3.Connection, place_key: str, now: datetime | None 
         sources.append({"source": r["source"], "seen": r["seen"], "listings": r["n"], "active": r["active"] or 0,
                         "state": _fresh(r["seen"], now),
                         "text_read": (r["read"] or 0) if r["source"] in TEXT_SOURCES else None})
-    ws = website_status(conn, base).get(base, {"state": "not_searched", "detail": "no website looked for yet"})
+    # `web`: website_status for every place, computed once by the caller (the dashboard caches it)
+    ws = (web if web is not None else website_status(conn, base)).get(
+        base, {"state": "not_searched", "detail": "no website looked for yet"})
     points = _current_points()
     trips = Counter()
     for pk, pt, prov in conn.execute(
