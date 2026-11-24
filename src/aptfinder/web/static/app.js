@@ -442,6 +442,7 @@ async function loadStatus() {
     parts.push(`<span class="${r.status === "error" ? "err" : ""}" title="${esc(JSON.stringify(c))}">${esc(r.source)}: ${esc((r.finished_at || r.started_at || "").slice(0, 16).replace("T", " "))} ${esc(r.status)}${c.observations != null ? ` · ${c.observations} seen` : ""}${c.new != null ? ` · ${c.new} new` : ""}${c.changed != null ? ` · ${c.changed} changed` : ""}</span>`);
   }
   parts.push(`<span>est. spend $${(+s.spend).toFixed(2)}</span>`);
+  if (s.google) parts.push(`<span title="${esc(JSON.stringify(s.google.by_mode))}">Google ${esc(s.google.month)}: ${s.google.calls}/${s.google.cap} calls · est. $${s.google.est_cost_usd.toFixed(2)}</span>`);
   if (s.errors.length) parts.push(`<span class="err" title="${esc(s.errors.map((e) => `${e.component}/${e.source}: ${e.error}`).join("\n"))}">${s.errors.length} recent errors</span>`);
   const accBySource = {};
   for (const a of s.accuracy) (accBySource[a.source] ||= []).push(`${a.field} ${a.correct}/${a.n}`);

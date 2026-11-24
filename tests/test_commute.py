@@ -130,3 +130,26 @@ def test_unknown_mode(make):
     c, _ = make()
     with pytest.raises(ValueError):
         c.trip((0, 0), (1, 1), "teleport")
+
+
+def test_metered_source_logs_and_enforces_monthly_caps(tmp_path, monkeypatch):
+    from aptfinder import trips
+
+    monkeypatch.setattr(trips, "load_google_caps", lambda: {"monthly_call_cap": 3, "monthly_cap_by_mode": {"bike": 1},
+                                                            "free_calls_per_month": 2, "price_per_1000_usd": 5.0})
+    inner = FakeSource()
+    inner.name = "google"
+    meter_db = str(tmp_path / "meter.db")
+    src = trips.MeteredSource(inner, max_calls=10, meter_db=meter_db)
+    c = Commute(tmp_path / "cache.db", src, STATIONS, TRAIN)
+    c.trip((37.40, -122.10), (37.41, -122.11), "bike")
+    c.trip((37.40, -122.10), (37.41, -122.11), "bike")  # cached: not a call
+    with pytest.raises(trips.SpendCapReached, match="bike cap"):
+        c.trip((37.40, -122.10), (37.42, -122.12), "bike")
+    c.trip((37.40, -122.10), (37.41, -122.11), "walk")
+    c.trip((37.40, -122.10), (37.41, -122.11), "drive")
+    with pytest.raises(trips.SpendCapReached, match="monthly cap"):
+        c.trip((37.40, -122.10), (37.41, -122.11), "transit")
+    use = trips.google_usage(src.meter)
+    assert use["calls"] == 3 and use["by_mode"] == {"bike": 1, "walk": 1, "drive": 1}
+    assert use["est_cost_usd"] == 0.01  # 1 call beyond 2 free at $5/1000 -> 0.005, rounded

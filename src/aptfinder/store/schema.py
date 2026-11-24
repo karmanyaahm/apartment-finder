@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from .models import CHECKABLE_FIELDS
 
-LOG_TABLES = ["runs", "observations", "links", "trips", "checks", "annotations"]
+LOG_TABLES = ["runs", "observations", "links", "trips", "checks", "annotations", "api_calls"]
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -95,6 +95,17 @@ CREATE TABLE IF NOT EXISTS annotations (
     comment     TEXT
 );
 CREATE INDEX IF NOT EXISTS ann_entity ON annotations(entity_type, entity_key);
+
+-- Every paid API call (Google Routes), for metering against config/google.toml.
+CREATE TABLE IF NOT EXISTS api_calls (
+    id       INTEGER PRIMARY KEY,
+    ts       TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    mode     TEXT,
+    ok       INTEGER NOT NULL,
+    note     TEXT
+);
+CREATE INDEX IF NOT EXISTS api_calls_ts ON api_calls(provider, ts);
 """
 
 

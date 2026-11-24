@@ -21,26 +21,70 @@ class SpendCapReached(RuntimeError):
     pass
 
 
-class CappedSource:
-    """Wraps a paid LegSource and refuses calls beyond a cap (cache hits are free and uncounted)."""
+def load_google_caps() -> dict[str, Any]:
+    import tomllib
 
-    def __init__(self, inner, max_calls: int):
+    with open(settings.CONFIG_DIR / "google.toml", "rb") as f:
+        return tomllib.load(f)
+
+
+def google_usage(conn: sqlite3.Connection, month: str | None = None) -> dict[str, Any]:
+    """Calls logged this calendar month (UTC): total, by mode, and estimated cost beyond the free tier."""
+    from datetime import datetime, timezone
+
+    month = month or datetime.now(timezone.utc).strftime("%Y-%m")
+    rows = conn.execute("SELECT mode, COUNT(*) FROM api_calls WHERE provider = 'google' AND ts LIKE ? "
+                        "GROUP BY mode", (f"{month}%",)).fetchall()
+    by_mode = {r[0]: r[1] for r in rows}
+    total = sum(by_mode.values())
+    caps = load_google_caps()
+    billable = max(0, total - caps.get("free_calls_per_month", 0))
+    return {"month": month, "calls": total, "by_mode": by_mode, "cap": caps["monthly_call_cap"],
+            "cap_by_mode": caps.get("monthly_cap_by_mode", {}),
+            "est_cost_usd": round(billable * caps.get("price_per_1000_usd", 5.0) / 1000, 2)}
+
+
+class MeteredSource:
+    """Wraps a paid LegSource. Before each real call (cache hits never reach it) checks the per-run cap and
+    the monthly caps in config/google.toml against the `api_calls` log, then logs the call. One ledger in
+    the main database for every caller (CLI, dashboard, eval), whatever cache file the caller uses."""
+
+    def __init__(self, inner, max_calls: int, meter_db: str | None = None):
         self.inner, self.max_calls, self.calls = inner, max_calls, 0
         self.name = inner.name
+        self.meter = connect(meter_db or settings.DB_PATH)
+        init_db(self.meter)
+        self.caps = load_google_caps()
 
     def leg(self, o, d, mode, depart):
+        from .store import now_iso
+
         if self.calls >= self.max_calls:
-            raise SpendCapReached(f"{self.name}: reached cap of {self.max_calls} calls")
+            raise SpendCapReached(f"{self.name}: reached this run's cap of {self.max_calls} calls")
+        use = google_usage(self.meter)
+        if use["calls"] >= self.caps["monthly_call_cap"]:
+            raise SpendCapReached(f"{self.name}: monthly cap of {self.caps['monthly_call_cap']} calls reached")
+        mode_cap = self.caps.get("monthly_cap_by_mode", {}).get(mode)
+        if mode_cap is not None and use["by_mode"].get(mode, 0) >= mode_cap:
+            raise SpendCapReached(f"{self.name}: monthly {mode} cap of {mode_cap} calls reached")
         self.calls += 1
-        return self.inner.leg(o, d, mode, depart)
+        ok = 0
+        try:
+            res = self.inner.leg(o, d, mode, depart)
+            ok = 1
+            return res
+        finally:
+            self.meter.execute("INSERT INTO api_calls (ts, provider, mode, ok) VALUES (?, ?, ?, ?)",
+                               (now_iso(), self.name, mode, ok))
+            self.meter.commit()
 
 
-def make_source(provider: str, max_calls: int = 200):
+def make_source(provider: str, max_calls: int = 200, meter_db: str | None = None):
     if provider == "google":
         key = settings.secret("GOOGLE_MAPS_API_KEY")
         if not key:
             raise SystemExit("GOOGLE_MAPS_API_KEY is not set in .env")
-        return CappedSource(GoogleRoutesLegSource(key), max_calls)
+        return MeteredSource(GoogleRoutesLegSource(key), max_calls, meter_db)
     return StraightLineLegSource()
 
 
@@ -128,11 +172,17 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("origin", help="lat,lon")
     r.add_argument("dest", help="lat,lon")
     r.add_argument("--mode", default="bike")
+    sub.add_parser("usage", help="Google calls this month against the caps in config/google.toml")
     c = sub.add_parser("compute", help="append trips for places")
     c.add_argument("--place", action="append", help="place_key (repeatable); default all")
     c.add_argument("--on-demand", action="store_true", help="ignore straight-line prefilters")
     args = ap.parse_args(argv)
 
+    if args.cmd == "usage":
+        conn = connect(args.db)
+        init_db(conn)
+        print(json.dumps(google_usage(conn), indent=1))
+        return
     source = make_source(args.provider, args.max_calls)
     commute = build_commute(args.db, source)
     if args.cmd == "route":

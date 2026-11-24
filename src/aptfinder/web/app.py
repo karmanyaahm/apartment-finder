@@ -214,8 +214,12 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
             agree = verify.agreement(conn)
             n_conflict = len(verify.conflict_queue(conn))
             n_sample = len(verify.sample_queue(conn))
+        from ..trips import google_usage
+
+        with lock:
+            google = google_usage(conn)
         return {
-            "runs": runs, "spend": spend, "errors": errors,
+            "runs": runs, "spend": spend, "errors": errors, "google": google,
             "accuracy": [{"source": s, "field": f, **a} for (s, f), a in sorted(acc.items())],
             "agreement": agree, "queues": {"conflict": n_conflict, "sample": n_sample},
             "counts": q("SELECT (SELECT COUNT(*) FROM places) AS places, "
