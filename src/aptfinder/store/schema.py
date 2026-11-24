@@ -129,11 +129,9 @@ def _field_expr(field: str, alias: str = "lo") -> str:
 
 
 def _overridden(field: str) -> str:
-    return (
-        f"COALESCE((SELECT json_extract(fo.true_value, '$') FROM field_overrides fo "
-        f"WHERE fo.source = lo.source AND fo.source_id = lo.source_id AND fo.field = '{field}'), "
-        f"{_field_expr(field)})"
-    )
+    # `ov.o` is one JSON object of {field: true_value} per listing, joined once (see listings_base).
+    # A per-field correlated subquery here took 73 s for 1,946 listings; the join takes well under 1 s.
+    return f"COALESCE(json_extract(ov.o, '$.{field}'), {_field_expr(field)})"
 
 
 PLAIN_DATA_FIELDS = ["city", "zip", "floor_plan", "property_name", "operator", "title"]
@@ -214,13 +212,16 @@ SELECT lo.source, lo.source_id, lo.url, lo.id AS obs_id, lo.run_id, lo.observed_
        {plain},
        json_extract(lo.data, '$.amenities') AS amenities,
        json_extract(lo.data, '$.media') AS media,
-       (SELECT group_concat(fo.field) FROM field_overrides fo
-         WHERE fo.source = lo.source AND fo.source_id = lo.source_id) AS overridden,
+       ov.fields AS overridden,
        lo.data AS data, lo.raw_path
 FROM latest_obs lo
 JOIN listing_stats ls ON ls.source = lo.source AND ls.source_id = lo.source_id
 LEFT JOIN source_last_full_run sl ON sl.source = lo.source
-LEFT JOIN current_links cl ON cl.source = lo.source AND cl.source_id = lo.source_id;
+LEFT JOIN current_links cl ON cl.source = lo.source AND cl.source_id = lo.source_id
+LEFT JOIN (SELECT source, source_id, json_group_object(field, json(true_value)) AS o,
+                  group_concat(field) AS fields
+           FROM field_overrides GROUP BY source, source_id) ov
+       ON ov.source = lo.source AND ov.source_id = lo.source_id;
 
 CREATE VIEW listings AS
 SELECT b.*,
@@ -249,23 +250,30 @@ SELECT unit_key, place_key, COUNT(*) AS n_listings, SUM(active) AS n_active,
        MIN(first_seen) AS first_seen, MAX(last_seen) AS last_seen
 FROM listings WHERE unit_key IS NOT NULL GROUP BY unit_key;
 
+-- Each descriptive field comes from the best listing that has it: direct (the place's own site) first,
+-- then the most recently observed. Window functions keep this one pass over `listings`.
 CREATE VIEW places AS
-SELECT l.place_key,
-       (SELECT l2.address FROM listings l2 WHERE l2.place_key = l.place_key AND l2.address IS NOT NULL
-         ORDER BY (l2.source = 'direct') DESC, l2.observed_at DESC LIMIT 1) AS address,
-       (SELECT l2.city FROM listings l2 WHERE l2.place_key = l.place_key AND l2.city IS NOT NULL
-         ORDER BY (l2.source = 'direct') DESC, l2.observed_at DESC LIMIT 1) AS city,
-       (SELECT l2.property_name FROM listings l2 WHERE l2.place_key = l.place_key
-         AND l2.property_name IS NOT NULL ORDER BY (l2.source = 'direct') DESC LIMIT 1) AS property_name,
-       (SELECT l2.operator FROM listings l2 WHERE l2.place_key = l.place_key
-         AND l2.operator IS NOT NULL ORDER BY (l2.source = 'direct') DESC LIMIT 1) AS operator,
-       AVG(l.lat) AS lat, AVG(l.lon) AS lon,
-       COUNT(*) AS n_listings, SUM(l.active) AS n_active, COUNT(DISTINCT l.unit_key) AS n_units,
-       group_concat(DISTINCT l.source) AS sources,
-       MIN(l.price_month) AS min_price_month, MIN(l.price_per_bed) AS min_price_per_bed,
-       MAX(l.beds) AS max_beds,
-       MIN(l.first_seen) AS first_seen, MAX(l.last_seen) AS last_seen
-FROM listings l WHERE l.place_key IS NOT NULL GROUP BY l.place_key;
+WITH l AS MATERIALIZED (
+    SELECT *,
+        FIRST_VALUE(address) OVER (PARTITION BY place_key
+            ORDER BY address IS NULL, source = 'direct' DESC, observed_at DESC) AS p_address,
+        FIRST_VALUE(city) OVER (PARTITION BY place_key
+            ORDER BY city IS NULL, source = 'direct' DESC, observed_at DESC) AS p_city,
+        FIRST_VALUE(property_name) OVER (PARTITION BY place_key
+            ORDER BY property_name IS NULL, source = 'direct' DESC, observed_at DESC) AS p_name,
+        FIRST_VALUE(operator) OVER (PARTITION BY place_key
+            ORDER BY operator IS NULL, source = 'direct' DESC, observed_at DESC) AS p_operator
+    FROM listings WHERE place_key IS NOT NULL
+)
+SELECT place_key, MAX(p_address) AS address, MAX(p_city) AS city, MAX(p_name) AS property_name,
+       MAX(p_operator) AS operator,
+       AVG(lat) AS lat, AVG(lon) AS lon,
+       COUNT(*) AS n_listings, SUM(active) AS n_active, COUNT(DISTINCT unit_key) AS n_units,
+       group_concat(DISTINCT source) AS sources,
+       MIN(price_month) AS min_price_month, MIN(price_per_bed) AS min_price_per_bed,
+       MAX(beds) AS max_beds,
+       MIN(first_seen) AS first_seen, MAX(last_seen) AS last_seen
+FROM l GROUP BY place_key;
 
 CREATE VIEW operators AS
 SELECT operator, COUNT(DISTINCT place_key) AS n_places, group_concat(DISTINCT place_key) AS place_keys

@@ -16,8 +16,8 @@ def slug(city: str) -> str:
     return "us--ca--" + re.sub(r"[^a-z0-9]+", "-", city.lower()).strip("-")
 
 
-def build_input(cfg: dict[str, Any], city: str) -> dict[str, Any]:
-    return {"startUrls": [{"url": f"https://www.furnishedfinder.com/housing/{slug(city)}"}],
+def build_input(cfg: dict[str, Any], areas: list) -> dict[str, Any]:
+    return {"startUrls": [{"url": f"https://www.furnishedfinder.com/housing/{slug(a.id)}"} for a in areas],
             "results_wanted": cfg.get("max_items", 200), "max_pages": cfg.get("max_pages", 15)}
 
 
@@ -64,4 +64,4 @@ def parse(item: dict[str, Any], cfg: dict[str, Any]) -> Parsed | None:
     return Parsed(source_id=str(lid), url=item.get("url"), data=data, price=money(rent), price_basis=basis)
 
 
-ADAPTER = Adapter(name="furnishedfinder", build_input=build_input, parse=parse)
+ADAPTER = Adapter(name="furnishedfinder", build_input=build_input, parse=parse, area_kind="city")

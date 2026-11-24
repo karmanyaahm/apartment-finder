@@ -55,8 +55,8 @@ def _avail(text: str | None, ref: date | None = None) -> str | None:
 
 
 # ------------------------------------------------------------------------------------------- Zillow
-def zillow_input(cfg: dict[str, Any], city: str) -> dict[str, Any]:
-    return {"locations": [f"{city}, CA"], "propertyType": "forRent",
+def zillow_input(cfg: dict[str, Any], areas: list) -> dict[str, Any]:
+    return {"locations": [a.id for a in areas], "propertyType": "forRent",
             "maxResultsPerLocation": cfg.get("max_items", 400)}
 
 
@@ -168,10 +168,10 @@ def apartments_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] 
 
 
 # -------------------------------------------------------------------------------------------- Craigslist
-def craigslist_input(cfg: dict[str, Any], city: str) -> dict[str, Any]:
-    postal, miles = cfg["areas"][city]
-    return {"startUrls": [{"url": f"https://sfbay.craigslist.org/search/apa?postal={postal}"
-                                  f"&search_distance={miles}"}],
+def craigslist_input(cfg: dict[str, Any], areas: list) -> dict[str, Any]:
+    miles = cfg.get("radius_miles", 1.5)
+    return {"startUrls": [{"url": f"https://sfbay.craigslist.org/search/apa?postal={a.id}&search_distance={miles}"}
+                          for a in areas],
             "includeDetails": True, "maxResults": cfg.get("max_items", 300)}
 
 
@@ -205,15 +205,16 @@ def craigslist_parse(item: dict[str, Any], cfg: dict[str, Any]) -> Parsed | None
                   price_basis=CL_BASIS.get(period, "month"))
 
 
-ZILLOW = Adapter(name="zillow", build_input=zillow_input, parse=zillow_parse)
-APARTMENTS = Adapter(name="apartments_com", build_input=apartments_input, parse=apartments_parse)
-CRAIGSLIST = Adapter(name="craigslist", build_input=craigslist_input, parse=craigslist_parse)
+ZILLOW = Adapter(name="zillow", build_input=zillow_input, parse=zillow_parse, area_kind="zip")
+CRAIGSLIST = Adapter(name="craigslist", build_input=craigslist_input, parse=craigslist_parse, area_kind="zip")
 
 
 # ------------------------------------------------------------- Apartments.com (memo23, no free-plan cap)
-def apartments2_input(cfg: dict[str, Any], city: str) -> dict[str, Any]:
-    slug = re.sub(r"[^a-z0-9]+", "-", city.lower()).strip("-") + "-ca"
-    return {"startUrls": [f"https://www.apartments.com/{slug}/"], "includeMoreDetails": True,
+def apartments2_input(cfg: dict[str, Any], areas: list) -> dict[str, Any]:
+    def url(a):
+        city = re.sub(r"[^a-z0-9]+", "-", (a.city or "").lower()).strip("-")
+        return f"https://www.apartments.com/{city}-ca-{a.id}/"
+    return {"startUrls": [url(a) for a in areas], "includeMoreDetails": True,
             "maxItems": cfg.get("max_items", 150)}
 
 
@@ -272,4 +273,5 @@ def apartments2_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed]
     return out
 
 
-APARTMENTS = Adapter(name="apartments_com", build_input=apartments2_input, parse=apartments2_parse)
+APARTMENTS = Adapter(name="apartments_com", build_input=apartments2_input, parse=apartments2_parse,
+                     area_kind="zip")

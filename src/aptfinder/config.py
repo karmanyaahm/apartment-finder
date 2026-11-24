@@ -95,3 +95,25 @@ def load_points(config_dir: Path | None = None) -> dict[str, list[Point]]:
                 out.setdefault(p.set, []).append(p)
         out.setdefault(path.stem, [])
     return out
+
+
+class Area(BaseModel):
+    """One intake area. kind: zip (Zillow, Apartments.com, Craigslist), city (Furnished Finder),
+    box (Airbnb: a station's walk-zone bounding box)."""
+    kind: str
+    id: str
+    label: str
+    chunks: list[str]
+    city: str | None = None
+    bbox: list[float] | None = None
+
+
+def load_areas(config_dir: Path | None = None) -> tuple[list[str], list[Area]]:
+    raw = _toml((config_dir or settings.CONFIG_DIR) / "areas.toml")
+    out = [Area(kind="zip", id=z["code"], label=f"{z['code']} {z['city']}", chunks=z["chunks"], city=z["city"])
+           for z in raw.get("zip", [])]
+    out += [Area(kind="city", id=c["name"], label=c["name"], chunks=c["chunks"], city=c["name"])
+            for c in raw.get("city", [])]
+    out += [Area(kind="box", id=b["id"], label=f"{b['station']} station zone", chunks=[b["chunk"]], bbox=b["bbox"])
+            for b in raw.get("box", [])]
+    return raw.get("chunks", []), out

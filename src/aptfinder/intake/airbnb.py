@@ -12,16 +12,18 @@ from .base import Adapter, Parsed, money
 BASIS = {"month": "month", "night": "night", "week": "week", "total": "stay"}
 
 
-def build_input(cfg: dict[str, Any], city: str) -> dict[str, Any]:
-    common = {"checkIn": cfg["checkin"], "checkOut": cfg["checkout"], "adults": cfg.get("adults", 1),
-              "currency": "USD", "locale": "en-US", "maxResults": cfg.get("max_items", 200)}
-    if cfg.get("box"):  # map-box search; `city` is only a run label. The URL needs a place slug (an empty
-        # /s/homes path returned 0 items on 2026-11-24); map bounds still restrict the results.
-        s, w, n, e = cfg["box"]
-        url = (f"https://www.airbnb.com/s/Palo-Alto--CA/homes?ne_lat={n}&ne_lng={e}&sw_lat={s}&sw_lng={w}&search_by_map=true"
-               f"&zoom=13&checkin={cfg['checkin']}&checkout={cfg['checkout']}&adults={cfg.get('adults', 1)}")
-        return {**common, "startUrls": [{"url": url}]}
-    return {**common, "locationQueries": [f"{city}, California"]}
+def build_input(cfg: dict[str, Any], areas: list) -> dict[str, Any]:
+    """One map-box search per area. The URL needs a place slug (a bare /s/homes path returned 0 items on
+    2026-11-24); the map bounds still restrict the results."""
+    urls = []
+    for a in areas:
+        s, w, n, e = a.bbox
+        urls.append({"url": f"https://www.airbnb.com/s/Palo-Alto--CA/homes?ne_lat={n}&ne_lng={e}&sw_lat={s}"
+                            f"&sw_lng={w}&search_by_map=true&zoom=14&checkin={cfg['checkin']}"
+                            f"&checkout={cfg['checkout']}&adults={cfg.get('adults', 1)}"})
+    return {"startUrls": urls, "checkIn": cfg["checkin"], "checkOut": cfg["checkout"],
+            "adults": cfg.get("adults", 1), "currency": "USD", "locale": "en-US",
+            "maxResults": cfg.get("max_items", 200)}
 
 
 def _num(pattern: str, text: str) -> float | None:
@@ -82,4 +84,4 @@ def parse(item: dict[str, Any], cfg: dict[str, Any]) -> Parsed | None:
                   query_checkout=cfg["checkout"] if item.get("isAvailable") else None)
 
 
-ADAPTER = Adapter(name="airbnb", build_input=build_input, parse=parse)
+ADAPTER = Adapter(name="airbnb", build_input=build_input, parse=parse, area_kind="box")
