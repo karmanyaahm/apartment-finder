@@ -1,0 +1,41 @@
+# Intake sources. Every listing source runs through an Apify actor (see AGENTS.md).
+# Spend is capped twice: by Apify itself (maxTotalChargeUsd / maxItems on the run) and by max_usd_per_run here.
+
+[spend]
+max_usd_per_run = 1.0
+# Never spend the last of the monthly Apify credit on bulk intake (kept for direct-site tests etc.).
+reserve_usd = 0.30
+
+[airbnb]
+actor = "tri_angle/airbnb-scraper"
+max_items = 150          # the box held ~130 listings for these dates (2026-11-24); beyond that Airbnb spills outside it
+# Real dates at least 28 days apart so the returned price is the monthly-discounted one.
+checkin = "2026-12-01"
+checkout = "2027-01-01"
+adults = 1
+# Airbnb now searches the station boxes in config/areas.toml. This box is the one searched on
+# 2026-11-24 before areas existed; kept so the coverage ledger can credit station boxes inside it.
+box = [37.395, -122.20, 37.475, -122.10]
+
+[furnishedfinder]
+actor = "shahidirfan/furnished-finder-scraper"
+max_items = 300
+max_pages = 15
+
+[zillow]
+actor = "clearpath/zillow-zip-code-search-scraper"
+max_items = 400
+
+[apartments_com]
+actor = "memo23/apify-apartments-cheerio"   # epctex caps free-plan users at 10 items
+max_items = 150          # buildings per city page
+memory_mb = 1024         # 256 MB (the default) ran out of memory after 16 of 43 pages
+
+[craigslist]
+actor = "solidcode/craigslist-scraper"
+max_items = 300
+radius_miles = 1.5      # search radius around each ZIP's centre
+
+[direct]
+actor = "apify/cheerio-scraper"   # generic scraper; platform parsers in intake/direct.py, sites in direct_sites.toml
+max_items = 5                     # one page per site

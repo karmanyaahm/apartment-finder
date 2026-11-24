@@ -1,0 +1,47 @@
+# Individual apartment community websites, read through Apify's generic cheerio-scraper (one page fetch each,
+# ~$0.0001). `platform` picks the parser in src/aptfinder/intake/direct.py. Each site is an intake area of
+# kind "site": `aptf-intake run direct --area <id>` or `--chunk <chunk>`.
+#
+# What each platform gives from the static page (tested 2026-11-24 on these Mountain View communities):
+#   avalon      : every available unit with price, sqft, plan, available date      -> full data
+#   jd_floorplans: floor plans (beds, baths, sqft); rent and availability load via JS -> plans only (blocker)
+#   prometheus  : plan names (sqft/beds/baths from plan drawing names), photo gallery; prices load via JS
+#                 -> plans + photos only (blocker)
+# Of the aggregators only the old epctex Apartments.com actor returned a property-website URL (8 of its 10
+# items); memo23, the one in use, never does. So sites are listed here by hand: the first four from the user's
+# benchmark sheet, the `photos` ones from those epctex URLs (tracking query strings removed).
+#   photos      : any site: the page's photos and link only, as one `site_info` row (no plans, no goal);
+#                 optional `photo_match` regex keeps only matching image URLs `address` is a fallback
+# for pages that do not state one, so identity can put the site on the right place.
+
+[[site]]
+id = "avalon-mountain-view"
+name = "Avalon Mountain View"
+platform = "avalon"
+chunk = "mountain_view"
+url = "https://www.avaloncommunities.com/california/mountain-view-apartments/avalon-mountain-view/"
+
+[[site]]
+id = "landsby"
+name = "Landsby"
+platform = "jd_floorplans"
+chunk = "mountain_view"
+url = "https://livelandsby.com/floorplans/"
+address = "100 Aspen Way, Mountain View, CA 94040"   # page has none; from the benchmark sheet
+
+[[site]]
+id = "the-dean"
+name = "The Dean"
+platform = "prometheus"
+chunk = "mountain_view"
+url = "https://prometheusapartments.com/ca/mountain-view-apartments/the-dean"
+
+# ---- photos only (URLs from the epctex Apartments.com items; addresses from the same items)
+[[site]]
+id = "sevens"
+name = "Sevens"
+platform = "photos"
+chunk = "mountain_view"
+url = "https://sevensmv.com/"
+address = "777 W Middlefield Rd, Mountain View, CA 94043"
+

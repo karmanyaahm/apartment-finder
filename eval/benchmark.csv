@@ -1,0 +1,30 @@
+Listing,City,Type (per listing site),Beds,Baths,Total rent/mo,Walk to Caltrain (min),Nearest Caltrain station,"Drive to Meta HQ, no traffic (min)",Link
+"49 Showers Dr Floor 1-ID1622, Mountain View, CA 94040",Mountain View,Apartment,3,2,"$4,710",5,San Antonio,18,https://www.zillow.com/homedetails/49-Showers-Dr-FLOOR-1-ID1622-Mountain-View-CA-94040/2053923019_zpid/
+"147 S Mathilda Ave, Sunnyvale, CA 94086",Sunnyvale,House/Townhome,3,2.5,"$4,840",6,Sunnyvale,20,https://www.zillow.com/homedetails/147-S-Mathilda-Ave-Sunnyvale-CA-94086/19520844_zpid/
+"284 Elmwood St, Mountain View, CA 94043",Mountain View,House/Townhome,3,2,"$5,000",9,Mountain View,16,https://www.zillow.com/homedetails/284-Elmwood-St-Mountain-View-CA-94043/19513420_zpid/
+"108 Bryant St, Mountain View, CA 94041",Mountain View,House/Townhome,3,2.5,"$5,380",6,Mountain View,18,https://www.zillow.com/homedetails/108-Bryant-St-Mountain-View-CA-94041/351574202_zpid/
+"424 Oak Grove Ave (Laurel Grove) - 6 units available (1M, 3M, 4M, 6, H, L)",Menlo Park,Apartment,3,2,"$5,595",4,Menlo Park,13,https://www.zillow.com/apartments/menlo-park-ca/424-oak-grove-ave/5XkxVp/
+"825 Menlo Ave APT F, Menlo Park, CA 94025",Menlo Park,Apartment,3,2,"$5,695",11,Menlo Park,15,https://www.zillow.com/homedetails/825-Menlo-Ave-APT-F-Menlo-Park-CA-94025/352056562_zpid/
+"1226 University Dr, Menlo Park, CA 94025",Menlo Park,House/Townhome,3,3,"$5,695",11,Menlo Park,16,https://www.zillow.com/homedetails/1226-University-Dr-Menlo-Park-CA-94025/15638068_zpid/
+"1228 University Dr, Menlo Park, CA 94025",Menlo Park,House/Townhome,3,3,"$5,695",11,Menlo Park,16,https://www.zillow.com/homedetails/1228-University-Dr-Menlo-Park-CA-94025/15638067_zpid/
+"1421 San Antonio St, Menlo Park, CA 94025",Menlo Park,House/Townhome,3,2.5,"$5,960",8,Menlo Park,13,https://www.zillow.com/homedetails/1421-San-Antonio-St-Menlo-Park-CA-94025/15581496_zpid/
+"273 Mountain View Ave, Mountain View, CA 94041",Mountain View,House/Townhome,3,2.5,"$6,700",14,Mountain View,17,https://www.zillow.com/homedetails/273-Mountain-View-Ave-Mountain-View-CA-94041/19513846_zpid/
+--- Slightly over the 20-minute targets (shown for comparison) ---
+"2306 Jane Ln, Mountain View, CA 94043",Mountain View,House/Townhome,3,2,"$5,550",21,San Antonio,14,https://www.zillow.com/homedetails/2306-Jane-Ln-Mountain-View-CA-94043/19507927_zpid/
+"The Shadows, 750 N Shoreline Blvd APT 164, Mountain View, CA 94043",Mountain View,Apartment,3,2,"$6,295",21,Mountain View,15,https://www.zillow.com/apartments/mountain-view-ca/the-shadows/5XjV5J/
+"346 E Washington Ave, Sunnyvale, CA 94086",Sunnyvale,House/Townhome,3,2,"$6,500",8,Sunnyvale,22,https://www.zillow.com/homedetails/346-E-Washington-Ave-Sunnyvale-CA-94086/19545342_zpid/
+"--- From apartment community websites (checked directly Nov 23, 2026) ---"
+"Avalon Mountain View (AvalonBay), 1600 Villa St, Mountain View, CA 94041 - units 00I-174, 00I-182, 00H-272, 00I-380",Mountain View,Apartment,3,2,5320,17,Mountain View,16,https://www.avaloncommunities.com/california/mountain-view-apartments/avalon-mountain-view/
+--- 3BR prospects from community sites: floor plan exists but no unit posted yet ---
+"Landsby (Greystar), 100 Aspen Way, Mountain View, CA 94040 - plans 3A.1 / 3A.2",Mountain View,Apartment,3,2,,4,San Antonio,13,https://livelandsby.com/floorplans/
+"Park Place (Prometheus), 851 Church St, Mountain View, CA 94041",Mountain View,Apartment,3,,,14,Mountain View,16,https://prometheusapartments.com/ca/mountain-view-apartments/park-place
+"Springline (Presidio Bay), 550 Oak Grove Ave, Menlo Park, CA 94025 - plans 3Bed/2Bath A & B",Menlo Park,Apartment,3,2,,1,Menlo Park,13,https://tour.springline.com/floorplans
+"Spruce (Prometheus), 655 S Fair Oaks Ave, Sunnyvale, CA 94086",Sunnyvale,Apartment,3,,,21,Sunnyvale,20,https://prometheusapartments.com/ca/sunnyvale-apartments/spruce
+--- Community-site finds that miss a filter (kept for reference) ---
+"The Dean (Prometheus), 458 San Antonio Rd, Mountain View, CA 94040 - Plan 3A",Mountain View,Apartment,3,2,8570,9,San Antonio,,https://prometheusapartments.com/ca/mountain-view-apartments/the-dean
+"Six50Live, 650 Live Oak Ave, Menlo Park, CA 94025 - unit 658-5",Menlo Park,Apartment,3,3,9250,6,Menlo Park,,https://www.six50live.com/floorplans
+"Shadowbrook (Prometheus), 235 S Bernardo Ave, Sunnyvale, CA 94086 - Plans 3A / 3AR",Sunnyvale,Apartment,3,2,4798,34,Sunnyvale,,https://prometheusapartments.com/ca/sunnyvale-apartments/shadowbrook
+"Avalon Silicon Valley (AvalonBay), 1255 Lakeside Dr, Sunnyvale, CA 94085",Sunnyvale,Apartment,3,2,5540,34,Lawrence,16,https://www.avaloncommunities.com/california/sunnyvale-apartments/avalon-silicon-valley/
+Notes:
+"Prices and availability are a point-in-time snapshot (Nov 23, 2026)."
+"Communities with no 3-bedroom floor plans at all: eaves Creekside, Avalon Towers, Reserve at Mountain View, The Tillery, Madera, Montrose, Madrone, 100 Moffett, Oak & Umber, Aviana, The Village Residences. The Hadley and Encasa have 3BR plans but sit a 30+ min walk from Caltrain."

@@ -1,0 +1,9 @@
+set,name,lat,lon,service,patterns,other_transit,source
+caltrain_stations,Redwood City,37.485865,-122.2315,express,express;limited;local,"SamTrans ECR, EPX, 270, 276, 278, 296, 397; Commute.org MPT, SEA shuttles",Caltrain GTFS 13-Nov-2026 + caltrain.com station page
+caltrain_stations,Menlo Park,37.4548,-122.18245,local,limited;local,"SamTrans ECR, 296; Commute.org M3 shuttle",Caltrain GTFS 13-Nov-2026 + caltrain.com station page
+caltrain_stations,Palo Alto,37.44322,-122.16429,express,express;limited;local,"VTA 21, 22, Rapid 522; Dumbarton Express; SamTrans ECR, 280, 281, 296, 397; Stanford Marguerite",Caltrain GTFS 13-Nov-2026 + caltrain.com station page
+caltrain_stations,California Ave,37.428834,-122.14113,local,limited;local,VTA 89,Caltrain GTFS 13-Nov-2026 + caltrain.com station page
+caltrain_stations,San Antonio,37.407239,-122.107116,local,limited;local,VTA 21,Caltrain GTFS 13-Nov-2026 + caltrain.com station page
+caltrain_stations,Mountain View,37.395067,-122.07722,express,express;limited;local,"VTA Light Rail Orange Line; VTA 21, 40, 51, 52; MVgo shuttles",Caltrain GTFS 13-Nov-2026 + caltrain.com station page
+caltrain_stations,Sunnyvale,37.378934,-122.0315,express,express;limited;local,"VTA 20, 21, 53, 55, Rapid 523",Caltrain GTFS 13-Nov-2026 + caltrain.com station page
+caltrain_stations,Lawrence,37.3707,-121.9969,local,limited;local,VTA 21; ACE shuttle (unverified),Caltrain GTFS 13-Nov-2026 + caltrain.com station page

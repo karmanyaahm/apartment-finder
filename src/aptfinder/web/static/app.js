@@ -540,8 +540,7 @@ async function boot() {
   }));
   $("#target").innerHTML = S.meta.targets.map((t) => `<option value="${esc(t)}">${esc(t.split(":")[1])}</option>`).join("");
   $("#mode").innerHTML = S.meta.modes.map((m) => `<option value="${esc(m)}">${esc(MODE_LABEL[m])}</option>`).join("");
-  const downtown = S.meta.targets.find((t) => t.includes("Palo Alto"));
-  if (downtown) $("#target").value = downtown;
+  if (S.meta.default_target) $("#target").value = S.meta.default_target; // the target a goal commutes to
   $("#mode").value = "bike";
   initMap();
   $$("#base-switch button").forEach((b) => b.addEventListener("click", () => setBase(b.dataset.base)));

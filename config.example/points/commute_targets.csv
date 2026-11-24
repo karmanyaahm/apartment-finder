@@ -1,0 +1,5 @@
+set,name,lat,lon,address,notes
+commute_targets,Googleplex,37.4217636,-122.0846140,"1600 Amphitheatre Pkwy, Mountain View, CA 94043",Nominatim (OSM node 2192620021)
+commute_targets,Meta HQ,37.4846680,-122.1483655,"1 Hacker Way, Menlo Park, CA 94025",Nominatim (OSM way 28571493)
+commute_targets,Downtown Palo Alto,37.4446978,-122.1628160,"University Ave & Emerson St, Palo Alto, CA 94301",OSM node 65606852 (intersection)
+commute_targets,Rengstorff industrial complex,37.4209559,-122.0956444,"1000 N Rengstorff Ave, Mountain View, CA 94043",Nominatim (OSM way 609011452)

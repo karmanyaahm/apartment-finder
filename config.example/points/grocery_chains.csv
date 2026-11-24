@@ -1,0 +1,29 @@
+set,name,lat,lon,shop,chain,address,city,osm_id
+grocery_chains,Safeway (20620 West Homestead Road),37.336179,-122.034735,supermarket,Safeway,20620 West Homestead Road,Cupertino,node/2856527717
+grocery_chains,Safeway (580 North Rengstorff Avenue),37.411191,-122.094465,supermarket,Safeway,580 North Rengstorff Avenue,Mountain View,node/5110357106
+grocery_chains,Safeway (1071 West El Camino Real),37.484568,-122.230330,supermarket,Safeway,1071 West El Camino Real,Redwood City,node/8397880529
+grocery_chains,Safeway (645 San Antonio Road),37.401781,-122.111817,supermarket,Safeway,645 San Antonio Road,Mountain View,way/219072012
+grocery_chains,Safeway (150 East El Camino Real),37.364447,-122.030718,supermarket,Safeway,150 East El Camino Real,Sunnyvale,way/238699216
+grocery_chains,Safeway (785 East El Camino Real),37.357326,-122.017685,supermarket,Safeway,785 East El Camino Real,Sunnyvale,way/238699879
+grocery_chains,Safeway (639 South Bernardo Avenue),37.372841,-122.058094,supermarket,Safeway,639 South Bernardo Avenue,Sunnyvale,way/238700135
+grocery_chains,Safeway (2760 Homestead Road),37.337862,-121.975108,supermarket,Safeway,2760 Homestead Road,Santa Clara,way/239728576
+grocery_chains,Safeway (2811 Middlefield Road),37.432918,-122.127278,supermarket,Safeway,2811 Middlefield Road,Palo Alto,way/240473839
+grocery_chains,Safeway (850 Woodside Road),37.465693,-122.225366,supermarket,Safeway,850 Woodside Road,Redwood City,way/240583632
+grocery_chains,Safeway (1750 Miramonte Avenue),37.372336,-122.088437,supermarket,Safeway,1750 Miramonte Avenue,Mountain View,way/252242273
+grocery_chains,Safeway (525 El Camino Real),37.450492,-122.179259,supermarket,Safeway,525 El Camino Real,Menlo Park,way/252693705
+grocery_chains,Safeway (325 South Sharon Park Drive),37.423428,-122.197004,supermarket,Safeway,325 South Sharon Park Drive,Menlo Park,way/252694484
+grocery_chains,Safeway (160 1st Street),37.379044,-122.119072,supermarket,Safeway,160 1st Street,Los Altos,way/28739182
+grocery_chains,Safeway (570 North Shoreline Boulevard),37.403092,-122.079319,supermarket,Safeway,570 North Shoreline Boulevard,Mountain View,way/35603394
+grocery_chains,Trader Joe's (316 West El Camino Real),37.367966,-122.035881,supermarket,Trader Joe's,316 West El Camino Real,Sunnyvale,node/2125918594
+grocery_chains,Trader Joe's (2310 Homestead Road),37.337157,-122.067512,supermarket,Trader Joe's,2310 Homestead Road,Los Altos,node/2204100722
+grocery_chains,Trader Joe's (720 Menlo Avenue),37.451267,-122.183560,supermarket,Trader Joe's,720 Menlo Avenue,Menlo Park,way/23921224
+grocery_chains,Trader Joe's (590 Showers Drive),37.402110,-122.110718,supermarket,Trader Joe's,590 Showers Drive,Mountain View,way/30704376
+grocery_chains,Trader Joe's (1482 El Camino Real),37.496391,-122.248569,supermarket,Trader Joe's,1482 El Camino Real,San Carlos,way/41657254
+grocery_chains,Trader Joe's (855 El Camino Real),37.438480,-122.157689,supermarket,Trader Joe's,855 El Camino Real,Palo Alto,way/45978875
+grocery_chains,Walmart Neighborhood Market,37.390058,-121.985447,supermarket,Walmart,3255 Mission College Boulevard,Santa Clara,way/254577755
+grocery_chains,Walmart Supercenter,37.400872,-122.109698,supermarket,Walmart,600 Showers Drive,Mountain View,way/29494712
+grocery_chains,Whole Foods Market (150 East McKinley Avenue),37.373919,-122.031224,supermarket,Whole Foods,150 East McKinley Avenue,Sunnyvale,node/9231196949
+grocery_chains,Whole Foods Market (4800 El Camino Real),37.398903,-122.110765,supermarket,Whole Foods,4800 El Camino Real,Los Altos,way/125729795
+grocery_chains,Whole Foods Market (774 Emerson Street),37.442385,-122.159601,supermarket,Whole Foods,774 Emerson Street,Palo Alto,way/158923718
+grocery_chains,Whole Foods Market (1250 Jefferson Avenue),37.482300,-122.231707,supermarket,Whole Foods,1250 Jefferson Avenue,Redwood City,way/240427378
+grocery_chains,Whole Foods Market (2732 Augustine Drive),37.380848,-121.975922,supermarket,Whole Foods,2732 Augustine Drive,Santa Clara,way/438908869

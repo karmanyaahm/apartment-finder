@@ -45,11 +45,10 @@ def test_identity_never_overrules_user(conn):
 def test_size_rule():
     rule = load_goals().goals["lease"].rules[1]
     assert rule["type"] == "size_options"
-    cases = {(3, 2): PASS, (3, 2.5): PASS, (3, 3): PASS, (4, 3): PASS, (4, 3.5): PASS,
-             (4, 2.5): FAIL, (3, 1.5): FAIL, (2, 2): FAIL, (5, 3): FAIL}
+    cases = {(3, 2): PASS, (3, 2.5): PASS, (3, 3): PASS, (4, 3): FAIL, (3, 1.5): FAIL, (2, 2): FAIL}
     for (beds, baths), want in cases.items():
         assert evaluate(rule, {"beds": beds, "baths": baths}, Ctx())[0] == want, (beds, baths)
-    assert evaluate(rule, {"beds": None, "baths": 2}, Ctx()) == (CHECK, "size 3bd/2+ba or 4bd/3+ba: beds unknown")
+    assert evaluate(rule, {"beds": None, "baths": 2}, Ctx()) == (CHECK, "size 3bd/2+ba: beds unknown")
     assert evaluate(rule, {"beds": 3, "baths": None}, Ctx())[0] == CHECK
     assert evaluate(rule, {"beds": 2, "baths": None}, Ctx())[0] == FAIL  # 2bd fails whatever the baths
 
@@ -71,9 +70,9 @@ def test_price_per_bed_strict():
 def test_dates_cover():
     rule = {"type": "dates_cover", "start": "2026-12-01", "end": "2027-01-01"}
     assert evaluate(rule, {"query_checkin": "2026-12-01", "query_checkout": "2027-01-01"}, Ctx())[0] == PASS
-    assert evaluate(rule, {"available_from": "2027-01-01"}, Ctx())[0] == PASS
-    assert evaluate(rule, {"available_from": "2027-01-20"}, Ctx())[0] == FAIL
-    assert evaluate(rule, {"available_from": "2027-01-01", "available_to": "2027-02-01"}, Ctx())[0] == FAIL
+    assert evaluate(rule, {"available_from": "2026-11-20"}, Ctx())[0] == PASS
+    assert evaluate(rule, {"available_from": "2026-12-10"}, Ctx())[0] == FAIL
+    assert evaluate(rule, {"available_from": "2026-11-20", "available_to": "2026-12-20"}, Ctx())[0] == FAIL
 
 
 def test_commute_any_with_estimates_and_google():

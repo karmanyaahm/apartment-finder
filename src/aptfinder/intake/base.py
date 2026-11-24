@@ -283,7 +283,7 @@ def coverage(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
         cities = set(params.get("cities") or [])  # legacy whole-city / box runs
         if kind == "box":
             covered = [a.id for a in areas if a.kind == "box" and legacy_box
-                       and "Palo Alto box" in cities and _overlap(a.bbox, legacy_box) >= 0.9]
+                       and any(c.endswith(" box") for c in cities) and _overlap(a.bbox, legacy_box) >= 0.9]
         else:
             covered = [a.id for a in areas if a.kind == kind and a.city in (cities & LEGACY_CITY_COVERS)]
         state = "partial" if r["source"] in LEGACY_PARTIAL | RANKED_SOURCES else "complete"

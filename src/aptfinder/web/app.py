@@ -204,6 +204,8 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
             "db": Path(db_path).name,
             "goals": [{"id": g, "label": v.label} for g, v in goals.goals.items()],
             "targets": [p.id for p in points.get("commute_targets", [])],
+            "default_target": next((r.get("target") for g in goals.goals.values() for r in g.rules
+                                    if r.get("type") == "commute_any"), None),
             "modes": MODES,
             "point_sets": {k: {"label": v.label or k} for k, v in load_point_sets().items()},
             "attributes": DEFAULT_ATTRIBUTES,

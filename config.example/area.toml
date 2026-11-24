@@ -1,0 +1,7 @@
+# Intake collects everything inside this area, whatever its size or price.
+cities = [
+  "Redwood City", "North Fair Oaks", "Atherton", "Menlo Park", "Palo Alto", "Stanford",
+  "Los Altos", "Mountain View", "Sunnyvale",
+]
+# south, west, north, east: a loose box around those cities
+bbox = [37.33, -122.27, 37.52, -121.97]

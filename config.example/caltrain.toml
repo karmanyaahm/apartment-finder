@@ -1,0 +1,27 @@
+# In-train minutes from Redwood City per service pattern, from the Caltrain GTFS feed
+# version 13-Nov-2026 (timetable in effect since 2026-01-31, feed valid to 2027-01-31).
+# Ride time between two stations = difference of their offsets in a pattern that stops at both.
+# Southbound and northbound differ by at most 1 minute; the larger value is used.
+# Limited trains stop at every station in this segment with Local timings, so they are folded into local.
+# Wait allowance = half the peak headway a station sees across all patterns stopping there.
+
+source = "https://data.trilliumtransit.com/gtfs/caltrain-ca-us/caltrain-ca-us.zip (13-Nov-2026)"
+
+[patterns.local]
+headway_min = 30
+offsets = { "Redwood City" = 0, "Menlo Park" = 5, "Palo Alto" = 8, "California Ave" = 11, "San Antonio" = 14, "Mountain View" = 17, "Sunnyvale" = 21, "Lawrence" = 24 }
+
+[patterns.express]
+headway_min = 60
+offsets = { "Redwood City" = 0, "Palo Alto" = 6, "Mountain View" = 13, "Sunnyvale" = 17 }
+
+# Peak trains per hour at each station (all patterns): express stations 4, others 3.
+[peak_trains_per_hour]
+"Redwood City" = 4
+"Palo Alto" = 4
+"Mountain View" = 4
+"Sunnyvale" = 4
+"Menlo Park" = 3
+"California Ave" = 3
+"San Antonio" = 3
+"Lawrence" = 3

@@ -1,6 +1,9 @@
 # local data: database, raw scraper output, mirrored media
 data/
 
+# your own config (config.example/ is the committed template)
+config/
+
 # secrets
 .env
 

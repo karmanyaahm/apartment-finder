@@ -10,7 +10,8 @@ from dotenv import load_dotenv
 ROOT = Path(os.environ.get("APTF_ROOT", Path(__file__).resolve().parents[2]))
 load_dotenv(ROOT / ".env")
 
-CONFIG_DIR = Path(os.environ.get("APTF_CONFIG", ROOT / "config"))
+# Your own config lives in config/ (gitignored); without it the committed config.example/ is used.
+CONFIG_DIR = Path(os.environ.get("APTF_CONFIG") or (ROOT / "config" if (ROOT / "config").is_dir() else ROOT / "config.example"))
 DATA_DIR = Path(os.environ.get("APTF_DATA", ROOT / "data"))
 RAW_DIR = DATA_DIR / "raw"
 MEDIA_DIR = DATA_DIR / "media"

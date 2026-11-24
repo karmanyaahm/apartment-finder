@@ -1,0 +1,123 @@
+set,name,lat,lon,shop,chain,address,city,osm_id
+grocery_any,99 Ranch Market (node/2418420316),37.336742,-122.015328,supermarket,,,,node/2418420316
+grocery_any,99 Ranch Market (1350 Grant Road),37.377664,-122.076577,supermarket,,1350 Grant Road,Mountain View,node/346427267
+grocery_any,Andronico’s,37.360793,-122.096899,supermarket,,690 Fremont Avenue,Los Altos,node/314151916
+grocery_any,Apna Bazar,37.373595,-122.052199,supermarket,,,,node/5871263418
+grocery_any,Ava's Market and Deli,37.392083,-122.080208,greengrocer,,340 Castro Street,,node/2157948533
+grocery_any,B & W Market,37.469724,-122.246302,supermarket,,,,node/14360321168
+grocery_any,Baraka Market,37.368430,-122.032490,supermarket,,101 East El Camino Real,Sunnyvale,node/2287108553
+grocery_any,Bharat Bazaar,37.367361,-121.997272,supermarket,,,,node/3640211825
+grocery_any,Bianchini's,37.401264,-122.193120,supermarket,,3130 Alpine Road,Portola Valley,way/161115521
+grocery_any,Bianchini's Market,37.503312,-122.257750,supermarket,,810 Laurel Street,,node/1251635656
+grocery_any,Bonfare,37.471432,-122.259460,supermarket,,3215 Oak Knoll Drive,Redwood City,node/10138384460
+grocery_any,C.J. Olson Cherries,37.356751,-122.025624,greengrocer,,560 East Remington Drive,Sunnyvale,way/207251571
+grocery_any,Cardenas,37.461807,-122.137678,supermarket,,1731 East Bayshore Road,East Palo Alto,way/35757697
+grocery_any,Chavez Supermarket (775 Arguello Street),37.488524,-122.235396,supermarket,,775 Arguello Street,,node/12251716416
+grocery_any,Chavez Supermarket (node/2668905354),37.470651,-122.203311,supermarket,,,,node/2668905354
+grocery_any,Chavez Supermarket (46 5th Avenue),37.467475,-122.207780,supermarket,,46 5th Avenue,Redwood City,way/166318434
+grocery_any,Chavez Supermarket (666 North Fair Oaks Avenue),37.390154,-122.013961,supermarket,,666 North Fair Oaks Avenue,,way/255737621
+grocery_any,Country Sun,37.426170,-122.145376,supermarket,,440 South California Avenue,Palo Alto,way/160693147
+grocery_any,Country Time Market,37.465810,-122.141285,supermarket,,,,way/388819103
+grocery_any,Crossroads Specialty Foods,37.417236,-122.102575,supermarket,,720 San Antonio Avenue,Palo Alto,way/124471286
+grocery_any,DeMartini Orchard,37.382774,-122.114541,supermarket,,66 North San Antonio Road,Los Altos,way/258564464
+grocery_any,Dehoff's Key Market,37.466883,-122.241767,supermarket,,1063 Upton St,,node/4220431912
+grocery_any,Delucchi's Market,37.478239,-122.188457,supermarket,,3640 Florence Street,Redwood City,way/239257777
+grocery_any,Desi Bazar Desi Kitchen,37.366412,-122.013189,greengrocer,,712 South Wolfe Road,Sunnyvale,node/12525827939
+grocery_any,Draeger's,37.376306,-122.116907,supermarket,,342 1st Street,Los Altos,way/28739187
+grocery_any,Draeger's Market,37.449254,-122.185216,supermarket,,1010 University Drive,Menlo Park,way/44116408
+grocery_any,El Paisano,37.475246,-122.209701,supermarket,,2856,,way/259443562
+grocery_any,El Rancho Supermarket,37.465369,-122.156954,supermarket,,812 Willow Road,,way/264034813
+grocery_any,"Everest Grocery, Food, and Liquor",37.519413,-121.993015,supermarket,,,,node/13981244056
+grocery_any,Felipe's Market,37.373154,-122.052369,supermarket,,1101 West El Camino Real,Sunnyvale,node/1572294518
+grocery_any,FoodMaxx (39965 Cedar Boulevard),37.519625,-121.991627,supermarket,,39965 Cedar Boulevard,Fremont,node/1691658594
+grocery_any,FoodMaxx (3705 El Camino Real),37.353975,-121.998114,supermarket,,3705 El Camino Real,Santa Clara,node/309331540
+grocery_any,Foothill Produce,37.336779,-122.067631,greengrocer,,,,node/519482217
+grocery_any,Grand Bazaar Grocery & Meat,37.504684,-122.258731,greengrocer,,751 Laurel Street,,node/12501961553
+grocery_any,Grocery Outlet (3445 Alma Street),37.419052,-122.124512,supermarket,,3445 Alma Street,Palo Alto,node/2051505803
+grocery_any,Grocery Outlet (1180 North Fair Oaks Avenue),37.403235,-122.009736,supermarket,,1180 North Fair Oaks Avenue,Sunnyvale,way/197474303
+grocery_any,Grocery Outlet (1833 Broadway),37.486195,-122.224677,supermarket,,1833 Broadway,Redwood City,way/204981537
+grocery_any,Grocery Outlet (3520 Homestead Road),37.336362,-121.993637,supermarket,,3520 Homestead Road,Santa Clara,way/258200674
+grocery_any,Guadalajara Market,37.397099,-122.023282,supermarket,,829 Borregas Avenue,,node/4330348989
+grocery_any,Hankook Supermarket,37.351589,-122.001475,supermarket,,1092 East El Camino Real,Sunnyvale,node/2658424321
+grocery_any,India Cash & Carry,37.351396,-122.005692,supermarket,,1032 East El Camino Real,Sunnyvale,node/266630158
+grocery_any,Indian Market,37.353964,-122.014426,grocery,,899 East El Camino Real,Sunnyvale,node/2663431533
+grocery_any,Joya Supermarket,37.404072,-122.106515,supermarket,,2512 California Street,Mountain View,way/395812098
+grocery_any,K Food Mall,37.352109,-121.987564,supermarket,,3330 El Camino Real,Santa Clara,node/12582654793
+grocery_any,Karthikeya Supermarket,37.369178,-122.041748,greengrocer,,812 West El Camino Real,Sunnyvale,node/1676581901
+grocery_any,Kumud Groceries,37.352985,-122.004182,supermarket,,,,node/266630161
+grocery_any,La Estrellita Market & Deli,37.471138,-122.140079,supermarket,,,,way/386697655
+grocery_any,La Paradita Peru,37.494826,-122.237059,supermarket,,1500 Industrial Way,,node/11751903604
+grocery_any,La Plaza,37.403053,-122.098167,supermarket,,40 South Rengstorff Avenue,Mountain View,way/368323728
+grocery_any,Lucky (200 Woodside Plz),37.456761,-122.229718,supermarket,,200 Woodside Plz,Redwood City,node/4703912400
+grocery_any,Lucky (484 North Mathilda Avenue),37.388455,-122.029404,supermarket,,484 North Mathilda Avenue,Sunnyvale,node/487082163
+grocery_any,Lucky (2175 Grant Road),37.342256,-122.071443,supermarket,,2175 Grant Road,Los Altos,way/282741493
+grocery_any,Lucky (way/41657255),37.500313,-122.248837,supermarket,,,,way/41657255
+grocery_any,Madras Groceries,37.374413,-122.055468,supermarket,,,,node/1572297515
+grocery_any,Mega Mart (1775 East Bayshore Road),37.459958,-122.135864,supermarket,,1775 East Bayshore Road,East Palo Alto,node/14364089266
+grocery_any,Mega Mart (760 East El Camino Real),37.356793,-122.020276,supermarket,,760 East El Camino Real,Sunnyvale,way/61113456
+grocery_any,Mercadito Latino,37.478652,-122.225186,supermarket,,1726 El Camino Real,Redwood City,node/1251606827
+grocery_any,Mi Ranchito Produce,37.387825,-122.023782,supermarket,,,,node/4331564473
+grocery_any,Mi Rancho Supermarket (137 Roosevelt Avenue),37.478265,-122.225387,supermarket,,137 Roosevelt Avenue,Redwood City,way/240583622
+grocery_any,Mi Rancho Supermarket (150 Charter Street),37.476666,-122.217766,supermarket,,150 Charter Street,Redwood City,way/240583623
+grocery_any,Mi Tienda Supermarket,37.397758,-122.075886,greengrocer,,,,node/5127223603
+grocery_any,Mi Tierra Market,37.406174,-122.064812,supermarket,,,,way/228454171
+grocery_any,Moffett Field Commissary,37.413397,-122.056834,supermarket,,,,way/41841248
+grocery_any,Mollie Stone's,37.429029,-122.143313,supermarket,,164 South California Avenue,Palo Alto,way/232276829
+grocery_any,Namaste Plaza,37.339966,-122.042447,supermarket,,1637 Hollenbeck Avenue,Sunnyvale,node/8735359324
+grocery_any,New India Bazaar,37.350803,-122.049475,supermarket,,1340 South Mary Avenue,Sunnyvale,node/1843364386
+grocery_any,New Wing Yuan Market,37.397565,-121.996942,supermarket,,1139 Lawrence Expressway,,node/2604149621
+grocery_any,Nijiya Market,37.378671,-122.071446,supermarket,,143 East El Camino Real,Mountain View,node/357600882
+grocery_any,Nob Hill Foods (1250 Grant Road),37.378343,-122.076350,supermarket,,1250 Grant Road,Mountain View,node/1570138528
+grocery_any,Nob Hill Foods (3555 Monroe Street),37.367154,-121.995032,supermarket,,3555 Monroe Street,Santa Clara,node/8455769426
+grocery_any,Pal Market,37.471188,-122.139251,supermarket,,,,node/13182736244
+grocery_any,Pena Meat and Food Market,37.472046,-122.204725,supermarket,,3198,,node/2668905560
+grocery_any,Penzeys Spices,37.451121,-122.184771,grocery,,771 Santa Cruz Avenue,Menlo Park,node/559833060
+grocery_any,Piazza's Fine Foods,37.418752,-122.109876,supermarket,,3922 Middlefield Road,Palo Alto,node/2398606788
+grocery_any,Real Produce International Market,37.426719,-122.148492,supermarket,,501 Oxford Avenue,,node/6544351129
+grocery_any,Roberts Market (4420 Alpine Road),37.372907,-122.207315,supermarket,,4420 Alpine Road,Portola Valley,way/170181211
+grocery_any,Roberts Market (3015 Woodside Road),37.429376,-122.254328,supermarket,,3015 Woodside Road,Woodside,way/382930142
+grocery_any,Rose International Market,37.385714,-122.084516,supermarket,,801 West El Camino Real,Mountain View,node/8530178857
+grocery_any,SOS Fine Foods,37.441080,-122.156788,supermarket,,949,,way/132296680
+grocery_any,Safeway (20620 West Homestead Road),37.336179,-122.034735,supermarket,Safeway,20620 West Homestead Road,Cupertino,node/2856527717
+grocery_any,Safeway (580 North Rengstorff Avenue),37.411191,-122.094465,supermarket,Safeway,580 North Rengstorff Avenue,Mountain View,node/5110357106
+grocery_any,Safeway (1071 West El Camino Real),37.484568,-122.230330,supermarket,Safeway,1071 West El Camino Real,Redwood City,node/8397880529
+grocery_any,Safeway (645 San Antonio Road),37.401781,-122.111817,supermarket,Safeway,645 San Antonio Road,Mountain View,way/219072012
+grocery_any,Safeway (150 East El Camino Real),37.364447,-122.030718,supermarket,Safeway,150 East El Camino Real,Sunnyvale,way/238699216
+grocery_any,Safeway (785 East El Camino Real),37.357326,-122.017685,supermarket,Safeway,785 East El Camino Real,Sunnyvale,way/238699879
+grocery_any,Safeway (639 South Bernardo Avenue),37.372841,-122.058094,supermarket,Safeway,639 South Bernardo Avenue,Sunnyvale,way/238700135
+grocery_any,Safeway (2760 Homestead Road),37.337862,-121.975108,supermarket,Safeway,2760 Homestead Road,Santa Clara,way/239728576
+grocery_any,Safeway (2811 Middlefield Road),37.432918,-122.127278,supermarket,Safeway,2811 Middlefield Road,Palo Alto,way/240473839
+grocery_any,Safeway (850 Woodside Road),37.465693,-122.225366,supermarket,Safeway,850 Woodside Road,Redwood City,way/240583632
+grocery_any,Safeway (1750 Miramonte Avenue),37.372336,-122.088437,supermarket,Safeway,1750 Miramonte Avenue,Mountain View,way/252242273
+grocery_any,Safeway (525 El Camino Real),37.450492,-122.179259,supermarket,Safeway,525 El Camino Real,Menlo Park,way/252693705
+grocery_any,Safeway (325 South Sharon Park Drive),37.423428,-122.197004,supermarket,Safeway,325 South Sharon Park Drive,Menlo Park,way/252694484
+grocery_any,Safeway (160 1st Street),37.379044,-122.119072,supermarket,Safeway,160 1st Street,Los Altos,way/28739182
+grocery_any,Safeway (570 North Shoreline Boulevard),37.403092,-122.079319,supermarket,Safeway,570 North Shoreline Boulevard,Mountain View,way/35603394
+grocery_any,Shell Gas Station,37.466380,-122.242110,supermarket,,,,node/8079171231
+grocery_any,Sigona's Farmers Market,37.442608,-122.172771,greengrocer,,,,node/824605394
+grocery_any,Sigonas Farmers Market,37.480077,-122.215989,greengrocer,,2345 Middlefield Road,Redwood City,way/239448219
+grocery_any,Smart & Final,37.486443,-122.213872,supermarket,,1185 Broadway,Redwood City,way/239260088
+grocery_any,Smart & Final Extra!,37.353413,-122.051227,supermarket,,1265 South Mary Avenue,Sunnyvale,node/1459467598
+grocery_any,Smart & Final extra!,37.378767,-122.071587,supermarket,,141 East El Camino Real,Mountain View,node/2600782845
+grocery_any,Sprouts Farmers Market,37.367539,-122.030244,supermarket,,111 East El Camino Real,Sunnyvale,node/343600298
+grocery_any,Super Kyo-po Plaza;교포마켓,37.339252,-121.994282,supermarket,,3521 Homestead Road,Santa Clara,way/258213390
+grocery_any,Taj Mahal Fresh Market,37.389129,-122.003470,supermarket,,,,node/5737709898
+grocery_any,The Market at Edgewood,37.448294,-122.125398,supermarket,,2170 West Bayshore Road,Palo Alto,way/230568313
+grocery_any,The Willows Market,37.454512,-122.163285,supermarket,,60,,way/109827372
+grocery_any,Tiranga Super Market,37.352800,-121.989173,supermarket,,3379 El Camino Real,Santa Clara,node/8458894617
+grocery_any,Trader Joe's (316 West El Camino Real),37.367966,-122.035881,supermarket,Trader Joe's,316 West El Camino Real,Sunnyvale,node/2125918594
+grocery_any,Trader Joe's (2310 Homestead Road),37.337157,-122.067512,supermarket,Trader Joe's,2310 Homestead Road,Los Altos,node/2204100722
+grocery_any,Trader Joe's (720 Menlo Avenue),37.451267,-122.183560,supermarket,Trader Joe's,720 Menlo Avenue,Menlo Park,way/23921224
+grocery_any,Trader Joe's (590 Showers Drive),37.402110,-122.110718,supermarket,Trader Joe's,590 Showers Drive,Mountain View,way/30704376
+grocery_any,Trader Joe's (1482 El Camino Real),37.496391,-122.248569,supermarket,Trader Joe's,1482 El Camino Real,San Carlos,way/41657254
+grocery_any,Trader Joe's (855 El Camino Real),37.438480,-122.157689,supermarket,Trader Joe's,855 El Camino Real,Palo Alto,way/45978875
+grocery_any,Walmart Neighborhood Market,37.390058,-121.985447,supermarket,Walmart,3255 Mission College Boulevard,Santa Clara,way/254577755
+grocery_any,Walmart Supercenter,37.400872,-122.109698,supermarket,Walmart,600 Showers Drive,Mountain View,way/29494712
+grocery_any,Western Pacific Filipino Grocery,37.388986,-122.004611,supermarket,,905A East Duane Avenue,,node/2607498435
+grocery_any,Whole Foods Market (150 East McKinley Avenue),37.373919,-122.031224,supermarket,Whole Foods,150 East McKinley Avenue,Sunnyvale,node/9231196949
+grocery_any,Whole Foods Market (4800 El Camino Real),37.398903,-122.110765,supermarket,Whole Foods,4800 El Camino Real,Los Altos,way/125729795
+grocery_any,Whole Foods Market (774 Emerson Street),37.442385,-122.159601,supermarket,Whole Foods,774 Emerson Street,Palo Alto,way/158923718
+grocery_any,Whole Foods Market (1250 Jefferson Avenue),37.482300,-122.231707,supermarket,Whole Foods,1250 Jefferson Avenue,Redwood City,way/240427378
+grocery_any,Whole Foods Market (2732 Augustine Drive),37.380848,-121.975922,supermarket,Whole Foods,2732 Augustine Drive,Santa Clara,way/438908869
+grocery_any,Wolfe India Bazar,37.366276,-122.016928,supermarket,,Old San Francisco Road,,node/2663431885
+grocery_any,Zanotto's Market Sunnyvale,37.350176,-122.049562,supermarket,,1356 South Mary Avenue,Sunnyvale,node/1843364371

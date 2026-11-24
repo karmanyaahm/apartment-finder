@@ -1,0 +1,100 @@
+# Goals are filters over stored data. Changing anything here needs no new scrape.
+#
+# Rule types (see src/aptfinder/filter/rules.py):
+#   equals        field, value                 listing field must equal value
+#   max           field, value, strict?        field <= value (< when strict)
+#   size_options  options = [{beds, min_baths}] beds must match one option with baths >= min_baths
+#   dates_cover   start, end                   available for the whole range
+#   commute_any   target, options=[{mode,max}] at least one mode within max minutes to the target
+#   near          set, mode, max               nearest point of a set within max minutes
+#   amenity       name                         amenities list contains name (or user annotation)
+#   known         field                        field is present
+# Missing input never rejects: the rule returns needs_check and names the field.
+
+[verify]
+min_samples = 5      # a source/field needs at least this many hand checks before accuracy counts
+min_accuracy = 0.8   # below this, the field from that source is treated as needs_check
+sample_fields = ["price", "beds", "baths", "sqft", "available_from", "address"]
+
+[goals.temp]
+label = "Temp stay, 1 person, Dec 1 2026 - Jan 1 2027"
+
+# The stay is about a month: an ordinary 12-month lease does not fit, even furnished.
+[[goals.temp.rules]]
+type = "equals"
+field = "term"
+value = "short"
+
+[[goals.temp.rules]]
+type = "equals"
+field = "furnished"
+value = true
+
+[[goals.temp.rules]]
+type = "equals"
+field = "private_bath"
+value = true
+
+[[goals.temp.rules]]
+type = "dates_cover"
+start = "2026-12-01"
+end = "2027-01-01"
+
+[[goals.temp.rules]]
+type = "commute_any"
+target = "commute_targets:Downtown Palo Alto"
+options = [
+  { mode = "bike", max = 8 },
+  { mode = "walk", max = 25 },
+  { mode = "transit", max = 25 },
+]
+
+[[goals.temp.rules]]
+type = "max"
+field = "price_month"
+value = 4000
+
+[goals.lease]
+label = "Group lease"
+
+[[goals.lease.rules]]
+type = "equals"
+field = "term"
+value = "long"
+
+[[goals.lease.rules]]
+type = "size_options"
+options = [
+  { beds = 3, min_baths = 2 },   # 3/2, 3/2.5, 3/3
+]
+
+[[goals.lease.rules]]
+type = "max"
+field = "price_per_bed"
+value = 2500
+strict = true
+
+[[goals.lease.nice]]
+type = "max"
+field = "price_per_bed"
+value = 2000
+
+[[goals.lease.nice]]
+type = "amenity"
+name = "gym"
+
+[[goals.lease.nice]]
+type = "near"
+set = "caltrain_stations"
+mode = "walk"
+max = 20
+
+[[goals.lease.nice]]
+type = "near"
+set = "google_bus_stops"
+mode = "walk"
+max = 10
+
+[[goals.lease.nice]]
+type = "known"
+field = "sqft"

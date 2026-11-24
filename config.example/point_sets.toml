@@ -1,0 +1,37 @@
+# Per point set: modes to compute and how many nearest points to route to (k = 0: every point).
+# prefilter_km: places farther than this straight-line distance get no paid (Google) routing
+# automatically; they can still be routed on demand from the dashboard.
+# The free straight-line estimate provider ignores both limits and covers every place, so sets with
+# paid = false (estimates only) need neither.
+
+[commute_targets]
+label = "Commute targets"
+modes = ["walk", "bike", "transit", "drive", "bike_train_bike", "bike_bus_bike"]
+k = 0
+prefilter_km = 25
+# per-mode straight-line limits for paid routing (a 10 km walk is never useful)
+max_km = { walk = 4, bike = 15, transit = 25, drive = 25 }
+
+[caltrain_stations]
+label = "Caltrain"
+modes = ["walk"]
+k = 2
+prefilter_km = 4
+
+[grocery_chains]
+paid = false   # estimates are good enough for walking to groceries / bus stops
+label = "Grocery chains"
+modes = ["walk"]
+k = 2
+
+[grocery_any]
+paid = false   # estimates are good enough for walking to groceries / bus stops
+label = "Any grocery"
+modes = ["walk"]
+k = 2
+
+[google_bus_stops]
+paid = false   # estimates are good enough for walking to groceries / bus stops
+label = "Google bus"
+modes = ["walk"]
+k = 1
