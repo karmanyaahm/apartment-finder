@@ -177,3 +177,16 @@ def test_auto_modes_limit_paid_routing_and_on_demand_routes_the_full_table(tmp_p
     trips.compute_for_place(conn, trips.build_commute(db, src), place, on_demand=True)
     modes = {r[0] for r in conn.execute("SELECT DISTINCT mode FROM trips WHERE point_id LIKE 'commute_targets:%'")}
     assert {"walk", "bike", "drive"} <= modes
+
+
+def test_estimate_uses_a_leg_already_routed_by_a_real_provider(tmp_path):
+    from datetime import datetime, timezone
+
+    c = Commute(tmp_path / "c.db", StraightLineLegSource())
+    station, office = (37.4545, -122.1823), (37.4847, -122.1484)
+    guess = c.source.leg(station, office, "bike", c.depart)
+    c._db.execute("INSERT INTO commute_legs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                  (37.4545, -122.1823, 37.4847, -122.1484, "bike", c.depart, "google", 1, 14.0, 4200.0, "[]",
+                   datetime.now(timezone.utc).isoformat()))
+    assert guess.minutes != 14.0
+    assert c.leg(station, office, "bike").minutes == 14.0  # the routed leg, not the straight-line guess

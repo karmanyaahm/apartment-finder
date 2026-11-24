@@ -76,6 +76,15 @@ class Commute:
             "AND d_lat=? AND d_lon=? AND mode=? AND depart=? AND provider=?", key).fetchone()
         if row:
             return LegResult(row[1], row[2], json.loads(row[3])) if row[0] else None
+        if self.source.name == "estimate":
+            # a leg already routed by a real provider beats a straight-line guess (e.g. the station -> workplace
+            # bike legs routed once and shared by every place's bike+train estimate)
+            routed = self._db.execute(
+                "SELECT minutes, distance_m, steps FROM commute_legs WHERE o_lat=? AND o_lon=? AND d_lat=? "
+                "AND d_lon=? AND mode=? AND depart=? AND provider != 'estimate' AND found = 1 "
+                "ORDER BY fetched_at DESC LIMIT 1", key[:6]).fetchone()
+            if routed:
+                return LegResult(routed[0], routed[1], json.loads(routed[2]))
         if o == d:
             res: LegResult | None = LegResult(0.0, 0.0)
         else:

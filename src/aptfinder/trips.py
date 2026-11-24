@@ -88,6 +88,26 @@ def make_source(provider: str, max_calls: int = 200, meter_db: str | None = None
     return StraightLineLegSource()
 
 
+def route_anchors(conn, db_path: str, provider: str, max_calls: int, dry_run: bool = False) -> dict:
+    """Bike legs from every Caltrain station to every commute target: a fixed set (stations x targets), so routing
+    it once with a real provider is cheap, and the estimator reuses it for every place (`Commute.leg`)."""
+    pts = load_points()
+    stations, targets = pts.get("caltrain_stations", []), pts.get("commute_targets", [])
+    pairs = [(s, t) for s in stations for t in targets]
+    if dry_run or provider == "estimate":
+        return {"pairs": len(pairs), "stations": [s.name for s in stations], "targets": [t.name for t in targets]}
+    source = make_source(provider, max_calls=max_calls, meter_db=db_path)
+    commute = build_commute(db_path, source)
+    est = build_commute(db_path, make_source("estimate"))
+    out = []
+    for s, t in pairs:
+        before = est.source.leg((s.lat, s.lon), (t.lat, t.lon), "bike", est.depart)  # pure straight-line guess
+        r = commute.leg((s.lat, s.lon), (t.lat, t.lon), "bike")
+        out.append({"station": s.name, "target": t.name, "bike_min": r.minutes if r else None,
+                    "estimate_min": round(before.minutes, 1) if before else None})
+    return {"routed": out, "api_calls": getattr(source, "calls", None)}
+
+
 def build_commute(cache_db: str, source) -> Commute:
     stations = [Station(p.name, p.lat, p.lon) for p in load_points().get("caltrain_stations", [])]
     return Commute(cache_db, source, stations, load_caltrain())
@@ -181,6 +201,9 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("dest", help="lat,lon")
     r.add_argument("--mode", default="bike")
     sub.add_parser("usage", help="Google calls this month against the caps in config/google.toml")
+    an = sub.add_parser("anchors", help="route each Caltrain station -> commute target bike leg once (Google); every "
+                                        "place's bike+train estimate then uses these real legs")
+    an.add_argument("--dry-run", action="store_true")
     c = sub.add_parser("compute", help="append trips for places")
     c.add_argument("--place", action="append", help="place_key (repeatable); default all")
     c.add_argument("--on-demand", action="store_true", help="ignore straight-line prefilters")
@@ -197,6 +220,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     conn = connect(args.db)
     init_db(conn)
+    if args.cmd == "anchors":
+        print(json.dumps(route_anchors(conn, args.db, args.provider, args.max_calls, args.dry_run), indent=1))
+        return
     if args.cmd == "compute" and args.candidates:
         from .areas import chunk_of, is_active
         from .filter import routing_candidates
