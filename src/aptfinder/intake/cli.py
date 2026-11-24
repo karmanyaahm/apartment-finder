@@ -97,6 +97,13 @@ def main(argv: list[str] | None = None) -> None:
     ex.add_argument("--dry-run", action="store_true")
     ex.add_argument("--reread", action="store_true", help="apply cached answers again to listings already read "
                                                           "(free; after a change to the checks)")
+    rd = sub.add_parser("render", help="render buildings' own sites in a browser (Apify) and read offered plans "
+                                       "and prices with Claude Haiku")
+    rd.add_argument("--chunk", action="append", default=[])
+    rd.add_argument("--site", action="append", default=[], help="site id (repeatable); default every site in --chunk")
+    rd.add_argument("--model", default="haiku")
+    rd.add_argument("--max-usd", type=float, default=1.0, help="cap for each of Apify and Claude")
+    rd.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
 
     conn = connect(args.db)
@@ -106,6 +113,18 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.cmd == "reparse":
         print(json.dumps(reparse(conn, ADAPTERS[args.source], args.raw_file), indent=1))
+        return
+
+    if args.cmd == "render":
+        from .discover import Blocker
+        from .render import render
+
+        try:
+            res = render(conn, args.chunk, sites=args.site or None, model=args.model, max_claude_usd=args.max_usd,
+                         max_apify_usd=args.max_usd, dry_run=args.dry_run)
+        except Blocker as e:
+            raise SystemExit(f"BLOCKED: {e}")
+        print(json.dumps(res, indent=1, default=str))
         return
 
     if args.cmd in ("promote-sites", "extract"):

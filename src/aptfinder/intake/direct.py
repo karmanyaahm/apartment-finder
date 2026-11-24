@@ -111,10 +111,13 @@ def parse_avalon(item: dict[str, Any], site: dict[str, Any]) -> list[Parsed]:
         p = (u.get("startingAtPricesUnfurnished") or {})
         prices = p.get("prices") or {}
         fp = u.get("floorPlan") or {}
+        # the unit as the site shows it: "00D-130" (building 00D, unit 130) from unitId "AVB-CA049-00D-130"
+        uid = str(u.get("unitId") or "")
+        unit = uid.split("-", 2)[2] if uid.count("-") >= 2 else str(u.get("unitName"))
         out.append(Parsed(
-            source_id=f"{site['id']}:u:{u.get('unitName')}", url=site["url"], price=money(prices.get("price")),
-            price_basis="month",
-            data=ObservationData(**base, unit=str(u.get("unitName")), floor_plan=fp.get("name"),
+            source_id=f"{site['id']}:u:{u.get('unitName')}", url=u.get("url") or site["url"],
+            price=money(prices.get("price")), price_basis="month",
+            data=ObservationData(**base, unit=unit, floor_plan=fp.get("name"),
                                  beds=u.get("bedroomNumber"), baths=u.get("bathroomNumber"), sqft=u.get("squareFeet"),
                                  available_from=_date(u.get("availableDateUnfurnished")),
                                  extra={"site": site["id"], "platform": "avalon", "lease_term_months": p.get("leaseTerm"),
@@ -128,7 +131,7 @@ def parse_avalon(item: dict[str, Any], site: dict[str, Any]) -> list[Parsed]:
             out.append(Parsed(
                 source_id=f"{site['id']}:uf:{u.get('unitName')}", url=u.get("url") or site["url"],
                 price=money(fprices.get("price")), price_basis="month",
-                data=ObservationData(**base, unit=str(u.get("unitName")), floor_plan=fp.get("name"), furnished=True,
+                data=ObservationData(**base, unit=unit, floor_plan=fp.get("name"), furnished=True,
                                      beds=u.get("bedroomNumber"), baths=u.get("bathroomNumber"),
                                      sqft=u.get("squareFeet"), available_from=_date(u.get("availableDateFurnished")),
                                      extra={"site": site["id"], "platform": "avalon", "offer": "Furnished+",
