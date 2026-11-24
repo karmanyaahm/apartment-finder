@@ -8,7 +8,8 @@
 #   prometheus  : plan names (sqft/beds/baths from plan drawing names), photo gallery; prices load via JS
 #                 -> plans + photos only (blocker)
 # Of the aggregators only the old epctex Apartments.com actor returned a property-website URL (8 of its 10
-# items); memo23, the one in use, never does. So sites are listed here by hand: the first four from the user's
+# items); memo23, the one in use, does too (`moreDetails.propertyWebsiteUri`, found 2026-11-24, stored as
+# extra.website). So sites are listed here by hand: the first four from the user's
 # benchmark sheet, the `photos` ones from those epctex URLs (tracking query strings removed).
 #   photos      : any site: the page's photos and link only, as one `site_info` row (no plans, no goal);
 #                 optional `photo_match` regex keeps only matching image URLs `address` is a fallback

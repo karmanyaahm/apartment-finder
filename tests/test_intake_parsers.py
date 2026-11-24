@@ -89,6 +89,19 @@ def test_apartments_units_plans_and_single_rentals():
     assert s.data.property_name is None
 
 
+def test_apartments_building_website_company_and_phone():
+    item = {"listingId": "x1", "listingName": "Sevens", "listingAddress": "1 A St", "listingCity": "Mountain View",
+            "listingState": "CA", "listingZip": "94041", "location": {}, "url": "u",
+            "models": [{"modelName": "S1", "rentLabel": "$3,000", "details": ["Studio", "1 Bath"], "units": []}],
+            "moreDetails": {"propertyWebsiteUri": "https://sevensmv.com/?funnelleasing=apts.com&utm_source=x",
+                            "managementCompany": {"name": "Greystar"}, "phone": "(650) 555-0100"}}
+    (p,) = ADAPTERS["apartments_com"].parse(item, {})
+    assert p.data.extra["website"] == "https://sevensmv.com/"
+    assert (p.data.extra["management_company"], p.data.extra["phone"]) == ("Greystar", "(650) 555-0100")
+    item["moreDetails"]["propertyWebsiteUri"] = "https://www.apartments.com/sevens/x1/"  # aggregator: dropped
+    assert ADAPTERS["apartments_com"].parse(item, {})[0].data.extra["website"] is None
+
+
 def test_craigslist():
     item = {"postId": "7998593532", "priceUsd": 4001, "location": "Mountain View", "latitude": 37.399,
             "longitude": -122.094, "postedAt": "2026-11-10T14:27:12-0800", "url": "u",

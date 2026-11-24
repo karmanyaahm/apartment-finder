@@ -68,7 +68,7 @@ Most of Mountain View fails the temp goal on the commute to downtown Palo Alto. 
 |---|---|---|
 | Prometheus (The Dean, Park Place) and Landsby prices | Prices and availability load with JavaScript after the page; the cheerio scraper sees plans and sizes only | A browser-rendering Apify actor (e.g. puppeteer/playwright scraper), a few cents per page |
 | Apartments.com photos | Their image server refuses to show images on other sites (`ERR_BLOCKED_BY_ORB`) | Now mostly bypassed by own-site photos (item 2); `discover-sites` extends it |
-| Building websites | memo23 (the Apartments.com actor in use) never returns the property website; the old epctex actor did, but capped at 10 items on the Free plan | `discover-sites` (item 4) |
+| Building websites | Corrected later on 2026-11-24: memo23 does return the property website (`moreDetails.propertyWebsiteUri`); 65 buildings now have one | Turn those URLs into scraped sites; `discover-sites` for the rest |
 | Airbnb completeness | Map search is ranked; a box can't be proven complete | Accepted: reruns refresh. Smaller boxes would get closer |
 | Google bike routing SKU | Unconfirmed whether BICYCLE bills as Essentials or Pro | Check in Google Cloud billing; bike calls capped at 900/month until then |
 | Google bus stop list | Not provided yet | Your list of Google shuttle stops (`config/points/google_bus_stops.csv`) |

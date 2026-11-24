@@ -18,6 +18,7 @@ from typing import Any
 from ..store.keys import UNIT_RE
 from ..store.models import ObservationData
 from .base import Adapter, Parsed, money
+from .discover import clean_url
 
 TODAY = date.today
 
@@ -263,8 +264,15 @@ def apartments2_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed]
     photos = [i.get("url") for i in item.get("images") or [] if isinstance(i, dict) and i.get("url")]
     if not photos and item.get("imageUrl"):
         photos = [item["imageUrl"]]
+    md = item.get("moreDetails") or {}
+    mgmt = md.get("managementCompany")
     extra = {"rent_range": [item.get("listingMinRent"), item.get("listingMaxRent")],
              "specialties": item.get("listingSpecialties"), "has_specials": item.get("hasRentSpecials"),
+             # the building's own website, as Apartments.com lists it: a lead for direct intake (cleaned of
+             # tracking query strings and apply/tour paths; aggregator and social hosts dropped)
+             "website": clean_url(md.get("propertyWebsiteUri"))[0],
+             "management_company": (mgmt.get("name") if isinstance(mgmt, dict) else mgmt) or None,
+             "phone": md.get("phone") or item.get("phone"),
              "images": photos[:16]}
     url = item.get("url")
     out = []
