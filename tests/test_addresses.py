@@ -1,0 +1,19 @@
+from aptfinder.identity.addresses import check_parts, place_key_from
+from aptfinder.store.keys import place_key
+
+
+def test_parts_must_come_from_the_address():
+    a = "2270 W. El Camino Real Mountain View, CA 94040"
+    p = check_parts({"number": "2270", "predirectional": "W.", "street_name": "El Camino Real",
+                     "street_type": None, "city": "Mountain View", "zip": "94040"}, a)
+    assert p == {"street": "2270 w el camino real", "city": "mountain view", "unit": None}
+    assert place_key_from(p, None) == place_key("2270 W El Camino Real, Mountain View, CA 94040", None, None, None)
+    assert check_parts({"number": "2272", "street_name": "El Camino Real"}, a) is None  # number not in the text
+    assert check_parts({"number": "2270", "street_name": "Camino Real Ave"}, a) is None  # 'ave' not in the text
+
+
+def test_a_city_not_written_in_the_address_is_dropped():
+    p = check_parts({"number": "850", "street_name": "Calderon", "street_type": "Ave", "city": "Mountain View"},
+                    "850 Calderon Ave")
+    assert p["city"] is None and place_key_from(p, "mountain view") == place_key_from(
+        {"street": "850 calderon ave", "city": "mountain view"}, None)

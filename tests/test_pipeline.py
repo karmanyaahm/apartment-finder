@@ -11,7 +11,7 @@ from aptfinder.store import append_annotation, connect
 from aptfinder.store.seed import seed_db
 from aptfinder.web.app import create_app
 
-STAGES = ["configure", "intake", "identity", "extract", "websites", "sites", "estimates", "anchors", "google",
+STAGES = ["configure", "intake", "identity", "duplicates", "extract", "websites", "sites", "estimates", "anchors", "google",
           "verify", "filter"]
 
 

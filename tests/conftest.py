@@ -10,6 +10,8 @@ from aptfinder.store import connect, init_db
 def example_config(monkeypatch):
     """Tests always read the committed config.example/, never a private config/."""
     monkeypatch.setattr(settings, "CONFIG_DIR", settings.ROOT / "config.example")
+    # nor the live address cache (identity/addresses.py): tests see the hand-written parser only
+    monkeypatch.setattr("aptfinder.identity.addresses.load_cache", lambda: {})
 
 
 @pytest.fixture

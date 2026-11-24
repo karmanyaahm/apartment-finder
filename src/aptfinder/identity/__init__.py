@@ -16,6 +16,21 @@ from ..store.keys import place_key, unit_key
 NEAR_M = 80.0
 NO_NEAR_MERGE = {"airbnb"}
 
+# address string -> parts read by Haiku and checked (identity/addresses.py); loaded by run()
+_ADDRESS_PARTS: dict = {}
+
+
+def _address_place_key(address: str | None, city: str | None) -> str | None:
+    """The building key for an address: from its cached Haiku parts when they passed the checks, else the parser.
+    Both use the same formula, so a clean address keeps its key either way."""
+    parts = _ADDRESS_PARTS.get(address) if address else None
+    if parts and not parts.get("fallback"):
+        from .addresses import place_key_from
+
+        if (k := place_key_from(parts, city)):
+            return k
+    return place_key(address, city, None, None)
+
 
 def stay_key(pk: str, row: sqlite3.Row | dict) -> str | None:
     """A furnished short stay rented by a third party (Blueground, an unnamed operator in its listing template,
@@ -49,7 +64,7 @@ def _unit(pk: str, row: sqlite3.Row | dict) -> str:
 
 def decide(row: sqlite3.Row | dict) -> tuple[str, str, str, str] | None:
     """(rule, place_key, unit_key, reason) for one listing, or None when nothing identifies it."""
-    pk = place_key(row["address"], row["city"], None, None)
+    pk = _address_place_key(row["address"], row["city"])
     if pk and (sk := stay_key(pk, row)):
         return ("addr_stay", sk, _unit(sk, row),
                 f"third-party stay ({row['operator'] or row['source']}) at {row['address']!r}")
@@ -98,6 +113,10 @@ def _near_address(decisions: dict, rows: list) -> None:
 
 
 def run(conn: sqlite3.Connection) -> dict[str, int]:
+    global _ADDRESS_PARTS
+    from .addresses import load_cache
+
+    _ADDRESS_PARTS = load_cache()
     rows = conn.execute(
         "SELECT source, source_id, address, unit, city, floor_plan, property_name, kind, lat, lon, beds, price, term, "
         "operator "
