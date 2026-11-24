@@ -124,3 +124,21 @@ def test_observation_roundtrip_of_parsed(conn):
                        query_checkin=p.query_checkin, query_checkout=p.query_checkout)
     row = conn.execute("SELECT private_bath, price_month FROM listings").fetchone()
     assert row["private_bath"] == 1 and row["price_month"] == 2814
+
+
+def test_furnished_text_and_blueground_units_are_short_stays():
+    from aptfinder.intake.lease import furnished_from_text
+
+    assert furnished_from_text("Spacious unfurnished 2BR") is False
+    assert furnished_from_text("elegantly furnished apartment") is True
+    assert furnished_from_text("in-unit laundry") is None
+    assert furnished_from_text("looking for an unfurnished lease? upgrade to furnished living") is None
+    single = {"listingId": "99nmck6", "listingName": "", "listingAddress": "1600 Villa St", "listingCity": "Mountain View",
+              "listingState": "CA", "listingZip": "94041", "location": {}, "propertyType": "ApartmentUnitForRent",
+              "models": [], "rentals": [{"RentalKey": "k", "Beds": 1, "Baths": 1, "Rent": 2460, "MinLeaseTerm": 1,
+                                          "Description": "Were you looking for an unfurnished lease? ... (ID #SFO1141)"}]}
+    (p,) = ADAPTERS["apartments_com"].parse(single, {})
+    assert p.data.furnished is True and p.data.term == "short" and p.data.operator == "Blueground"
+    plain = {**single, "rentals": [{**single["rentals"][0], "MinLeaseTerm": 12, "Description": "unfurnished home"}]}
+    (q,) = ADAPTERS["apartments_com"].parse(plain, {})
+    assert q.data.furnished is False and q.data.term == "long" and q.data.operator is None

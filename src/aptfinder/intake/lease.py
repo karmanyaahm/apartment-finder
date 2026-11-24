@@ -31,6 +31,16 @@ def _first_num(text: Any) -> float | None:
     return float(m.group(0).replace(",", "")) if m else None
 
 
+def furnished_from_text(text: str | None) -> bool | None:
+    """True / False when the text says so, None otherwise. 'unfurnished' is not 'furnished'."""
+    t = (text or "").lower()
+    neg = bool(re.search(r"\bunfurnished\b|\bnot furnished\b", t))
+    pos = bool(re.search(r"(?<!un)\bfurnished\b", t))
+    if neg and pos:  # e.g. Blueground: "looking for an unfurnished lease? ... upgrade to furnished living"
+        return None
+    return False if neg else (True if pos else None)
+
+
 def _avail(text: str | None, ref: date | None = None) -> str | None:
     """'now' / 'Now' -> today; 'dec 13' / 'Dec. 13' -> next such date; ISO stays ISO."""
     if not text:
@@ -278,14 +288,21 @@ def apartments2_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed]
         kind = {"SingleFamily": "house", "Townhouse": "townhome", "Condo": "apartment"}.get(ptype, "apartment")
         for r in item.get("rentals") or []:
             desc = r.get("Description") or ""
+            operator = "Blueground" if ("blueground" in desc.lower() or re.search(r"\(ID #SFO\d+\)", desc)) else None
+            # Blueground only rents furnished homes; its text also advertises against "unfurnished leases"
+            furnished = True if operator == "Blueground" else furnished_from_text(desc)
+            # furnished monthly rentals (Blueground: 1-12 month stays) are short-term stays, not leases
+            short = bool(furnished) and (r.get("MinLeaseTerm") or 12) <= 3
             out.append(Parsed(
                 source_id=f"{pid}:r:{r.get('RentalKey')}", url=url, price=money(r.get("Rent")), price_basis="month",
-                data=ObservationData(**{**base, "kind": kind, "property_name": item.get("listingName") or None},
+                data=ObservationData(**{**base, "kind": kind, "property_name": item.get("listingName") or None,
+                                        "term": "short" if short else "long",
+                                        "operator": operator or base.get("operator")},
                                      unit=r.get("UnitNumber") or None, beds=r.get("Beds"), baths=r.get("Baths"),
                                      sqft=_first_num(r.get("SquareFeet")),
                                      available_from=_avail(r.get("AvailableDate") or r.get("AvailableDateText")),
                                      description=desc[:3000] or None,
-                                     furnished=True if "furnished" in desc.lower() else None,
+                                     furnished=furnished,
                                      extra={**extra, "property_type": ptype, "min_lease_months": r.get("MinLeaseTerm"),
                                             "max_lease_months": r.get("MaxLeaseTerm")})))
     return out
