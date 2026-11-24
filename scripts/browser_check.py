@@ -37,6 +37,11 @@ with sync_playwright() as p:
     time.sleep(0.5)
     page.screenshot(path=f"{OUT}/2_drawer.png", full_page=False)
     page.locator("#drawer").screenshot(path=f"{OUT}/2b_drawer_full.png")
+    for i, frac in enumerate((0.45, 1.0)):
+        page.evaluate(f"d => d.scrollTop = d.scrollHeight * {frac}", page.locator("#drawer").element_handle())
+        time.sleep(0.3)
+        page.locator("#drawer").screenshot(path=f"{OUT}/2c_drawer_lower{i}.png")
+    page.evaluate("d => d.scrollTop = 0", page.locator("#drawer").element_handle())
     # rate overall 4
     page.locator('#drawer .attr[data-attr=overall] button[data-rate="4"]').click()
     time.sleep(1)

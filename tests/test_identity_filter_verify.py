@@ -160,9 +160,42 @@ def test_sample_even_across_sources_and_repeatable(conn):
 def test_trips_sampled_by_provider_mode(conn):
     for i in range(4):
         append_trip(conn, f"p{i}", DOWNTOWN, "bike", 5 + i, 1000, [], None, "google")
-    append_trip(conn, "p0", DOWNTOWN, "walk", 20, 1000, [], None, "estimate")
+    append_trip(conn, "p0", DOWNTOWN, "walk", 20, 1000, [], None, "google")
+    append_trip(conn, "p0", DOWNTOWN, "drive", 9, 1000, [], None, "estimate")
     q = sample_queue(conn, seed=1)
-    assert {i["provider"] + i["mode"] for i in q[:2]} == {"googlebike", "estimatewalk"}
+    assert {i["provider"] + i["mode"] for i in q[:2]} == {"googlebike", "googlewalk"}
+    assert all(i["provider"] != "estimate" for i in q)  # straight-line guesses are never sampled
+
+
+def test_check_state_survives_new_runs_until_value_changes(conn):
+    def run(price, baths, day):
+        r = start_run(conn, "intake", "zillow")
+        a = append_observation(conn, r, "zillow", "1", {"address": "49 Showers Dr, Mountain View", "beds": 3,
+                               "baths": baths}, price=price, price_basis="month",
+                               observed_at=f"2026-11-0{day}T00:00:00+00:00")
+        b = append_observation(conn, r, "apartments", "9", {"address": "49 Showers Dr, Mountain View",
+                               "beds": 3, "baths": 2.5}, price=5400, price_basis="month",
+                               observed_at=f"2026-11-0{day}T00:00:00+00:00")
+        identity.run(conn)
+        return a, b
+
+    a, b = run(5000, 2, 1)
+    for oid, f, v in ((a, "baths", 2), (b, "baths", 2.5), (a, "price", 5000), (b, "price", 5400)):
+        append_check(conn, "user", "conflict", f, "correct", observation_id=oid, stored_value=v)
+    assert conflict_queue(conn) == []
+    assert not [i for i in sample_queue(conn, include_trips=False)]
+    # run 2, nothing changed: checks still current, queues stay empty, accuracy not double counted
+    run(5000, 2, 2)
+    assert conflict_queue(conn) == []
+    assert not sample_queue(conn, include_trips=False)
+    a2, _ = run(5000, 2, 3)
+    append_check(conn, "user", "sample", "price", "correct", observation_id=a2, stored_value=5000)
+    assert accuracy(conn)[("zillow", "price")]["n"] == 1
+    # run 4, zillow's baths change: that fact is unchecked again, conflict and sample entries return
+    run(5000, 3, 4)
+    q = conflict_queue(conn)
+    assert len(q) == 1 and q[0]["fields"] == ["baths"]
+    assert [i["source"] for i in sample_queue(conn, include_trips=False)] == ["zillow"]
 
 
 def test_conflict_detection_and_resolution(conn):

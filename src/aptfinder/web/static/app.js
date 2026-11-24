@@ -263,7 +263,7 @@ function nearestBlock(d) {
   return entries.map(([k, list]) => {
     const [set, mode] = k.split("|");
     const label = S.meta.point_sets[set]?.label || set;
-    return `<div class="small"><b>${esc(label)}</b> (${esc(mode)}): ${list.map((x) => `${esc(x.point)} ${x.provider === "estimate" ? "~" : ""}${num(x.minutes)}m`).join(", ")}</div>`;
+    return `<div class="small"><b>${esc(label)}</b> (${esc(mode)}): ${list.map((x) => `${esc(x.point)} ${x.provider === "estimate" ? "~" : ""}${num(x.minutes)} min`).join(", ")}</div>`;
   }).join("");
 }
 

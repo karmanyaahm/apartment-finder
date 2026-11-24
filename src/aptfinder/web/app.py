@@ -153,11 +153,11 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
         with lock:
             res = evaluate_all(conn)
             trips = best_trips(conn).get(place_key, {})
-        checks: dict[int, dict[str, str]] = {}
         out_listings = []
         for l in listings:
-            for c in q("SELECT field, verdict FROM checks WHERE observation_id = ? ORDER BY id", (l["obs_id"],)):
-                checks.setdefault(l["obs_id"], {})[c["field"]] = c["verdict"]
+            checks = {c["field"]: c["verdict"] for c in q(
+                "SELECT field, verdict FROM current_checks WHERE source = ? AND source_id = ?",
+                (l["source"], l["source_id"]))}
             history = q("SELECT observed_at, price, price_basis, query_checkin, query_checkout, "
                         "json_extract(data, '$.available_from') AS available_from, content_hash "
                         "FROM observations WHERE source = ? AND source_id = ? ORDER BY observed_at, id",
@@ -172,7 +172,7 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
                 "active": l["active"], "n_obs": l["n_obs"],
                 "fields": {f: l.get(f) for f in LISTING_FIELDS},
                 "overridden": (l["overridden"] or "").split(",") if l["overridden"] else [],
-                "checks": checks.get(l["obs_id"], {}),
+                "checks": checks,
                 "media": json.loads(l["media"]) if l.get("media") else [],
                 "history": history, "data": json.loads(l["data"]), "raw": raw,
                 "goals": goal_results,

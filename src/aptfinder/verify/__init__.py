@@ -25,15 +25,20 @@ def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
 
 
 def accuracy(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
-    """{(source, field): {correct, n, acc, lo, hi}}; cannot_tell is excluded. Only the latest check per
-    observation and field counts. Trips are keyed as ('trip:<provider>:<mode>', 'minutes')."""
+    """{(source, field): {correct, n, acc, lo, hi}}; cannot_tell is excluded. One vote per distinct fact:
+    the latest check per (listing, field, checked value), so re-checking an unchanged value in a later
+    run does not count twice, while a value the source later changed is a new fact.
+    Trips are keyed as ('trip:<provider>:<mode>', 'minutes')."""
     rows = conn.execute("""
-        SELECT COALESCE(o.source, 'trip:' || t.provider || ':' || t.mode) AS src, c.field, c.verdict
-        FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY observation_id, trip_id, field ORDER BY id DESC) rn
-              FROM checks) c
-        LEFT JOIN observations o ON o.id = c.observation_id
-        LEFT JOIN trips t ON t.id = c.trip_id
-        WHERE c.rn = 1 AND c.verdict != 'cannot_tell'
+        SELECT src, field, verdict FROM (
+            SELECT COALESCE(o.source, 'trip:' || t.provider || ':' || t.mode) AS src, c.field, c.verdict,
+                   ROW_NUMBER() OVER (PARTITION BY
+                       COALESCE(o.source || '|' || o.source_id, 'trip|' || c.trip_id), c.field, c.stored_value
+                       ORDER BY c.id DESC) AS rn
+            FROM checks c
+            LEFT JOIN observations o ON o.id = c.observation_id
+            LEFT JOIN trips t ON t.id = c.trip_id
+        ) WHERE rn = 1 AND verdict != 'cannot_tell'
     """).fetchall()
     tally: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
     for r in rows:
@@ -51,8 +56,12 @@ def low_accuracy(acc: dict, min_samples: int, min_accuracy: float) -> set[tuple[
     return {key for key, a in acc.items() if a["n"] >= min_samples and a["acc"] < min_accuracy}
 
 
-def _checked_obs(conn: sqlite3.Connection) -> set[int]:
-    return {r[0] for r in conn.execute("SELECT DISTINCT observation_id FROM checks WHERE observation_id IS NOT NULL")}
+def current_checks(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, str]]:
+    """(source, source_id) -> {field: verdict} for checks still valid against the latest observation."""
+    out: dict[tuple[str, str], dict[str, str]] = defaultdict(dict)
+    for r in conn.execute("SELECT source, source_id, field, verdict FROM current_checks"):
+        out[(r["source"], r["source_id"])][r["field"]] = r["verdict"]
+    return out
 
 
 def _checked_trips(conn: sqlite3.Connection) -> set[int]:
@@ -76,17 +85,24 @@ def _round_robin(groups: dict[str, list[Any]], seed: int) -> list[Any]:
 
 def sample_queue(conn: sqlite3.Connection, seed: int = 0, include_trips: bool = True) -> list[dict[str, Any]]:
     """Unchecked items drawn evenly across sources (round robin), repeatable for a given seed.
-    Listings are grouped by source; trips by provider and mode."""
-    checked = _checked_obs(conn)
+    Listings are grouped by source; routed trips by provider and mode. Straight-line estimates are
+    never sampled: they are labelled guesses, and checking them by hand measures nothing."""
+    checked = current_checks(conn)
+    ever: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for r in conn.execute("SELECT DISTINCT o.source, o.source_id, c.field FROM checks c "
+                          "JOIN observations o ON o.id = c.observation_id"):
+        ever[(r["source"], r["source_id"])].add(r["field"])
     groups: dict[str, list[Any]] = defaultdict(list)
     for r in conn.execute("SELECT source, source_id, obs_id, place_key FROM listings ORDER BY source, source_id"):
-        if r["obs_id"] not in checked:
+        key = (r["source"], r["source_id"])
+        # in the queue if never checked, or if a field that was checked has since changed
+        if key not in ever or not ever[key] <= set(checked.get(key, {})):
             groups[r["source"]].append({"kind": "listing", "source": r["source"], "source_id": r["source_id"],
                                         "obs_id": r["obs_id"], "place_key": r["place_key"]})
     if include_trips:
         tchecked = _checked_trips(conn)
         for r in conn.execute("SELECT id, place_key, point_id, mode, provider FROM trips "
-                              "WHERE minutes IS NOT NULL ORDER BY id"):
+                              "WHERE minutes IS NOT NULL AND provider != 'estimate' ORDER BY id"):
             if r["id"] not in tchecked:
                 groups[f"trip:{r['provider']}:{r['mode']}"].append(
                     {"kind": "trip", "trip_id": r["id"], "place_key": r["place_key"], "point_id": r["point_id"],
@@ -104,12 +120,11 @@ def _differs(field: str, a: Any, b: Any) -> bool:
 
 def conflict_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Units with listings from more than one source that disagree on a field. A conflict drops out
-    once every disagreeing field has been checked on every listing's latest observation."""
+    once every disagreeing field has a current check on every listing (see the current_checks view)."""
     by_unit: dict[str, list[sqlite3.Row]] = defaultdict(list)
     for r in conn.execute("SELECT * FROM listings WHERE unit_key IS NOT NULL"):
         by_unit[r["unit_key"]].append(r)
-    checked = {(r[0], r[1]) for r in conn.execute(
-        "SELECT observation_id, field FROM checks WHERE observation_id IS NOT NULL")}
+    checked = current_checks(conn)
     out = []
     for uk, rows in sorted(by_unit.items()):
         if len({r["source"] for r in rows}) < 2:
@@ -119,7 +134,7 @@ def conflict_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             vals = [r[f] for r in rows]
             if any(_differs(f, a, b) for i, a in enumerate(vals) for b in vals[i + 1:]):
                 cf = CHECK_FIELD.get(f, f)
-                if not all((r["obs_id"], cf) in checked for r in rows):
+                if not all(cf in checked.get((r["source"], r["source_id"]), {}) for r in rows):
                     fields.append(f)
         if fields:
             out.append({"kind": "conflict", "unit_key": uk, "place_key": rows[0]["place_key"], "fields": fields,

@@ -38,7 +38,7 @@ Triggers reject UPDATE and DELETE on every log table. The only exception: a `run
 - `observations`: id, run_id, observed_at, source, source_id, url, content_hash, price, price_basis (`month`, `night`, `week`, `stay`), query_checkin, query_checkout, `data` JSON, raw_path. **One row per listing per run, always**, so "seen in run N" is a fact in the table and a taken-down listing is distinguishable from an unchanged one. `content_hash` is the hash of the normalized parsed fields plus query dates (not the raw payload, whose image URLs expire); history views collapse consecutive rows with the same hash.
 - `links`: id, ts, author (rule name or `user`), source, source_id, place_key, unit_key, reason. "This listing is this place." The current link for a listing is the newest `user` row if any, else the newest rule row; identity appends a rule row only when its decision differs from the current rule link.
 - `trips`: id, computed_at, place_key, point_id (`set:name`), mode, minutes, distance_m, `legs` JSON, depart_assumption, provider.
-- `checks`: id, ts, author, queue (`sample`, `conflict`, or `adhoc` for a check made from the detail drawer), observation_id or trip_id, field, stored_value (JSON), verdict (`correct`, `wrong`, `cannot_tell`), true_value (JSON), note. A `wrong` verdict's `true_value` overrides the scraped value in the derived views **only while the listing's latest observed value still equals `stored_value`**; once the source changes the value, the correction lapses and the new value is shown.
+- `checks`: id, ts, author, queue (`sample`, `conflict`, or `adhoc`, reserved for a future check control in the detail drawer; today checks are made in verify mode), observation_id or trip_id, field, stored_value (JSON), verdict (`correct`, `wrong`, `cannot_tell`), true_value (JSON), note. A `wrong` verdict's `true_value` overrides the scraped value in the derived views **only while the listing's latest observed value still equals `stored_value`**; once the source changes the value, the correction lapses and the new value is shown. The same rule defines *check state* everywhere (view `current_checks`: latest check per listing and field, valid while the value is unchanged), so a new run with the same value keeps a listing checked, and a changed value puts it back in the queues.
 - `annotations`: id, ts, author, entity_type, entity_key, attribute (free text: `gym`, `walk_to_caltrain`, `living_room`, `overall`, `status`, ...), goal_id (optional), rating (1 to 5, optional), comment. The latest row per entity, attribute and author is the current value. Only the web app writes here.
 
 ### `observations.data` JSON
@@ -47,7 +47,7 @@ Parsed fields, all optional: `address`, `unit`, `city`, `zip`, `lat`, `lon`, `be
 
 ### Derived views (never written)
 
-`latest_obs`, `current_links`, `listings`, `units`, `places`, `operators`, `field_overrides` and `obs_history` are SQL views over the logs, created by `store.init_db`. They are views, not tables, so there is no second copy to drift. If they get slow, they become materialized tables rebuilt by one `derive` command with no change to readers.
+`latest_obs`, `current_links`, `listings`, `units`, `places`, `operators`, `current_checks`, `field_overrides` and `obs_history` are SQL views over the logs, created by `store.init_db`. They are views, not tables, so there is no second copy to drift. If they get slow, they become materialized tables rebuilt by one `derive` command with no change to readers.
 
 Goal outcomes are not stored at all: `filter.evaluate` computes them at read time from the views, `trips` and `config/goals.toml`, so changing a threshold takes effect on the next page load.
 
@@ -120,7 +120,7 @@ All code lives in one Python package `aptfinder` (`src/aptfinder/`), one subpack
 
 ### verify (`aptf-verify`)
 - Goal: measure data accuracy instead of assuming it.
-- Sample queue: seeded random sample drawn evenly across sources (round robin, not proportional to volume); computed trips sampled the same way by provider and mode.
+- Sample queue: seeded random sample drawn evenly across sources (round robin, not proportional to volume); computed trips sampled the same way by provider and mode. Straight-line estimate trips are never sampled. A listing leaves the queue once checked and returns if a checked field's value changes. Accuracy counts one vote per (listing, field, checked value).
 - Conflict queue: units with more than one source disagreeing on price, beds, baths, sqft or availability. Shown first.
 - Outputs: `checks` rows from the dashboard; accuracy per source and field with sample size and a Wilson 95% interval; cross-source agreement rate.
 - A source whose measured accuracy on a field is below the threshold in `goals.toml` (with at least the minimum sample) gets that field treated as `needs_check` by the filter.
@@ -199,4 +199,6 @@ Each entry: date, decision, why, what it replaced.
 - **2026-11-23: Place outcome = best listing outcome (pass, then needs_check, then fail; ties broken by nice-to-have count).** A building with one qualifying unit qualifies.
 - **2026-11-23: User ratings of an amenity attribute override the scraped amenity list** (rating 3 or more counts as having it). The user's direct knowledge beats the listing text.
 - **2026-11-23: Dashboard checked in headless Chrome (Playwright, system Chrome) instead of the DevTools MCP**, which failed to attach. Verified: satellite tiles load, goal switching, drawer, rating and comment append, verify mode shows the seeded conflict first, reload with the network off renders all places and cached tiles, no horizontal scroll at 390 px, no console errors.
+- **2026-11-23: Check state keyed by listing and field, not by observation id (`current_checks` view).** With one observation per run, keying on the observation id would have reset every check, conflict resolution and ✓ mark on the next run and double counted re-checks. Replaced: queues and drawer marks keyed on the latest `obs_id`.
+- **2026-11-23: Estimate trips are excluded from the sample queue.** They are labelled guesses; hand-checking them measures nothing (the benchmark already shows their drive error).
 - **2026-11-23: Rengstorff industrial complex replaced by "Rengstorff industrial complex", 1000 N Rengstorff Ave, Mountain View.** User's choice: a stand-in for an office that may go in the industrial area south of the Googleplex. Replaced: the Rengstorff industrial complex target.

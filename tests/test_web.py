@@ -71,7 +71,12 @@ def test_verify_flow_conflict_first_and_override(client):
 
 
 def test_trip_check(client):
-    c, _ = client
+    c, db = client
+    from aptfinder.store import append_trip
+
+    conn = connect(db)
+    pk = c.get("/api/places").json()[0]["place_key"]
+    append_trip(conn, pk, "commute_targets:Meta HQ", "drive", 14.0, 9000, [], "weekday_0830", "google")
     skip = 0
     d = c.get("/api/verify/next").json()
     while d["item"]["kind"] != "trip":
@@ -83,7 +88,7 @@ def test_trip_check(client):
                                     "verdict": "wrong", "true_value": "12"})
     assert r.status_code == 200
     acc = c.get("/api/status").json()["accuracy"]
-    assert any(a["source"].startswith("trip:estimate:") and a["n"] == 1 for a in acc)
+    assert any(a["source"] == "trip:google:drive" and a["n"] == 1 for a in acc)
 
 
 def test_split(client):

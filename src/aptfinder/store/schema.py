@@ -139,7 +139,7 @@ def _overridden(field: str) -> str:
 PLAIN_DATA_FIELDS = ["city", "zip", "floor_plan", "property_name", "operator", "title"]
 
 VIEW_NAMES = [
-    "operators", "places", "units", "listings", "listings_base", "field_overrides",
+    "operators", "places", "units", "listings", "listings_base", "field_overrides", "current_checks",
     "obs_history", "current_links", "latest_obs", "listing_stats", "source_last_full_run",
 ]
 
@@ -184,18 +184,24 @@ SELECT * FROM (
     FROM observations o
 ) WHERE prev_hash IS NULL OR prev_hash != content_hash;
 
--- Latest check per listing and field; a 'wrong' verdict overrides only while the listing's latest
--- observed value still equals the value that was checked.
-CREATE VIEW field_overrides AS
-SELECT x.source, x.source_id, x.field, x.true_value, x.check_id
+-- The hand-check state of each listing and field, independent of which run's observation was checked:
+-- the latest check per listing and field, valid only while the listing's latest observed value still
+-- equals the value that was checked. A new run with the same value keeps it; a changed value drops it.
+CREATE VIEW current_checks AS
+SELECT x.source, x.source_id, x.field, x.verdict, x.stored_value, x.true_value, x.check_id,
+       x.observation_id, x.queue, x.ts
 FROM (
     SELECT o.source, o.source_id, c.field, c.verdict, c.stored_value, c.true_value, c.id AS check_id,
+           c.observation_id, c.queue, c.ts,
            ROW_NUMBER() OVER (PARTITION BY o.source, o.source_id, c.field ORDER BY c.id DESC) AS rn
     FROM checks c JOIN observations o ON o.id = c.observation_id
 ) x
 JOIN latest_obs lo ON lo.source = x.source AND lo.source_id = x.source_id
-WHERE x.rn = 1 AND x.verdict = 'wrong'
-  AND json_extract(x.stored_value, '$') IS {current_value};
+WHERE x.rn = 1 AND json_extract(x.stored_value, '$') IS {current_value};
+
+-- A current 'wrong' check overrides the scraped value.
+CREATE VIEW field_overrides AS
+SELECT source, source_id, field, true_value, check_id FROM current_checks WHERE verdict = 'wrong';
 
 CREATE VIEW listings_base AS
 SELECT lo.source, lo.source_id, lo.url, lo.id AS obs_id, lo.run_id, lo.observed_at,
