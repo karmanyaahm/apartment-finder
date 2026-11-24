@@ -67,7 +67,7 @@ def compute_for_place(conn: sqlite3.Connection, commute: Commute, place: sqlite3
         return 0
     paid = commute.source.name != "estimate"
     points = load_points()
-    n = 0
+    pending = []  # written after all routing: the commute cache writes via its own connection
     for set_name, cfg in load_point_sets().items():
         if sets and set_name not in sets:
             continue
@@ -89,11 +89,12 @@ def compute_for_place(conn: sqlite3.Connection, commute: Commute, place: sqlite3
                 prev = latest_trip(conn, place["place_key"], p.id, mode, t.provider)
                 if prev is not None and prev["minutes"] == t.minutes:
                     continue
-                append_trip(conn, place["place_key"], p.id, mode, t.minutes, t.distance_m, t.legs,
-                            t.depart, t.provider)  # commit now: the commute cache writes via its own connection
-                n += 1
+                pending.append((p.id, mode, t))
+    for point_id, mode, t in pending:
+        append_trip(conn, place["place_key"], point_id, mode, t.minutes, t.distance_m, t.legs, t.depart,
+                    t.provider, commit=False)
     conn.commit()
-    return n
+    return len(pending)
 
 
 def compute_all(conn: sqlite3.Connection, commute: Commute, place_keys: list[str] | None = None,
