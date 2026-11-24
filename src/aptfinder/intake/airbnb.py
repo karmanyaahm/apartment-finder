@@ -13,9 +13,15 @@ BASIS = {"month": "month", "night": "night", "week": "week", "total": "stay"}
 
 
 def build_input(cfg: dict[str, Any], city: str) -> dict[str, Any]:
-    return {"locationQueries": [f"{city}, California"], "checkIn": cfg["checkin"], "checkOut": cfg["checkout"],
-            "adults": cfg.get("adults", 1), "currency": "USD", "locale": "en-US",
-            "maxResults": cfg.get("max_items", 200)}
+    common = {"checkIn": cfg["checkin"], "checkOut": cfg["checkout"], "adults": cfg.get("adults", 1),
+              "currency": "USD", "locale": "en-US", "maxResults": cfg.get("max_items", 200)}
+    if cfg.get("box"):  # map-box search; `city` is only a run label. The URL needs a place slug (an empty
+        # /s/homes path returned 0 items on 2026-11-24); map bounds still restrict the results.
+        s, w, n, e = cfg["box"]
+        url = (f"https://www.airbnb.com/s/Palo-Alto--CA/homes?ne_lat={n}&ne_lng={e}&sw_lat={s}&sw_lng={w}&search_by_map=true"
+               f"&zoom=13&checkin={cfg['checkin']}&checkout={cfg['checkout']}&adults={cfg.get('adults', 1)}")
+        return {**common, "startUrls": [{"url": url}]}
+    return {**common, "locationQueries": [f"{city}, California"]}
 
 
 def _num(pattern: str, text: str) -> float | None:

@@ -36,12 +36,17 @@ def _client() -> httpx.Client:
 
 
 def run_actor(actor: str, run_input: dict[str, Any], *, max_items: int, max_charge_usd: float,
-              timeout_s: int = 900, poll_s: int = 10) -> ActorRun:
+              timeout_s: int = 900, poll_s: int = 10, memory_mb: int | None = None) -> ActorRun:
     actor_path = actor.replace("/", "~")
     with _client() as c:
-        r = c.post(f"/acts/{actor_path}/runs", json=run_input,
-                   params={"maxItems": max_items, "maxTotalChargeUsd": max_charge_usd})
-        r.raise_for_status()
+        params: dict[str, Any] = {"maxItems": max_items, "maxTotalChargeUsd": max_charge_usd}
+        if memory_mb:
+            params["memory"] = memory_mb
+        r = c.post(f"/acts/{actor_path}/runs", json=run_input, params=params)
+        if r.status_code >= 400:
+            err = r.json().get("error", {}) if r.headers.get("content-type", "").startswith("application/json") else {}
+            raise RuntimeError(f"Apify refused to start {actor}: HTTP {r.status_code} "
+                               f"{err.get('type', '')}: {err.get('message', r.text[:300])}")
         run = r.json()["data"]
         deadline = time.time() + timeout_s
         while run["status"] in ("READY", "RUNNING") and time.time() < deadline:

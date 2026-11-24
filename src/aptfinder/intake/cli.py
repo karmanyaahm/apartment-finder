@@ -27,7 +27,18 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--max-items", type=int)
     r.add_argument("--max-usd", type=float)
     r.add_argument("--no-trips", action="store_true", help="skip free straight-line trip estimates")
+    rp = sub.add_parser("reparse", help="re-ingest a saved raw file with the current parser (no new scrape)")
+    rp.add_argument("source", choices=sorted(ADAPTERS))
+    rp.add_argument("raw_file")
     args = ap.parse_args(argv)
+
+    if args.cmd == "reparse":
+        from .base import reparse
+
+        conn = connect(args.db)
+        init_db(conn)
+        print(json.dumps(reparse(conn, ADAPTERS[args.source], args.raw_file), indent=1))
+        return
 
     cities = load_area().cities if args.all_cities else args.city
     if not cities:
