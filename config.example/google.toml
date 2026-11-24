@@ -8,3 +8,13 @@ monthly_call_cap = 5000
 monthly_cap_by_mode = { bike = 900 }
 price_per_1000_usd = 5.0
 free_calls_per_month = 10000
+
+# Google Places API (New) Text Search (`aptf-intake run google_places`), metered separately from Routes in
+# `api_calls` (provider `places`), one row per request (each page of results is a request).
+# Pricing read 2026-11-24 from developers.google.com/maps/billing-and-pricing/pricing and .../places/web-service/data-fields:
+#   our field mask includes websiteUri, nationalPhoneNumber, rating, userRatingCount -> Text Search Enterprise SKU,
+#   $35 / 1,000 requests, first 1,000 a month free (Pro alone: $32 / 1,000, 5,000 free; IDs only: free, unlimited).
+# The cap stays under the Enterprise free tier.
+places_monthly_call_cap = 900
+places_price_per_1000_usd = 35.0
+places_free_calls_per_month = 1000

@@ -26,6 +26,7 @@ class ActorRun:
     cost_usd: float | None
     charged_events: dict[str, int] | None
     console_url: str
+    truncated: bool = False  # the source said there was more than it returned (e.g. Places' 60-result limit)
 
 
 def _client() -> httpx.Client:

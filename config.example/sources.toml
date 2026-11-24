@@ -39,3 +39,13 @@ radius_miles = 1.5      # search radius around each ZIP's centre
 [direct]
 actor = "apify/cheerio-scraper"   # generic scraper; platform parsers in intake/direct.py, sites in direct_sites.toml
 max_items = 5                     # one page per site
+
+[google_places]
+# Official API, not Apify (see config/google.toml for pricing and the monthly cap). One search per station box
+# (`[[box]]` in areas.toml) and query; strict type filtering keeps only places Google types as that kind.
+max_calls = 30           # per run (each page of up to 20 results is one call; 3 pages max per query)
+max_items = 200          # per box
+queries = [
+  { text = "apartments", type = "apartment_complex" },
+  { text = "apartments", type = "apartment_building" },
+]

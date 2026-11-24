@@ -43,6 +43,12 @@ class Adapter:
     area_of: Callable[[dict[str, Any], list[str]], str | None] | None = None
     # an actor's "nothing found" marker item (e.g. memo23 {"noResults": true}): the area is empty, not broken
     is_empty_marker: Callable[[dict[str, Any]], bool] | None = None
+    # items left out on purpose (e.g. a permanently closed place): counted as `skipped`, not `unparsed`
+    skip: Callable[[dict[str, Any]], bool] | None = None
+    # a source that is not an Apify actor (Google Places) or needs a step after the actor (portfolio's Haiku read):
+    # fetch(source config, areas, max items per area, max usd, conn) -> ActorRun, replacing run_actor
+    fetch: Callable[..., ActorRun] | None = None
+    apify: bool = True  # False: no Apify credit check (the source is metered elsewhere)
 
 
 @dataclass
@@ -131,7 +137,7 @@ def run_source(conn: sqlite3.Connection, adapter: Adapter, areas: list[Area], *,
     if bad:
         raise ValueError(f"{adapter.name} runs on {adapter.area_kind} areas, not {bad}")
     ids = [a.id for a in areas]
-    run_id = start_run(conn, "intake", adapter.name, {"actor": cfg["actor"], "area_kind": adapter.area_kind,
+    run_id = start_run(conn, "intake", adapter.name, {"actor": cfg.get("actor"), "area_kind": adapter.area_kind,
                                                      "areas": ids, "scope": "partial", "max_usd": cap,
                                                      "max_items_per_area": cap_each})
     counts: dict[str, Any] = {"items": 0, "observations": 0, "new": 0, "changed": 0, "unparsed": 0, "areas": {}}
@@ -147,7 +153,7 @@ def run_source(conn: sqlite3.Connection, adapter: Adapter, areas: list[Area], *,
         for group in groups:
             gids = [a.id for a in group]
             remaining = cap - spent
-            account = account_remaining_usd()
+            account = account_remaining_usd() if adapter.apify else None
             reserve = sources["spend"].get("reserve_usd", 0.0)
             if account is not None:
                 remaining = min(remaining, account - reserve)
@@ -159,14 +165,17 @@ def run_source(conn: sqlite3.Connection, adapter: Adapter, areas: list[Area], *,
                     counts["areas"][aid] = {"items": 0, "state": "not_reached"}
                 continue
             # the per-area cap also goes into the actor's own input (its maxResults etc.), not only Apify's maxItems
-            run: ActorRun = run_actor(cfg["actor"], adapter.build_input({**cfg, "max_items": cap_each}, group),
-                                      max_items=cap_each * len(group), max_charge_usd=remaining,
-                                      memory_mb=cfg.get("memory_mb"))
-            cost = event_cost(cfg["actor"], run.charged_events) or (run.cost_usd or 0.0)
+            if adapter.fetch:
+                run = adapter.fetch({**cfg, "max_items": cap_each}, group, cap_each, remaining, conn)
+            else:
+                run = run_actor(cfg["actor"], adapter.build_input({**cfg, "max_items": cap_each}, group),
+                                max_items=cap_each * len(group), max_charge_usd=remaining,
+                                memory_mb=cfg.get("memory_mb"))
+            cost = (event_cost(cfg["actor"], run.charged_events) if cfg.get("actor") else 0.0) or (run.cost_usd or 0.0)
             spent += cost
             console = run.console_url
             raw_path = raw_dir / f"run{run_id}_{re.sub(r'[^A-Za-z0-9]+', '_', '-'.join(gids))[:60]}.json"
-            raw_path.write_text(json.dumps({"actor": cfg["actor"], "areas": gids, "apify_run": run.run_id,
+            raw_path.write_text(json.dumps({"actor": cfg.get("actor"), "areas": gids, "apify_run": run.run_id,
                                             "status": run.status, "cost_usd": cost, "items": run.items}))
             ok = run.status == "SUCCEEDED"
             if not ok:
@@ -177,6 +186,9 @@ def run_source(conn: sqlite3.Connection, adapter: Adapter, areas: list[Area], *,
             markers = [i for i in run.items if adapter.is_empty_marker and adapter.is_empty_marker(i)]
             run.items = [i for i in run.items if i not in markers]
             counts["empty_markers"] = counts.get("empty_markers", 0) + len(markers)
+            skipped = [i for i in run.items if adapter.skip and adapter.skip(i)]
+            run.items = [i for i in run.items if not (adapter.skip and adapter.skip(i))]
+            counts["skipped"] = counts.get("skipped", 0) + len(skipped)
             for item in run.items:
                 # area_of (when the adapter has one) decides even for single-area runs: an Airbnb box search
                 # returns listings outside the box, which must not be tagged with (or retired by) that box
@@ -189,7 +201,7 @@ def run_source(conn: sqlite3.Connection, adapter: Adapter, areas: list[Area], *,
                     continue
                 for q in p if isinstance(p, list) else [p]:
                     parsed.append((q, aid))
-            exhausted = len(run.items) < cap_each * len(group)
+            exhausted = len(run.items) + len(skipped) < cap_each * len(group) and not run.truncated
             states = _area_states(per_area, cap_each, exhausted, ok)
             if adapter.name in RANKED_SOURCES:
                 states = {a: ("partial" if s == "complete" else s) for a, s in states.items()}
@@ -305,9 +317,12 @@ def reparse(conn: sqlite3.Connection, adapter: Adapter, raw_file: str) -> dict[s
     cfg = load_sources()[adapter.name]
     run_id = start_run(conn, "intake", adapter.name, {"reparse_of": raw_file, "scope": "targeted",
                                                      "actor": blob.get("actor"), "cities": [blob.get("city")]})
-    counts = {"items": len(blob["items"]), "observations": 0, "unparsed": 0}
+    counts = {"items": len(blob["items"]), "observations": 0, "unparsed": 0, "skipped": 0}
     seen: set[str] = set()
     for item in blob["items"]:
+        if adapter.skip and adapter.skip(item):
+            counts["skipped"] += 1
+            continue
         p = adapter.parse(item, cfg)
         if not p:
             counts["unparsed"] += 1
