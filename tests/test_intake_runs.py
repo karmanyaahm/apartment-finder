@@ -152,3 +152,14 @@ def test_unparseable_run_is_not_coverage_and_empty_marker_is_empty(conn, fake, m
     plan["items"] = lambda inp: [{"noResults": True}]
     res = run_source(conn, adapter, ZIPS[1:2])
     assert res.counts["areas"]["94041"]["state"] == "empty" and done(coverage(conn), "fake", "94041")
+
+
+def test_cli_max_items_reaches_actor_input(conn, fake, monkeypatch):
+    calls, plan = fake
+    seen = {}
+    adapter = Adapter(name="fake", parse=item_parser,
+                      build_input=lambda cfg, areas: seen.setdefault("cap", cfg["max_items"]) and {"areas": [a.id for a in areas]})
+    register(monkeypatch, adapter)
+    plan["items"] = lambda inp: []
+    run_source(conn, adapter, ZIPS[:1], max_items=7)
+    assert seen["cap"] == 7

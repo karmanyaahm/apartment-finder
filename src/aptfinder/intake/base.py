@@ -158,7 +158,8 @@ def run_source(conn: sqlite3.Connection, adapter: Adapter, areas: list[Area], *,
                 for aid in gids:
                     counts["areas"][aid] = {"items": 0, "state": "not_reached"}
                 continue
-            run: ActorRun = run_actor(cfg["actor"], adapter.build_input(cfg, group),
+            # the per-area cap also goes into the actor's own input (its maxResults etc.), not only Apify's maxItems
+            run: ActorRun = run_actor(cfg["actor"], adapter.build_input({**cfg, "max_items": cap_each}, group),
                                       max_items=cap_each * len(group), max_charge_usd=remaining,
                                       memory_mb=cfg.get("memory_mb"))
             cost = event_cost(cfg["actor"], run.charged_events) or (run.cost_usd or 0.0)
