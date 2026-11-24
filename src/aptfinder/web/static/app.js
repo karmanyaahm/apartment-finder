@@ -460,12 +460,16 @@ async function renderVerify() {
       <table><tr><th>minutes</th><td>${num(t.minutes)}</td><td>${vbtns({ trip_id: t.id, field: "minutes", queue: "sample" })}</td></tr></table>${nav}`;
   } else {
     const obs = d.observations;
-    const title = it.kind === "conflict" ? `Sources disagree on ${d.fields.join(", ")}` : `Sample check: ${esc(obs[0].source)}`;
+    const title = it.kind === "conflict" ? (it.text ? `${obs[0].source} and its own text disagree on ${d.fields.join(", ")}`
+      : `Sources disagree on ${d.fields.join(", ")}`) : `Sample check: ${esc(obs[0].source)}`;
+    // a text conflict: the listing's text (read by Haiku) as a second column; check the stored value against the page
+    const textTh = it.text ? `<th>${esc(it.text_label)}<br><span class="muted">read from the listing text</span></th>` : "";
+    const textTd = (f) => (it.text ? `<td>${fmtField(f, it.text[f])}</td>` : "");
     body.innerHTML = `${head}<h2>${esc(title)}</h2>
       <p>${esc(d.place?.property_name || "")} ${esc(d.place?.address || it.place_key || "")}</p>
       <p class="small">Open each listing, then mark every stored value: ✓ correct, ✗ wrong (type the true value), ? cannot tell.</p>
-      <div class="scroll-x"><table><tr><th>field</th>${obs.map((o) => `<th><a href="${esc(o.url)}" target="_blank" rel="noopener noreferrer">${esc(o.source)} ↗</a><br><span class="muted">${esc(o.observed_at.slice(0, 10))}</span></th>`).join("")}</tr>
-      ${d.fields.map((f) => `<tr><th>${esc(f)}</th>${obs.map((o) => `<td>${fmtField(f, o.fields[f])}<br>${vbtns({ observation_id: o.obs_id, field: f, queue: it.kind === "conflict" ? "conflict" : "sample" })}</td>`).join("")}</tr>`).join("")}
+      <div class="scroll-x"><table><tr><th>field</th>${obs.map((o) => `<th><a href="${esc(o.url)}" target="_blank" rel="noopener noreferrer">${esc(o.source)} ↗</a><br><span class="muted">${esc(o.observed_at.slice(0, 10))}</span></th>`).join("")}${textTh}</tr>
+      ${d.fields.map((f) => `<tr><th>${esc(f)}</th>${obs.map((o) => `<td>${fmtField(f, o.fields[f])}<br>${vbtns({ observation_id: o.obs_id, field: f, queue: it.kind === "conflict" ? "conflict" : "sample" })}</td>`).join("")}${textTd(f)}</tr>`).join("")}
       </table></div>${nav}`;
   }
   $$(".vbtns", body).forEach(wireVbtns);

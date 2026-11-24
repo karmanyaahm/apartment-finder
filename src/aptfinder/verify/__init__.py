@@ -144,6 +144,24 @@ def conflict_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return out
 
 
+def text_conflict_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Listings whose text (read by `aptf-intake extract`) contradicts a value the source stated: the source's
+    value is stored, the text's is shown beside it as '<source> (text)'. Drops out once each such field has a
+    current check on the listing."""
+    checked = current_checks(conn)
+    out = []
+    for r in conn.execute("SELECT source, source_id, obs_id, place_key, "
+                          "json_extract(data, '$.extra.extracted.conflicts') AS c FROM listings "
+                          "WHERE json_extract(data, '$.extra.extracted.conflicts') IS NOT NULL ORDER BY source_id"):
+        text = json.loads(r["c"])
+        open_ = {f: v for f, v in text.items() if f not in checked.get((r["source"], r["source_id"]), {})}
+        if open_:
+            out.append({"kind": "conflict", "unit_key": None, "place_key": r["place_key"], "fields": sorted(open_),
+                        "text": open_, "text_label": f"{r['source']} (text)",
+                        "listings": [{"source": r["source"], "source_id": r["source_id"], "obs_id": r["obs_id"]}]})
+    return out
+
+
 def agreement(conn: sqlite3.Connection) -> dict[str, dict[str, int]]:
     """Cross-source agreement per field over multi-source units (free signal, no manual work)."""
     by_unit: dict[str, list[sqlite3.Row]] = defaultdict(list)

@@ -81,6 +81,16 @@ def check_answer(ans: dict[str, Any], text: str) -> dict[str, Any]:
     return out
 
 
+# stored fields a text reading can contradict (all checkable in Verify)
+CONFLICT_FIELDS = ("address", "furnished", "private_bath")
+
+
+def _disagrees(field: str, stated: Any, text: Any) -> bool:
+    if field == "address":  # same street part = same address, however the rest is written
+        return _norm(str(stated).split(",")[0]) != _norm(str(text).split(",")[0])
+    return stated != text
+
+
 def argv(model: str, max_usd: float) -> list[str]:
     """Trimmed like `discover.claude_argv`, with no tools at all."""
     return ["claude", "-p", "--system-prompt", SYSTEM, "--tools", "", "--strict-mcp-config", "--setting-sources",
@@ -165,8 +175,12 @@ def extract(conn, source: str, *, limit: int, batch: int, model: str, max_usd: f
         facts = check_answer(cache[t["hash"]], f"{t['title']}\n{t['text']}")
         d = dict(t["data"])
         extra = dict(d.get("extra") or {})
-        got = []
+        got, conflicts = [], {}
         for k, v in facts.items():
+            stated = d.get(k)
+            if k in CONFLICT_FIELDS and stated is not None and _disagrees(k, stated, v):
+                conflicts[k] = v  # the source's value stays; the text's goes to the Verify conflicts
+                continue
             if k in ("website", "min_stay_days", "utilities_included"):
                 if extra.get(k) is None:
                     extra[k] = v
@@ -176,7 +190,8 @@ def extract(conn, source: str, *, limit: int, batch: int, model: str, max_usd: f
                     v = f"{v}, {str(d['city']).title()}"  # "850 Calderon Ave" -> "..., Mountain View"
                 d[k] = v
                 got.append(k)
-        extra["extracted"] = {"fields": got, "model": model, "run_id": run}
+        extra["extracted"] = {"fields": got, "model": model, "run_id": run, **({"conflicts": conflicts}
+                                                                                if conflicts else {})}
         d["extra"] = extra
         r = t["row"]
         append_observation(conn, run, source, r["source_id"], ObservationData(**d), url=r["url"], price=r["price"],

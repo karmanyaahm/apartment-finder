@@ -40,3 +40,18 @@ def test_a_checked_redirect_site_is_scraped_at_its_final_url(tmp_path):
         '[[check]]\nid = "highland"\nok = true\nfinal_url = "https://highlandgardensapts.com/"\nplatform = "photos"\n')
     s = load_sites(tmp_path)["highland"]
     assert s["url"] == "https://highlandgardensapts.com/" and s["link"].startswith("https://www.apt-rental.com/")
+
+
+def test_text_that_contradicts_the_source_goes_to_verify(conn):
+    from aptfinder import verify
+    from aptfinder.intake.extract import _disagrees
+    from aptfinder.store import append_observation, start_run
+
+    assert _disagrees("furnished", False, True) and not _disagrees("address", "231 Grant Ave", "231 Grant Ave, Palo Alto")
+    run = start_run(conn, "extract", "craigslist", {})
+    append_observation(conn, run, "craigslist", "7990155240", {
+        "address": "231 Grant Ave, Palo Alto", "furnished": False,
+        "extra": {"extracted": {"fields": [], "model": "haiku", "run_id": run, "conflicts": {"furnished": True}}}})
+    (item,) = verify.text_conflict_queue(conn)
+    assert item["fields"] == ["furnished"] and item["text"] == {"furnished": True}
+    assert item["text_label"] == "craigslist (text)" and item["listings"][0]["source_id"] == "7990155240"

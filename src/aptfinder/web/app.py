@@ -356,7 +356,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         with lock:
             acc = verify.accuracy(conn)
             agree = verify.agreement(conn)
-            n_conflict = len(verify.conflict_queue(conn))
+            n_conflict = len(verify.conflict_queue(conn)) + len(verify.text_conflict_queue(conn))
             n_sample = len(verify.sample_queue(conn))
         from ..trips import google_usage
 
@@ -375,14 +375,15 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
     def _obs_fields(obs_id: int) -> dict[str, Any]:
         r = q("SELECT * FROM observations WHERE id = ?", (obs_id,))[0]
         data = json.loads(r["data"])
-        out = {f: (r["price"] if f == "price" else data.get(f)) for f in load_goals().verify.sample_fields}
+        fields = list(dict.fromkeys([*load_goals().verify.sample_fields, *CHECKABLE_FIELDS]))
+        out = {f: (r["price"] if f == "price" else data.get(f)) for f in fields}
         return {"obs_id": obs_id, "source": r["source"], "source_id": r["source_id"], "url": r["url"],
                 "observed_at": r["observed_at"], "fields": out, "lat": data.get("lat"), "lon": data.get("lon")}
 
     @app.get("/api/verify/next")
     def verify_next(seed: int = 0, skip: int = 0) -> dict[str, Any]:
         with lock:
-            items = verify.conflict_queue(conn) + verify.sample_queue(conn, seed)
+            items = verify.conflict_queue(conn) + verify.text_conflict_queue(conn) + verify.sample_queue(conn, seed)
         if skip >= len(items):
             return {"done": True, "remaining": 0}
         item = items[skip]
