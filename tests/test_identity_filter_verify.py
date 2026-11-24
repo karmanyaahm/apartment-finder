@@ -240,3 +240,12 @@ def test_coordinate_only_listing_joins_nearby_address_place(conn):
     assert pk["c3"] != pk["h1"] and pk["b1"] != pk["a1"]
     rule = conn.execute("SELECT author FROM current_links WHERE source_id='c1'").fetchone()[0]
     assert rule == "geo_near_address"
+
+
+def test_routing_needs_follow_goal_rules():
+    from aptfinder.filter import routing_needs
+
+    needs = routing_needs({"temp", "lease"})
+    assert (DOWNTOWN, "bike") in needs and (DOWNTOWN, "transit") in needs
+    assert ("caltrain_stations", "walk") in needs
+    assert all(t != "commute_targets:Meta HQ" for t, _ in needs)

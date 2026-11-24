@@ -94,6 +94,11 @@ def main() -> None:
         "# `samples` = how many grid points fell in that ZIP (small numbers mean the zone only clips it).",
         "",
         "chunks = [" + ", ".join(f'"{c}"' for c, _ in CHUNKS) + "]",
+        "# Chunks being worked now. Places outside them are marked TODO in the dashboard and get no paid routing.",
+        f'active = ["{CHUNKS[0][0]}"]',
+        f"radius_km = {RADIUS_KM:.2f}",
+        "chunk_stations = { " + ", ".join(f'{c} = [' + ", ".join(f'"{n}"' for n in ns) + "]" for c, ns in CHUNKS)
+        + " }",
         "",
     ]
     for code, z in sorted(zips.items(), key=lambda kv: (min(order[c] for c in kv[1]["chunks"]), -kv[1]["n"])):

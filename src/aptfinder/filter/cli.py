@@ -27,7 +27,7 @@ def main(argv: list[str] | None = None) -> None:
             if args.status and r["status"] != args.status:
                 continue
             print(f"  {r['status']:12s} {addr.get(pk, pk)[:60]}  [{r['source']}]")
-            for s, text in r["reasons"]:
+            for s, text, *_ in r["reasons"]:
                 if s != "pass":
                     print(f"      {s}: {text}")
 

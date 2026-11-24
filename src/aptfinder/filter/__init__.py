@@ -64,11 +64,12 @@ def evaluate_all(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> di
             t = trips.get(pk, {})
             ctx = Ctx(trips=t, nearest=nearest_by_set(t), annotations=anns.get(pk, {}),
                       untrusted={f for (src, f) in low if src == row["source"]})
-            reasons = [evaluate(r, row, ctx) for r in goal.rules]
-            nice = [evaluate(r, row, ctx) for r in goal.nice]
-            res = {"status": combine([s for s, _ in reasons]), "reasons": reasons, "nice": nice,
-                   "nice_score": sum(s == PASS for s, _ in nice), "source": row["source"],
-                   "source_id": row["source_id"], "unit_key": row["unit_key"]}
+            # (status, text, rule type): the type lets callers set aside commute rules (routing_candidates)
+            reasons = [(*evaluate(r, row, ctx), r["type"]) for r in goal.rules]
+            nice = [(*evaluate(r, row, ctx), r["type"]) for r in goal.nice]
+            res = {"status": combine([s for s, _, _ in reasons]), "reasons": reasons, "nice": nice,
+                   "nice_score": sum(s == PASS for s, _, _ in nice), "source": row["source"],
+                   "source_id": row["source_id"], "unit_key": row["unit_key"], "place_key": pk}
             lres[(row["source"], row["source_id"])] = res
             if pk is None:
                 continue
@@ -80,4 +81,35 @@ def evaluate_all(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> di
     return out
 
 
-__all__ = ["evaluate_all", "best_trips", "nearest_by_set", "PASS", "FAIL", "CHECK"]
+COMMUTE_RULES = {"commute_any", "near"}
+
+
+def routing_candidates(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> dict[str, set[str]]:
+    """place_key -> goals for which some listing there can still pass on everything except commute rules:
+    the only places worth paid routing (a 2-bedroom over budget fails whatever its commute)."""
+    res = evaluate_all(conn, cfg)
+    out: dict[str, set[str]] = {}
+    for gid, listings in res["listings"].items():
+        for r in listings.values():
+            pk = r.get("place_key")
+            if pk and not any(s == FAIL and t not in COMMUTE_RULES for s, _, t in r["reasons"]):
+                out.setdefault(pk, set()).add(gid)
+    return out
+
+
+def routing_needs(goal_ids: set[str], cfg: GoalsConfig | None = None) -> list[tuple[str, str]]:
+    """(target, mode) pairs the given goals' commute rules read. target is a point id ('set:name') for
+    commute_any, or a bare set name for `near` rules (routed to that set's k nearest points)."""
+    cfg = cfg or load_goals()
+    out: list[tuple[str, str]] = []
+    for gid in sorted(goal_ids):
+        g = cfg.goals[gid]
+        for r in g.rules + g.nice:
+            if r["type"] == "commute_any":
+                out += [(r["target"], o["mode"]) for o in r["options"]]
+            elif r["type"] == "near":
+                out.append((r["set"], r["mode"]))
+    return list(dict.fromkeys(out))
+
+
+__all__ = ["evaluate_all", "routing_candidates", "best_trips", "nearest_by_set", "PASS", "FAIL", "CHECK"]

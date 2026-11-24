@@ -124,7 +124,7 @@ def create_app(db_path: str | Path | None = None) -> FastAPI:
                 r = pres.get(pk)
                 if r:
                     goals[gid] = {"status": r["status"], "nice_score": r["nice_score"],
-                                  "reasons": [t for s, t in r["reasons"] if s != "pass"],
+                                  "reasons": [t for s, t, *_ in r["reasons"] if s != "pass"],
                                   "unit_key": r["unit_key"], "source": r["source"],
                                   "source_id": r["source_id"]}
             title = next((x["title"] for x in rows if x.get("title")), None)

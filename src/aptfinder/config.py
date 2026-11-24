@@ -31,6 +31,7 @@ class PointSetConfig(BaseModel):
     k: int = 3  # route to the k nearest points; 0 means every point in the set
     prefilter_km: float | None = None  # skip Google routing beyond this straight-line distance
     max_km: dict[str, float] = Field(default_factory=dict)  # per-mode straight-line limit for paid routing
+    paid: bool = True  # False: this set only ever gets free straight-line estimates
 
 
 class Goal(BaseModel):
