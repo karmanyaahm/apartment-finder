@@ -153,3 +153,27 @@ def test_metered_source_logs_and_enforces_monthly_caps(tmp_path, monkeypatch):
     use = trips.google_usage(src.meter)
     assert use["calls"] == 3 and use["by_mode"] == {"bike": 1, "walk": 1, "drive": 1}
     assert use["est_cost_usd"] == 0.01  # 1 call beyond 2 free at $5/1000 -> 0.005, rounded
+
+
+def test_auto_modes_limit_paid_routing_and_on_demand_routes_the_full_table(tmp_path):
+    """point_sets.toml `auto`: Google routes only the listed point/mode pairs by itself; on demand routes all."""
+    from aptfinder import trips
+    from aptfinder.config import load_point_sets, load_points
+    from aptfinder.store import connect, init_db
+
+    sets, points = load_point_sets(), load_points()
+    for name, cfg in sets.items():  # a misspelled point name would silently route nothing
+        assert set(cfg.auto or {}) <= {p.name for p in points.get(name, [])}, name
+    db = str(tmp_path / "a.db")
+    conn = connect(db)
+    init_db(conn)
+    src = FakeSource()
+    src.name = "google"
+    place = {"place_key": "p1", "lat": 37.44, "lon": -122.16}  # Palo Alto: every target within max_km
+    trips.compute_for_place(conn, trips.build_commute(db, src), place)
+    got = {(r[0].split(":", 1)[1], r[1]) for r in conn.execute("SELECT point_id, mode FROM trips")}
+    want = {(p, m) for p, ms in sets["commute_targets"].auto.items() for m in ms}
+    assert got == want
+    trips.compute_for_place(conn, trips.build_commute(db, src), place, on_demand=True)
+    modes = {r[0] for r in conn.execute("SELECT DISTINCT mode FROM trips WHERE point_id LIKE 'commute_targets:%'")}
+    assert {"walk", "bike", "drive"} <= modes

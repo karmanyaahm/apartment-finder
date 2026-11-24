@@ -100,11 +100,11 @@ def latest_trip(conn: sqlite3.Connection, place_key: str, point_id: str, mode: s
 
 
 def compute_for_place(conn: sqlite3.Connection, commute: Commute, place: sqlite3.Row | dict,
-                      on_demand: bool = False, sets: list[str] | None = None,
-                      needs: list[tuple[str, str]] | None = None) -> int:
+                      on_demand: bool = False, sets: list[str] | None = None) -> int:
     """Append trips for one place. Returns the number of new rows.
 
-    Paid providers respect each set's prefilter_km and per-mode max_km unless on_demand.
+    Paid providers respect each set's prefilter_km, per-mode max_km and `auto` (point -> modes) unless
+    on_demand, which routes the set's full `modes` table.
     A row is appended only when no trip exists for that place, point, mode and provider, or its
     minutes changed (the leg cache makes recomputation free; this keeps the log from growing)."""
     origin = (place["lat"], place["lon"])
@@ -122,18 +122,12 @@ def compute_for_place(conn: sqlite3.Connection, commute: Commute, place: sqlite3
         shortlist = sorted(pts, key=lambda p: haversine_m(origin, (p.lat, p.lon)))
         if cfg.k > 0:
             shortlist = shortlist[: cfg.k]
-        if needs is not None:  # only what the goals' commute rules read
-            wanted = {m for t, m in needs if t == set_name} | {m for t, m in needs if t.startswith(set_name + ":")}
-            if not wanted:
-                continue
         for p in shortlist:
-            if needs is not None and not any(t in (set_name, p.id) for t, _ in needs):
-                continue
             km = haversine_m(origin, (p.lat, p.lon)) / 1000
             if paid and not on_demand and cfg.prefilter_km is not None and km > cfg.prefilter_km:
                 continue
             for mode in cfg.modes:
-                if needs is not None and (p.id, mode) not in needs and (set_name, mode) not in needs:
+                if paid and not on_demand and cfg.auto is not None and mode not in cfg.auto.get(p.name, []):
                     continue
                 limit = cfg.max_km.get(mode)
                 if paid and not on_demand and limit is not None and km > limit:
@@ -151,8 +145,7 @@ def compute_for_place(conn: sqlite3.Connection, commute: Commute, place: sqlite3
 
 
 def compute_all(conn: sqlite3.Connection, commute: Commute, place_keys: list[str] | None = None,
-                on_demand: bool = False, needs_by_place: dict[str, list[tuple[str, str]]] | None = None
-                ) -> dict[str, Any]:
+                on_demand: bool = False) -> dict[str, Any]:
     # stay places (`<building>~<operator>`) share their building's trips (filter._Trips): never routed twice
     q = "SELECT place_key, lat, lon FROM places WHERE lat IS NOT NULL"
     places = conn.execute(q).fetchall()
@@ -165,8 +158,7 @@ def compute_all(conn: sqlite3.Connection, commute: Commute, place_keys: list[str
     total, done, error = 0, 0, None
     try:
         for p in places:
-            total += compute_for_place(conn, commute, p, on_demand=on_demand,
-                                       needs=(needs_by_place or {}).get(p["place_key"]) if needs_by_place else None)
+            total += compute_for_place(conn, commute, p, on_demand=on_demand)
             done += 1
     except SpendCapReached as e:
         error = str(e)
@@ -209,8 +201,6 @@ def main(argv: list[str] | None = None) -> None:
         from .areas import chunk_of, is_active
         from .filter import routing_candidates
 
-        from .filter import routing_needs
-
         cands = routing_candidates(conn)
         # a stay place (`<building>~<operator>`) is routed as its building, whose trips it reads
         # (or as itself when no listing makes the building a place)
@@ -220,10 +210,7 @@ def main(argv: list[str] | None = None) -> None:
             base = pk.split("~", 1)[0]
             merged.setdefault(base if base in located else pk, set()).update(goals)
         args.place = sorted(pk for pk in merged if pk in located and is_active(chunk_of(*located[pk])))
-        needs_by_place = {pk: routing_needs(merged[pk]) for pk in args.place}
-        print(f"{len(args.place)} candidate places in active chunks; routing only what their goals read")
-    else:
-        needs_by_place = None
+        print(f"{len(args.place)} candidate places in active chunks; routing the `auto` modes in point_sets.toml")
     if args.cmd == "compute" and args.dry_run:
         import shutil
         import tempfile
@@ -244,7 +231,7 @@ def main(argv: list[str] | None = None) -> None:
         dst.close()
         dry = connect(cache_copy)
         init_db(dry)
-        res = compute_all(dry, build_commute(cache_copy, Counting()), args.place, args.on_demand, needs_by_place)
+        res = compute_all(dry, build_commute(cache_copy, Counting()), args.place, args.on_demand)
         shutil.rmtree(tmp)
         print(json.dumps({"would_call": Counting.calls, "places": res["places"],
                           "google_usage_now": google_usage(conn)}, indent=1))
@@ -257,7 +244,7 @@ def main(argv: list[str] | None = None) -> None:
     from .store import finish_run, start_run
 
     run = start_run(conn, "commute", args.provider, {"places": args.place, "on_demand": args.on_demand})
-    res = compute_all(conn, commute, args.place, args.on_demand, needs_by_place)
+    res = compute_all(conn, commute, args.place, args.on_demand)
     calls = getattr(source, "calls", 0)
     finish_run(conn, run, "error" if res["error"] else "ok", {**res, "api_calls": calls},
                est_cost=round(calls * 0.005, 3) if args.provider == "google" else 0.0,

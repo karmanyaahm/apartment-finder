@@ -241,15 +241,6 @@ def test_coordinate_only_listing_joins_nearby_address_place(conn):
     assert rule == "geo_near_address"
 
 
-def test_routing_needs_follow_goal_rules():
-    from aptfinder.filter import routing_needs
-
-    needs = routing_needs({"temp", "lease"})
-    assert (DOWNTOWN, "bike") in needs and (DOWNTOWN, "transit") in needs
-    assert ("caltrain_stations", "walk") in needs
-    assert all(t != "commute_targets:Meta HQ" for t, _ in needs)
-
-
 def test_third_party_stay_is_its_own_place_with_the_buildings_trips():
     from aptfinder.filter import _Trips
     from aptfinder.identity import decide

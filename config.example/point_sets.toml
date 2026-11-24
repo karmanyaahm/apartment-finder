@@ -11,12 +11,21 @@ k = 0
 prefilter_km = 25
 # per-mode straight-line limits for paid routing (a 10 km walk is never useful)
 max_km = { walk = 4, bike = 15, transit = 25, drive = 25 }
+# `modes` above is the full table: every point by every mode, routed only on demand (the dashboard's
+# "Route with Google", `compute --on-demand`). `auto` is what Google routes by itself for candidate places
+# (`compute --candidates`): per point, only the modes worth paying for. Free estimates still cover everything.
+[commute_targets.auto]
+"Googleplex" = ["drive"]
+"Meta HQ" = ["drive"]
+"Downtown Palo Alto" = ["transit", "bike_train_bike"]
+"Rengstorff industrial complex" = ["transit", "bike_train_bike"]
 
 [caltrain_stations]
 label = "Caltrain"
 modes = ["walk"]
 k = 2
 prefilter_km = 4
+auto = {}   # station walks: estimate only (1.7 min mean error); Google on demand
 
 [grocery_chains]
 paid = false   # estimates are good enough for walking to groceries / bus stops

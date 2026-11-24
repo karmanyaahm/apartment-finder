@@ -112,19 +112,4 @@ def routing_candidates(conn: sqlite3.Connection, cfg: GoalsConfig | None = None)
     return out
 
 
-def routing_needs(goal_ids: set[str], cfg: GoalsConfig | None = None) -> list[tuple[str, str]]:
-    """(target, mode) pairs the given goals' commute rules read. target is a point id ('set:name') for
-    commute_any, or a bare set name for `near` rules (routed to that set's k nearest points)."""
-    cfg = cfg or load_goals()
-    out: list[tuple[str, str]] = []
-    for gid in sorted(goal_ids):
-        g = cfg.goals[gid]
-        for r in g.rules + g.nice:
-            if r["type"] == "commute_any":
-                out += [(r["target"], o["mode"]) for o in r["options"]]
-            elif r["type"] == "near":
-                out.append((r["set"], r["mode"]))
-    return list(dict.fromkeys(out))
-
-
 __all__ = ["evaluate_all", "routing_candidates", "best_trips", "nearest_by_set", "PASS", "FAIL", "CHECK"]

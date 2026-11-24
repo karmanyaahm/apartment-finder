@@ -32,6 +32,9 @@ class PointSetConfig(BaseModel):
     prefilter_km: float | None = None  # skip Google routing beyond this straight-line distance
     max_km: dict[str, float] = Field(default_factory=dict)  # per-mode straight-line limit for paid routing
     paid: bool = True  # False: this set only ever gets free straight-line estimates
+    # point name -> modes Google routes automatically (`compute`, `--candidates`). Missing: every mode in
+    # `modes`. `modes` itself is the full table, routed on demand (dashboard button, `--on-demand`).
+    auto: dict[str, list[str]] | None = None
 
 
 class Goal(BaseModel):
