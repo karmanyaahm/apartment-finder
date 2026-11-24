@@ -178,7 +178,9 @@ def run_source(conn: sqlite3.Connection, adapter: Adapter, areas: list[Area], *,
             run.items = [i for i in run.items if i not in markers]
             counts["empty_markers"] = counts.get("empty_markers", 0) + len(markers)
             for item in run.items:
-                aid = gids[0] if len(gids) == 1 else (adapter.area_of(item, gids) if adapter.area_of else None)
+                # area_of (when the adapter has one) decides even for single-area runs: an Airbnb box search
+                # returns listings outside the box, which must not be tagged with (or retired by) that box
+                aid = adapter.area_of(item, gids) if adapter.area_of else (gids[0] if len(gids) == 1 else None)
                 if aid in per_area:
                     per_area[aid] += 1
                 p = adapter.parse(item, cfg)

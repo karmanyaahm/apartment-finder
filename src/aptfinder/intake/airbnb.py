@@ -84,4 +84,20 @@ def parse(item: dict[str, Any], cfg: dict[str, Any]) -> Parsed | None:
                   query_checkout=cfg["checkout"] if item.get("isAvailable") else None)
 
 
-ADAPTER = Adapter(name="airbnb", build_input=build_input, parse=parse, area_kind="box")
+def area_of(item: dict[str, Any], ids: list[str]) -> str | None:
+    """The station box that actually contains the listing (searches spill outside the box)."""
+    from ..config import load_areas
+
+    co = item.get("coordinates") or {}
+    la, lo = co.get("latitude"), co.get("longitude")
+    if la is None or lo is None:
+        return None
+    for a in load_areas()[1]:
+        if a.kind == "box" and a.id in ids:
+            s, w, n, e = a.bbox
+            if s <= la <= n and w <= lo <= e:
+                return a.id
+    return None
+
+
+ADAPTER = Adapter(name="airbnb", build_input=build_input, parse=parse, area_kind="box", area_of=area_of)

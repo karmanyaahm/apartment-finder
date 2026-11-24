@@ -163,3 +163,15 @@ def test_cli_max_items_reaches_actor_input(conn, fake, monkeypatch):
     plan["items"] = lambda inp: []
     run_source(conn, adapter, ZIPS[:1], max_items=7)
     assert seen["cap"] == 7
+
+
+def test_area_of_overrides_single_area_tagging(conn, fake, monkeypatch):
+    calls, plan = fake
+    adapter = Adapter(name="fake", parse=item_parser, build_input=lambda cfg, areas: {"areas": [a.id for a in areas]},
+                      area_of=lambda item, ids: ids[0] if item["id"] == "in" else None)
+    register(monkeypatch, adapter)
+    plan["items"] = lambda inp: [{"id": "in"}, {"id": "out"}]
+    res = run_source(conn, adapter, ZIPS[:1])
+    assert res.counts["areas"]["94040"]["items"] == 1
+    tags = dict(conn.execute("SELECT source_id, json_extract(data, '$.extra.area') FROM observations").fetchall())
+    assert tags == {"in": "94040", "out": None}
