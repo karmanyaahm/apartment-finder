@@ -201,3 +201,14 @@ def test_address_without_comma_before_the_city_gets_the_same_key():
     assert parse_address(a) == {"street": "234 escuela ave", "unit": None, "city": "mountain view"}
     assert parse_address("273 Mountain View Ave, Mountain View, CA")["street"] == "273 mountain view ave"
     assert parse_address("400 Avenue A Apt 3, Palo Alto")["street"] == "400 ave a"  # 'Avenue' is the name here
+
+
+def test_address_city_beats_the_listing_city_field_and_unit_and_range_quirks():
+    from aptfinder.store.keys import place_key
+
+    k = lambda a, c=None: place_key(a, c, None, None)  # noqa: E731
+    assert k("1095 W El Camino Real , Sunnyvale, CA 94087", "mountain view") == k("1095 West El Camino Real, Sunnyvale, CA")
+    assert k("1870 California St, 11, Mountain View, CA") == k("1870 California St APT 11, Mountain View, CA")
+    assert k("881-881 E El Camino Real, Mountain View, CA") == k("881 E El Camino Real, Mountain View, CA")
+    assert k("4180-4190 Byron St, Palo Alto") != k("4180 Byron St, Palo Alto")  # a real range stays a range
+    assert k("850 Calderon Ave", "mountain view") == k("850 Calderon Ave, Mountain View, CA")  # city field as fallback

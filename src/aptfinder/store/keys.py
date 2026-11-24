@@ -40,16 +40,24 @@ def parse_address(address: str | None, city: str | None = None) -> dict[str, str
     Handles "Name, 123 Main St Apt 4, City, CA 94000 - notes" by taking the first comma part that
     starts with a street number as the street line and the following part as the city.
     """
+    # the city written in the address wins; the listing's own city field (e.g. a Craigslist area label) is only
+    # the fallback when the address has none
     result: dict[str, str | None] = {"street": None, "unit": None, "city": None}
-    if city:
-        result["city"] = _norm_tokens(city)
+    fallback_city = _norm_tokens(city) if city else None
     if not address:
+        result["city"] = fallback_city
         return result
     parts = [p.strip() for p in address.split(",")]
     idx = next((i for i, p in enumerate(parts) if re.match(r"^\d+[a-z]?\b", p, re.IGNORECASE)), None)
     if idx is None:
+        result["city"] = fallback_city
         return result
-    street = parts[idx]
+    # a unit in its own comma slot right after the street ("1870 California St, 11, Mountain View")
+    if idx + 2 < len(parts) and re.fullmatch(r"#?\s*[a-z]?\d{1,5}[a-z]?", parts[idx + 1], re.IGNORECASE):
+        result["unit"] = parts[idx + 1].lstrip("# ").lower()
+        parts = parts[:idx + 1] + parts[idx + 2:]
+    # "881-881 E El Camino Real": a range of one number is that number ("4180-4190" stays a range)
+    street = re.sub(r"^(\d+)-\1\b", r"\1", parts[idx])
     unit_match = UNIT_RE.search(street)
     if unit_match:
         result["unit"] = unit_match.group(1).lower()
@@ -69,6 +77,7 @@ def parse_address(address: str | None, city: str | None = None) -> dict[str, str
         cand = re.split(r"\s+-\s+", parts[idx + 1])[0]
         if not STATE_ZIP_RE.match(cand.strip()):
             result["city"] = _norm_tokens(cand)
+    result["city"] = result["city"] or fallback_city
     return result
 
 
