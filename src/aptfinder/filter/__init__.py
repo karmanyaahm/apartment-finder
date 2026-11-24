@@ -102,10 +102,12 @@ def evaluate_all(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> di
 COMMUTE_RULES = {"commute_any", "near"}
 
 
-def routing_candidates(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> dict[str, set[str]]:
+def routing_candidates(conn: sqlite3.Connection, cfg: GoalsConfig | None = None,
+                       res: dict[str, Any] | None = None) -> dict[str, set[str]]:
     """place_key -> goals for which some listing there can still pass on everything except commute rules:
-    the only places worth paid routing (a 2-bedroom over budget fails whatever its commute)."""
-    res = evaluate_all(conn, cfg)
+    the only places worth paid routing (a 2-bedroom over budget fails whatever its commute). `res`: an
+    `evaluate_all` result already in hand."""
+    res = res or evaluate_all(conn, cfg)
     out: dict[str, set[str]] = {}
     for gid, listings in res["listings"].items():
         for r in listings.values():

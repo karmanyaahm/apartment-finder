@@ -383,6 +383,7 @@ async function openPlace(pk) {
     ${S.meta.google ? `<p class="muted small">Routes every target by every mode (about 20 Google calls). Google is metered and capped per month (config/google.toml); when the cap is reached routing stops and the straight-line estimates stay.</p>` : ""}${matrixTable(d)}
     <h3>Nearby</h3>${nearestBlock(d)}
     <h3>Your notes & ratings</h3>${attributesBlock(d, pk)}
+    ${pipelineBlock(d.pipeline)}
   `;
   $("#drawer").classList.remove("hidden");
   wireDrawer(pk);
@@ -529,6 +530,86 @@ function wireVbtns(box) {
   input.addEventListener("keydown", (e) => { if (e.key === "Enter") send("wrong", input.value); });
 }
 
+/* ---------------------------------------------------------------- pipeline status */
+const STATE_LABEL = { done: "done", stale: "stale", partial: "partial", todo: "todo", blocked: "blocked" };
+const stChip = (st, text) => `<span class="chip st-${esc(st)}">${esc(text || STATE_LABEL[st] || st)}</span>`;
+const day = (ts) => (ts ? esc(String(ts).slice(0, 10)) : '<span class="muted">never</span>');
+const cmdList = (cmds) => (cmds || []).map((c) => `<code>${esc(c)}</code>`).join("");
+
+async function openPipeline() {
+  $("#pipeline").classList.remove("hidden");
+  const body = $("#pipeline-body");
+  body.innerHTML = '<p class="muted">Loading…</p>';
+  let d;
+  try { d = await api("api/pipeline"); } catch (e) { body.innerHTML = `<p class="reason fail">Failed: ${esc(e.message)}</p>`; return; }
+  const stages = `<div class="scroll-x"><table class="stages">
+    <tr><th>stage</th><th>state</th><th>where it stands</th><th>last run</th><th>cost</th><th>to run the rest</th></tr>
+    ${d.stages.map((s) => `<tr><td><b>${esc(s.label)}</b></td><td>${stChip(s.state)}</td><td>${esc(s.summary)}</td>
+      <td class="nowrap">${s.last_run !== undefined ? day(s.last_run) : ""}</td>
+      <td class="nowrap">${s.cost ? "$" + (+s.cost).toFixed(2) : ""}</td>
+      <td class="cmd">${cmdList(s.commands) || '<span class="muted">nothing left</span>'}</td></tr>`).join("")}
+  </table></div>`;
+  // intake matrix: chunk x area x source, one table per area kind
+  const matrix = Object.entries(d.intake.sources).filter(([, ss]) => ss.length).map(([kind, ss]) => {
+    const rows = d.intake.rows.filter((r) => r.kind === kind);
+    if (!rows.length) return "";
+    const cell = (c) => stChip(c.state, c.state === "todo" ? "todo" : c.empty ? "empty"
+      : `${c.state === "partial" ? "partial " : ""}${(c.date || "").slice(5)}`);
+    return `<div class="scroll-x"><table>
+      <tr><th>chunk</th><th>${esc(kind)} area</th>${ss.map((s) => `<th>${esc(s)}</th>`).join("")}</tr>
+      ${rows.map((r) => `<tr class="${r.active ? "" : "off"}"><td>${esc(r.chunk)}${r.active ? "" : ' <span class="muted small">(not active)</span>'}</td><td>${esc(r.area)}</td>
+        ${ss.map((s) => `<td class="cell" title="${r.cells[s].run_id ? `run ${r.cells[s].run_id}` : "never covered"}">${cell(r.cells[s])}</td>`).join("")}</tr>`).join("")}
+    </table></div>`;
+  }).join("");
+  const runs = `<div class="scroll-x"><table><tr><th>source</th><th>area kind</th><th>runs</th><th>last ok run</th><th>last status</th><th>cost</th></tr>
+    ${d.intake.runs.map((r) => `<tr><td>${esc(r.source)}</td><td>${esc(r.area_kind)}</td><td>${r.runs}</td><td>${day(r.last_run)}</td>
+      <td>${r.last_status ? `<span class="${r.last_status === "error" ? "reason fail" : ""}" title="${esc(r.last_error || "")}">${esc(r.last_status)}</span>` : ""}</td>
+      <td>$${(+r.cost).toFixed(2)}</td></tr>`).join("")}</table></div>`;
+  const web = d.stages.find((s) => s.id === "websites");
+  const models = Object.entries(web.no_site_models).map(([m, n]) => `${m}: ${n}`).join(", ");
+  const webTable = `<div class="scroll-x"><table><tr><th>website state</th><th>active chunks</th><th>all</th></tr>
+    ${Object.entries(web.labels).map(([k, label]) => `<tr><td>${esc(label)}${k === "no_site" && models ? ` <span class="muted">(${esc(models)})</span>` : ""}</td>
+      <td>${web.active_by_state[k] || 0}</td><td>${web.by_state[k] || 0}</td></tr>`).join("")}
+    <tr><td><b>named buildings</b></td><td><b>${web.active_named}</b></td><td><b>${web.named}</b></td></tr></table></div>`;
+  const sites = `<div class="scroll-x"><table><tr><th>site</th><th>chunk</th><th>state</th><th>last scrape</th><th>rows</th><th>priced</th><th>re-scrape</th></tr>
+    ${d.sites.map((s) => `<tr class="${s.active ? "" : "off"}"><td><a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.name)}</a>${s.discovered ? ' <span class="muted small">(found by search)</span>' : ""}</td>
+      <td>${esc(s.chunk || "?")}</td><td>${stChip(s.state, s.state === "todo" ? "never" : s.state)}</td><td>${day(s.last)}</td>
+      <td>${s.rows}${s.info_only ? ' <span class="muted small">photos/link only</span>' : ""}</td><td>${s.priced}</td><td class="cmd"><code>${esc(s.command)}</code></td></tr>`).join("")}
+  </table></div>`;
+  const anchors = d.stages.find((s) => s.id === "anchors").anchors;
+  const stuck = d.stuck_runs.length ? `<p class="reason fail small">Runs never closed (still 'running'): ${d.stuck_runs.map((r) => `#${r.id} ${esc(r.component)}/${esc(r.source || "")} ${day(r.started_at)}`).join(", ")}</p>` : "";
+  body.innerHTML = `<div class="pipe">
+    <h2>Pipeline status</h2>
+    <p class="muted small">Computed now from the logs (${esc(d.now.slice(0, 16).replace("T", " "))} UTC). Active chunks: ${esc(d.active.join(", ") || "none")}; headline states count only those. Stale = older than ${d.stale_days} days.
+      ${["done", "partial", "stale", "todo", "blocked"].map((s) => stChip(s)).join(" ")}</p>
+    ${stuck}${stages}
+    <h3>Intake coverage (aggregators)</h3>${matrix}
+    <details><summary>Runs per source</summary>${runs}</details>
+    <h3>Websites of named buildings</h3>${webTable}
+    <h3>Own-site scrapes (${d.sites.length})</h3>${sites}
+    <details><summary>Station → target bike legs (${anchors.filter((a) => a.routed).length}/${anchors.length} routed)</summary>
+      <div class="scroll-x"><table><tr><th>station</th><th>target</th><th>routed</th></tr>
+      ${anchors.map((a) => `<tr><td>${esc(a.station)}</td><td>${esc(a.target)}</td><td>${a.routed ? "Google" : '<span class="muted">estimate</span>'}</td></tr>`).join("")}</table></div></details>
+  </div>`;
+}
+
+function pipelineBlock(ps) {
+  if (!ps) return "";
+  const rows = ps.sources.map((s) => `<tr><td>${esc(s.source === "direct" ? "own site" : s.source)}</td><td>${day(s.seen)}</td>
+    <td>${stChip(s.state, s.state === "stale" ? `stale (>${ps.stale_days} d)` : "fresh")}</td>
+    <td>${s.active}/${s.listings} active</td>
+    <td>${s.text_read == null ? "" : s.text_read ? `text read by Haiku (${s.text_read}/${s.listings})` : '<span class="muted">text not read yet</span>'}</td></tr>`).join("");
+  const w = ps.website;
+  const t = ps.trips;
+  const commute = !Object.keys(t).length ? '<span class="muted">no commute times yet</span>'
+    : t.google ? `Google routes to ${t.google} point${t.google === 1 ? "" : "s"}, straight-line estimates for ${t.estimate || 0}`
+    : `straight-line estimates only (${t.estimate} points)`;
+  return `<h3>Pipeline</h3><div class="pipe-place">
+    <div class="scroll-x"><table><tr><th>source</th><th>last seen</th><th></th><th>listings</th><th>text</th></tr>${rows}</table></div>
+    <p class="small">Own website: <b>${esc(w.label)}</b>${w.url ? ` · <a href="${esc(w.url)}" target="_blank" rel="noopener noreferrer">${esc(w.url)}</a>` : ""} <span class="muted">${esc(w.detail || "")}</span></p>
+    <p class="small">Commute: ${commute}</p></div>`;
+}
+
 /* ---------------------------------------------------------------- status strip */
 async function loadStatus() {
   const s = await api("api/status");
@@ -586,9 +667,10 @@ async function boot() {
     if (b.dataset.close === "verify") { S.verifySkip = 0; loadPlaces(); }
   }));
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { $("#drawer").classList.add("hidden"); $("#verify").classList.add("hidden"); }
+    if (e.key === "Escape") { ["#drawer", "#verify", "#pipeline"].forEach((id) => $(id).classList.add("hidden")); }
   });
   $("#verify-btn").addEventListener("click", openVerify);
+  $("#pipeline-btn").addEventListener("click", openPipeline);
   S.points = await api("api/points");
   buildPointLayers();
   await Promise.all([loadPlaces(), loadStatus()]);

@@ -121,3 +121,15 @@ details > summary { cursor: pointer; margin: 14px 0 6px; font-size: 14px; text-t
 td.nowrap { white-space: nowrap; }
 .related { margin: 6px 0; padding: 6px 8px; border: 1px dashed var(--line); border-radius: 6px; }
 .tip-photo { display: block; width: 240px; height: 150px; object-fit: cover; border-radius: 4px; margin-bottom: 4px; }
+
+/* pipeline status */
+.panel.wide { width: min(1100px, 100%); }
+.chip.st-done { background: var(--pass); color: #fff; } .chip.st-stale { background: var(--check); color: #111; }
+.chip.st-partial { background: var(--accent); color: #fff; } .chip.st-blocked { background: var(--bad); color: #fff; }
+.chip.st-todo { background: transparent; border: 1px dashed var(--muted); color: var(--muted); }
+.stages td.cmd code { display: block; font-size: 11px; white-space: nowrap; }
+.stages td { min-width: 6em; }
+.pipe h3 { margin: 18px 0 6px; font-size: 14px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.pipe tr.off td { opacity: .5; }
+.pipe td.cell { white-space: nowrap; }
+.pipe-place td { white-space: nowrap; }

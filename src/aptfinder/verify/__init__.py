@@ -14,6 +14,15 @@ CONFLICT_FIELDS = ["price_month", "beds", "baths", "sqft", "available_from"]
 CHECK_FIELD = {"price_month": "price"}
 
 
+def is_named_building(property_name: str | None, address: str | None) -> bool:
+    """A named apartment community: a property name that is not an address (so not a house or a single unit),
+    and an address. The set the no-website queue and the dashboard's Pipeline panel count over."""
+    import re
+
+    name = (property_name or "").strip()
+    return bool(name) and address is not None and not re.match(r"^\d", name)
+
+
 def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
     if n == 0:
         return (0.0, 1.0)
@@ -167,8 +176,6 @@ def no_website_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     unit is not expected to have one), so worth a look. Each item says how far the search got. Answering
     (a URL, or "none") is an annotation `website` on the place; the item then drops out, and
     `promote-sites` turns a URL you typed into a site like any other lead."""
-    import re
-
     from ..config import load_sites
     from ..intake.discover import _records
 
@@ -191,7 +198,7 @@ def no_website_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     for r in conn.execute("SELECT place_key, property_name, address, n_listings FROM places "
                           "WHERE property_name IS NOT NULL AND address IS NOT NULL ORDER BY n_listings DESC"):
         name = r["property_name"].strip()
-        if r["place_key"] in have or r["place_key"] in answered or re.match(r"^\d", name):
+        if r["place_key"] in have or r["place_key"] in answered or not is_named_building(name, r["address"]):
             continue  # a site known, already answered, or an address used as a name (a house or a unit)
         out.append({"kind": "no_website", "place_key": r["place_key"], "name": name, "address": r["address"],
                     "listings": r["n_listings"], "status": status.get(r["place_key"], "not searched yet")})

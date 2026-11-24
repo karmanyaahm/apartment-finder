@@ -17,6 +17,7 @@
       <button data-base="sat" class="on">Satellite</button><button data-base="osm">Map</button>
     </div>
     <button id="verify-btn" class="accent">Verify <span id="queue-count"></span></button>
+    <button id="pipeline-btn" title="Which pipeline stages have run, which are stale or left, and the command for the rest">Pipeline</button>
     <div id="status-strip" class="status-strip"></div>
   </header>
 
@@ -64,6 +65,13 @@
     <div class="panel">
       <button class="close" data-close="verify" aria-label="Close">×</button>
       <div id="verify-body"></div>
+    </div>
+  </div>
+
+  <div id="pipeline" class="overlay hidden" role="dialog" aria-label="Pipeline status">
+    <div class="panel wide">
+      <button class="close" data-close="pipeline" aria-label="Close">×</button>
+      <div id="pipeline-body"></div>
     </div>
   </div>
 

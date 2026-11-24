@@ -1,0 +1,405 @@
+"""Where each stage of the pipeline stands, computed on read from the logs and config (nothing stored): what has
+run, what is partial, what has never run, what is stale (older than STALE_DAYS), what is blocked, and the command
+that would run the rest. Feeds the dashboard's Pipeline panel (`/api/pipeline`) and the drawer's Pipeline section
+(`place_status`). Headline states are scoped to the active chunks (config/areas.toml `active`)."""
+
+from __future__ import annotations
+
+import sqlite3
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
+from typing import Any
+
+from .areas import chunk_of, is_active
+from .config import load_areas, load_goals, load_points, load_sites
+from .verify import is_named_building
+
+STALE_DAYS = 7
+TEXT_SOURCES = ("craigslist", "furnishedfinder")  # listings whose text Haiku reads (`extract`)
+WEB_STATES = {  # website state -> label, in display order
+    "priced": "own site, priced units",
+    "scraped": "own site scraped, no prices",
+    "listed": "in the site list, not scraped yet",
+    "known": "URL known, not fetched yet",
+    "blocked": "site blocks the scraper (HTTP 403)",
+    "rejected": "found, page lacks the address",
+    "no_site": "searched, no site found",
+    "none_confirmed": "you said: no website",
+    "not_searched": "not searched",
+}
+INTAKE = "nix run .#intake --"
+COMMUTE = "nix run .#commute --"
+
+
+def _days(ts: str | None, now: datetime) -> float | None:
+    if not ts:
+        return None
+    t = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    return (now - t).total_seconds() / 86400
+
+
+def _fresh(ts: str | None, now: datetime) -> str:
+    """done, or stale when older than STALE_DAYS; todo when never."""
+    if not ts:
+        return "todo"
+    d = _days(ts, now)
+    return "stale" if d is not None and d > STALE_DAYS else "done"
+
+
+def _roll(states: list[str]) -> str:
+    """A stage's state from its parts' states."""
+    s = set(states)
+    if not s or s == {"todo"}:
+        return "todo"
+    if s == {"done"}:
+        return "done"
+    if s <= {"done", "stale"}:
+        return "stale"
+    if s <= {"done", "stale", "blocked"}:
+        return "blocked"
+    return "partial"
+
+
+def _runs(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
+    """(component, source) -> last ok run (id, started_at), number of runs and total est. cost."""
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    for r in conn.execute(
+            "SELECT component, COALESCE(source, '') AS source, COUNT(*) AS n, ROUND(COALESCE(SUM(est_cost), 0), 4) "
+            "AS cost, MAX(CASE WHEN status = 'ok' THEN id END) AS last_ok, "
+            "MAX(CASE WHEN status = 'ok' THEN started_at END) AS last_ok_at, MAX(id) AS last_id "
+            "FROM runs GROUP BY component, COALESCE(source, '')"):
+        out[(r["component"], r["source"])] = dict(r)
+    for v in out.values():
+        last = conn.execute("SELECT status, error FROM runs WHERE id = ?", (v["last_id"],)).fetchone()
+        v["last_status"], v["last_error"] = last["status"], last["error"]
+    return out
+
+
+def _run_info(runs: dict, component: str, source: str = "") -> dict[str, Any]:
+    r = runs.get((component, source))
+    if not r:
+        return {"last_run": None, "runs": 0, "cost": 0.0}
+    return {"last_run": r["last_ok_at"], "last_run_id": r["last_ok"], "runs": r["n"], "cost": r["cost"],
+            "last_status": r["last_status"], "last_error": r["last_error"]}
+
+
+def website_status(conn: sqlite3.Connection, place_key: str | None = None) -> dict[str, dict[str, Any]]:
+    """place_key -> {state, detail, url?}; state is a key of WEB_STATES. A place not in the result has not been
+    searched. `place_key` limits the queries to one place (the drawer)."""
+    from .intake.discover import _records
+
+    w, args = ("", ()) if place_key is None else (" AND place_key = ?", (place_key,))
+    mine = (lambda pk: True) if place_key is None else (lambda pk: pk == place_key)
+    out: dict[str, dict[str, Any]] = {}
+    rec = _records()
+    checks = {c["id"]: c for c in rec.get("check", [])}  # the last check of a site wins
+    for m in rec.get("miss", []):
+        if mine(m.get("place_key")):
+            out[m["place_key"]] = {"state": "no_site", "model": m.get("model") or "?",
+                                   "detail": f"searched ({m.get('model') or '?'}): {m.get('note') or 'no site found'}"}
+    for f in rec.get("found", []):
+        c = checks.get(f["id"])
+        if mine(f.get("place_key")) and c and not c.get("ok"):
+            st = "blocked" if c.get("reason") == "page not fetched" else "rejected"
+            out[f["place_key"]] = {"state": st, "url": f["url"], "detail": f"{c.get('reason')} ({f.get('found_by')})"}
+    for pk, url in conn.execute(
+            "SELECT place_key, MIN(json_extract(data, '$.extra.website')) FROM listings WHERE place_key IS NOT NULL "
+            "AND json_extract(data, '$.extra.website') IS NOT NULL" + w + " GROUP BY place_key", args):
+        out[pk] = {"state": "known", "url": url, "detail": "named by a listing; promote-sites fetches it"}
+    for s in load_sites().values():
+        if s.get("place_key") and mine(s["place_key"]):
+            out[s["place_key"]] = {"state": "listed", "url": s["url"], "detail": "in the site list, not scraped yet"}
+    for r in conn.execute(
+            "SELECT entity_key, comment FROM annotations WHERE entity_type = 'place' AND attribute = 'website'"
+            + w.replace("place_key", "entity_key") + " ORDER BY id", args):
+        if (r["comment"] or "").strip().lower() == "none":
+            out[r["entity_key"]] = {"state": "none_confirmed", "detail": "you said it has no website"}
+        else:
+            out[r["entity_key"]] = {"state": "known", "url": r["comment"],
+                                    "detail": "you gave the website; promote-sites fetches it"}
+    for r in conn.execute(
+            "SELECT place_key, MAX(last_seen) AS seen, SUM(price IS NOT NULL) AS priced, MIN(url) AS url "
+            "FROM listings WHERE source = 'direct' AND place_key IS NOT NULL" + w + " GROUP BY place_key", args):
+        out[r["place_key"]] = {"state": "priced" if r["priced"] else "scraped", "url": r["url"], "seen": r["seen"],
+                               "detail": "own site gives units with prices" if r["priced"]
+                               else "own site scraped: plans, photos or link, no prices"}
+    return out
+
+
+def _current_points() -> set[str]:
+    return {p.id for pts in load_points().values() for p in pts}
+
+
+def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str, Any]:
+    from . import verify
+    from .filter import evaluate_all, routing_candidates
+    from .intake import ADAPTERS
+    from .intake.base import coverage
+    from .trips import google_usage
+
+    now = now or datetime.now(timezone.utc)
+    chunks, areas = load_areas()
+    active = [c for c in chunks if is_active(c)]
+    runs = _runs(conn)
+    places = [dict(r) for r in conn.execute("SELECT place_key, property_name, address, lat, lon FROM places")]
+    for p in places:
+        p["chunk"] = chunk_of(p["lat"], p["lon"])
+    by_key = {p["place_key"]: p for p in places}
+    in_active = {p["place_key"] for p in places if is_active(p["chunk"])}
+    stages: list[dict[str, Any]] = []
+
+    def stage(sid: str, label: str, state: str, summary: str, commands: list[str], **extra: Any) -> None:
+        stages.append({"id": sid, "label": label, "state": state, "summary": summary, "commands": commands, **extra})
+
+    # 1. configure
+    goals = load_goals().goals
+    sites = load_sites()
+    kinds = Counter(a.kind for a in areas)
+    stage("configure", "Configure", "done",
+          f"{len(chunks)} chunks ({', '.join(active) or 'none'} active), {kinds['zip']} ZIPs, {kinds['city']} cities, "
+          f"{kinds['box']} boxes, {len(sites)} sites, {len(goals)} goals",
+          ["edit config/*.toml (areas.toml `active` picks the chunks being worked)"],
+          counts={"chunks": len(chunks), "active": active, "areas": dict(kinds), "sites": len(sites),
+                  "goals": list(goals)})
+
+    # 2. intake: chunk x area x source, like `aptf-intake coverage`
+    cov = coverage(conn)
+    srcs = {k: [s for s, ad in ADAPTERS.items() if ad.area_kind == k] for k in ("zip", "city", "box")}
+    rows, todo_cmds = [], {}
+    for chunk in chunks:
+        for kind, ss in srcs.items():
+            for a in areas:
+                if a.kind != kind or not a.chunks or a.chunks[0] != chunk:
+                    continue
+                act = [c for c in a.chunks if c in active]
+                cells = {}
+                for s in ss:
+                    c = cov.get((s, a.id))
+                    if not c:
+                        st = "todo"
+                    elif c["state"] == "partial":
+                        st = "partial"
+                    else:
+                        st = _fresh(c["date"], now)
+                    cells[s] = {"state": st, "date": c["date"] if c else None, "run_id": c["run_id"] if c else None,
+                                "items": c.get("items") if c else None, "empty": bool(c) and c["state"] == "empty"}
+                    if act and st != "done":
+                        reload = " --reload" if st == "stale" else ""
+                        todo_cmds.setdefault(f"{INTAKE} run {s} --chunk {act[0]}{reload}", None)
+                rows.append({"chunk": chunk, "area": a.label, "area_id": a.id, "kind": kind, "active": bool(act),
+                             "cells": cells})
+    act_cells = [c["state"] for r in rows if r["active"] for c in r["cells"].values()]
+    n = Counter(act_cells)
+    src_rows = []
+    for s in ADAPTERS:
+        info = _run_info(runs, "intake", s)
+        src_rows.append({"source": s, "area_kind": ADAPTERS[s].area_kind, **info})
+    stage("intake", "Intake (aggregators)", _roll(act_cells),
+          f"active chunks: {n['done']} done, {n['stale']} stale, {n['partial']} partial, {n['todo']} todo "
+          f"of {len(act_cells)} area-source pairs", list(todo_cmds),
+          counts=dict(n), cost=round(sum(r["cost"] for r in src_rows if r["source"] != "direct"), 2))
+
+    # 3. identity (intake runs it inline too, so its state comes from the data, not its run rows): an unlinked
+    # listing is left to do only if identity's own rule would place it now
+    from .identity import decide
+
+    n_list = conn.execute("SELECT COUNT(*) FROM listings").fetchone()[0]
+    unlinked = conn.execute(
+        "SELECT source, source_id, address, unit, city, floor_plan, property_name, kind, lat, lon, beds, price, term, "
+        "operator FROM listings WHERE place_key IS NULL").fetchall()
+    left = sum(1 for r in unlinked if decide(r) is not None)
+    stage("identity", "Identity (same building, same unit)", "partial" if left else "done",
+          f"{n_list - len(unlinked)} of {n_list} listings placed; {len(unlinked) - left} cannot be placed "
+          "(no usable address or coordinates)" + (f"; {left} placeable, not linked yet" if left else ""),
+          ["nix run .#identity"] if left else [],
+          counts={"listings": n_list, "unlinked": len(unlinked), "placeable": left}, **_run_info(runs, "identity"))
+
+    # 4. text extraction (Haiku reads listing text); mirrors extract._pending (active, text of 40+ chars)
+    ex_rows, ex_states = [], []
+    for s in TEXT_SOURCES:
+        r = conn.execute(
+            "SELECT COUNT(*) AS n, SUM(json_extract(data, '$.extra.extracted') IS NOT NULL) AS read FROM listings "
+            "WHERE source = ? AND active = 1 AND length(trim(COALESCE(json_extract(data, '$.description'), ''))) >= 40",
+            (s,)).fetchone()
+        n_, read = r["n"] or 0, r["read"] or 0
+        st = "done" if n_ == read else ("todo" if not read else "partial")
+        ex_states.append(st)
+        ex_rows.append({"source": s, "listings": n_, "read": read, "state": st, **_run_info(runs, "extract", s)})
+    stage("extract", "Text extraction (Haiku)", _roll(ex_states),
+          "; ".join(f"{r['source']} {r['read']}/{r['listings']} read" for r in ex_rows),
+          [f"{INTAKE} extract {r['source']}" for r in ex_rows if r["state"] != "done"],
+          rows=ex_rows, cost=round(sum(r["cost"] for r in ex_rows), 2))
+
+    # 5. website finding, over named buildings (the no-website queue's definition)
+    ws = website_status(conn)
+    named = [p for p in places if is_named_building(p["property_name"], p["address"])]
+    for p in named:
+        p["web"] = ws.get(p["place_key"], {}).get("state", "not_searched")
+    all_c = Counter(p["web"] for p in named)
+    act_named = [p for p in named if p["place_key"] in in_active]
+    act_c = Counter(p["web"] for p in act_named)
+    no_site_models = Counter(ws[p["place_key"]].get("model") for p in named if p["web"] == "no_site")
+    cmds = []
+    for ch in active:
+        mine = Counter(p["web"] for p in act_named if p["chunk"] == ch)
+        if mine["known"]:
+            cmds.append(f"{INTAKE} promote-sites --chunk {ch}")
+        if mine["listed"]:
+            cmds.append(f"{INTAKE} run direct --chunk {ch}")
+        if mine["not_searched"]:
+            cmds.append(f"{INTAKE} discover-sites --chunk {ch} --limit 40")
+    runnable = act_c["not_searched"] + act_c["known"] + act_c["listed"]
+    found = act_c["priced"] + act_c["scraped"]
+    web_state = ("done" if not act_named else "todo" if act_c["not_searched"] == len(act_named)
+                 else "partial" if runnable else "blocked" if act_c["blocked"] else "done")
+    stage("websites", "Website finding", web_state,
+          f"active chunks: {found} of {len(act_named)} named buildings have their own site scraped; "
+          f"{act_c['not_searched']} not searched, {act_c['blocked']} blocked",
+          cmds + (["blocked sites need a browser-rendering actor or residential proxies (your decision)"]
+                  if act_c["blocked"] else []),
+          labels=WEB_STATES, by_state=dict(all_c), active_by_state=dict(act_c), named=len(named),
+          active_named=len(act_named), no_site_models=dict(no_site_models),
+          **_run_info(runs, "discover", "claude-websearch"))
+
+    # 6. own-site scrapes, one row per site in the list
+    seen = {r["site"]: dict(r) for r in conn.execute(
+        "SELECT substr(source_id, 1, instr(source_id, ':') - 1) AS site, MAX(observed_at) AS last FROM observations "
+        "WHERE source = 'direct' GROUP BY 1")}
+    stats = {r["site"]: dict(r) for r in conn.execute(
+        "SELECT substr(source_id, 1, instr(source_id, ':') - 1) AS site, COUNT(*) AS rows, SUM(active) AS active, "
+        "SUM(price IS NOT NULL) AS priced, SUM(kind = 'site_info') AS info FROM listings WHERE source = 'direct' "
+        "GROUP BY 1")}
+    site_rows = []
+    for sid, s in sites.items():
+        p = by_key.get(s.get("place_key") or "")
+        chunk = s.get("chunk") or (p["chunk"] if p else None)
+        last = (seen.get(sid) or {}).get("last")
+        st = stats.get(sid) or {}
+        site_rows.append({"id": sid, "name": s.get("name") or sid, "url": s["url"], "platform": s.get("platform"),
+                          "chunk": chunk, "active": is_active(chunk), "last": last, "state": _fresh(last, now),
+                          "rows": st.get("rows") or 0, "priced": st.get("priced") or 0,
+                          "info_only": bool(st.get("rows")) and st.get("info") == st.get("rows"),
+                          "discovered": bool(s.get("verify_address")),
+                          "command": f"{INTAKE} run direct --area {sid}" + (" --reload" if last else "")})
+    order = {"todo": 0, "stale": 1, "done": 2}
+    site_rows.sort(key=lambda r: (order[r["state"]], r["last"] or "", r["name"].lower()))
+    act_sites = [r for r in site_rows if r["active"]]
+    sc = Counter(r["state"] for r in act_sites)
+    cmds = []
+    for ch in active:
+        mine = Counter(r["state"] for r in act_sites if r["chunk"] == ch)
+        if mine["todo"]:
+            cmds.append(f"{INTAKE} run direct --chunk {ch}")
+        if mine["stale"]:
+            cmds.append(f"{INTAKE} run direct --chunk {ch} --reload")
+    stage("sites", "Own-site scrapes", _roll([r["state"] for r in act_sites]),
+          f"active chunks: {sc['done']} fresh, {sc['stale']} stale, {sc['todo']} never scraped "
+          f"of {len(act_sites)} sites ({len(site_rows)} in the list)", cmds,
+          counts=dict(sc), **_run_info(runs, "intake", "direct"))
+
+    # 7-9. commute: trips under the current point ids only (renamed points leave old rows behind)
+    points = _current_points()
+    provs: dict[str, set[str]] = defaultdict(set)
+    for pk, pt, prov in conn.execute("SELECT DISTINCT place_key, point_id, provider FROM trips"):
+        if pt in points:
+            provs[pk].add(prov)
+    # compute_all skips a stay place (`<building>~<operator>`) whose building is a place: it reads the building's
+    located = {p["place_key"] for p in places if p["lat"] is not None}
+    routable = {pk for pk in located if pk.split("~", 1)[0] == pk or pk.split("~", 1)[0] not in located}
+    est = sum(1 for pk in routable if "estimate" in provs.get(pk, ()))
+    stage("estimates", "Commute estimates (free)",
+          "done" if est == len(routable) else "todo" if not est else "partial",
+          f"{est} of {len(routable)} places have straight-line estimates",
+          [] if est == len(routable) else [f"{COMMUTE} compute"], **_run_info(runs, "commute", "estimate"))
+
+    pts = load_points()
+    stations, targets = pts.get("caltrain_stations", []), pts.get("commute_targets", [])
+    routed_legs: set[tuple] = set()
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'commute_legs'").fetchone():
+        routed_legs = {tuple(r) for r in conn.execute(
+            "SELECT o_lat, o_lon, d_lat, d_lon FROM commute_legs WHERE mode = 'bike' AND provider != 'estimate' "
+            "AND found = 1")}
+    anchors = [{"station": s.name, "target": t.name,
+                "routed": (round(s.lat, 4), round(s.lon, 4), round(t.lat, 4), round(t.lon, 4)) in routed_legs}
+               for s in stations for t in targets]
+    na = sum(a["routed"] for a in anchors)
+    stage("anchors", "Station -> target bike legs (Google, once)",
+          "done" if anchors and na == len(anchors) else "todo" if not na else "partial",
+          f"{na} of {len(anchors)} station x target legs routed",
+          [] if na == len(anchors) else [f"{COMMUTE} --provider google anchors --dry-run",
+                                          f"{COMMUTE} --provider google anchors"], anchors=anchors)
+
+    res = evaluate_all(conn)
+    cands: set[str] = set()
+    for pk in routing_candidates(conn, res=res):  # routed as its building, like `compute --candidates`
+        base = pk.split("~", 1)[0]
+        cands.add(base if base in located else pk)
+    act_cands = sorted(pk for pk in cands if pk in in_active and pk in located)
+    g_done = sum(1 for pk in act_cands if "google" in provs.get(pk, ()))
+    usage = google_usage(conn)
+    from . import settings
+
+    key = bool(settings.secret("GOOGLE_MAPS_API_KEY"))
+    capped = usage["calls"] >= usage["cap"]
+    g_state = ("done" if g_done == len(act_cands) else "blocked" if capped or not key
+               else "todo" if not g_done else "partial")
+    stage("google", "Google routing (candidates in active chunks)", g_state,
+          f"{g_done} of {len(act_cands)} candidate places routed; {sum('google' in v for v in provs.values())} places "
+          f"routed in all; {usage['calls']}/{usage['cap']} calls this month"
+          + ("; GOOGLE_MAPS_API_KEY not set" if not key else "") + ("; monthly cap reached" if capped else ""),
+          [] if g_done == len(act_cands) else [f"{COMMUTE} --provider google compute --candidates --dry-run",
+                                               f"{COMMUTE} --provider google compute --candidates"],
+          usage=usage, candidates=len(act_cands), routed=g_done, cost=usage["est_cost_usd"],
+          **{k: v for k, v in _run_info(runs, "commute", "google").items() if k != "cost"})
+
+    # 10. verify
+    n_checks = conn.execute("SELECT COUNT(*) FROM checks").fetchone()[0]
+    conflicts = len(verify.conflict_queue(conn)) + len(verify.text_conflict_queue(conn))
+    # the no-website queue: named buildings with no site known and no answer from you
+    no_web = sum(1 for p in named if p["web"] in ("not_searched", "no_site", "blocked", "rejected"))
+    stage("verify", "Verify (hand checks)",
+          "done" if not conflicts and not no_web else "todo" if not n_checks else "partial",
+          f"{n_checks} checks made; {conflicts} open conflicts; {no_web} named buildings without a website",
+          ["Verify button in this dashboard"] if conflicts or no_web else [],
+          counts={"checks": n_checks, "conflicts": conflicts, "no_website": no_web})
+
+    # 11. filter (computed on every read)
+    per_goal = {g: dict(Counter(r["status"] for r in pres.values())) for g, pres in res["places"].items()}
+    stage("filter", "Filter (goals, live)", "done",
+          "; ".join(f"{g}: {c.get('pass', 0)} pass, {c.get('needs_check', 0)} check, {c.get('fail', 0)} fail"
+                    for g, c in per_goal.items()),
+          [f"nix run .#filter -- --goal {g} --status pass" for g in per_goal], counts=per_goal)
+
+    stuck = [dict(r) for r in conn.execute(
+        "SELECT id, component, source, started_at FROM runs WHERE status = 'running' ORDER BY id")
+        if (_days(r["started_at"], now) or 0) > 1 / 24]  # running for over an hour
+    return {"now": now.isoformat(timespec="seconds"), "stale_days": STALE_DAYS, "chunks": chunks, "active": active,
+            "stages": stages, "intake": {"sources": srcs, "rows": rows, "runs": src_rows}, "sites": site_rows,
+            "stuck_runs": stuck}
+
+
+def place_status(conn: sqlite3.Connection, place_key: str, now: datetime | None = None) -> dict[str, Any]:
+    """One place: each source's last sighting (stale after STALE_DAYS), its own website, whether its text was
+    read, and whether its commute times are estimates or Google routes. A stay place (`<building>~<operator>`)
+    takes the website and trips of its building."""
+    now = now or datetime.now(timezone.utc)
+    base = place_key.split("~", 1)[0]
+    sources = []
+    for r in conn.execute(
+            "SELECT source, MAX(last_seen) AS seen, SUM(active) AS active, COUNT(*) AS n, "
+            "SUM(json_extract(data, '$.extra.extracted') IS NOT NULL) AS read FROM listings WHERE place_key = ? "
+            "GROUP BY source ORDER BY source", (place_key,)):
+        sources.append({"source": r["source"], "seen": r["seen"], "listings": r["n"], "active": r["active"] or 0,
+                        "state": _fresh(r["seen"], now),
+                        "text_read": (r["read"] or 0) if r["source"] in TEXT_SOURCES else None})
+    ws = website_status(conn, base).get(base, {"state": "not_searched", "detail": "no website looked for yet"})
+    points = _current_points()
+    trips = Counter()
+    for pk, pt, prov in conn.execute(
+            "SELECT DISTINCT place_key, point_id, provider FROM trips WHERE place_key IN (?, ?)", (place_key, base)):
+        if pt in points:
+            trips[prov] += 1
+    return {"sources": sources, "website": {**ws, "label": WEB_STATES[ws["state"]]}, "trips": dict(trips),
+            "stale_days": STALE_DAYS}

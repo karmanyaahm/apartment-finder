@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .. import settings, verify
+from .. import pipeline, settings, verify
 from ..areas import chunk_of, is_active
 from ..areas import zones as area_zones
 from ..config import load_goals, load_point_sets, load_points
@@ -329,7 +329,10 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             v["legs"] = json.loads(v["legs"]) if isinstance(v["legs"], str) else v["legs"]
         anns = q("SELECT * FROM annotations WHERE entity_type = 'place' AND entity_key = ? ORDER BY id",
                  (place_key,))
+        with lock:
+            pstatus = pipeline.place_status(conn, place_key)
         return {
+            "pipeline": pstatus,
             "place": place,
             "goals": {gid: res["places"][gid].get(place_key) for gid in res["places"]},
             "plans": group_plans(out_listings),
@@ -374,6 +377,13 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                         "(SELECT COUNT(*) FROM listings) AS listings, "
                         "(SELECT COUNT(*) FROM listings WHERE active = 1) AS active")[0],
         }
+
+    @app.get("/api/pipeline")
+    def pipeline_overview() -> dict[str, Any]:
+        """Each pipeline stage's state from the logs: done / partial / todo / stale / blocked, and the commands
+        that would run the rest (aptfinder.pipeline)."""
+        with lock:
+            return pipeline.overview(conn)
 
     # ------------------------------------------------------------------ verify
     def _obs_fields(obs_id: int) -> dict[str, Any]:
