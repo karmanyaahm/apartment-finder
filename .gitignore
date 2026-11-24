@@ -1,0 +1,21 @@
+# local data: database, raw scraper output, mirrored media
+data/
+
+# secrets
+.env
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# editors / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
