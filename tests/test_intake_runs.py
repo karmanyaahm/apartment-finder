@@ -30,6 +30,7 @@ def fake(monkeypatch, tmp_path):
 
     monkeypatch.setattr(base, "run_actor", run_actor)
     monkeypatch.setattr(base, "event_cost", lambda actor, ev: 0.001 * sum((ev or {}).values()))
+    monkeypatch.setattr(base, "account_remaining_usd", lambda: plan.get("account", 5.0))
     monkeypatch.setattr(base, "load_sources", lambda: {"spend": {"max_usd_per_run": 1.0},
                                                        "fake": {"actor": "a/b", "max_items": 3}})
     monkeypatch.setattr(base.settings, "RAW_DIR", tmp_path / "raw")
@@ -101,3 +102,17 @@ def test_listing_goes_inactive_after_complete_rerun_of_its_area(conn, fake, monk
     plan["items"] = lambda inp: [{"id": "a"}]
     run_source(conn, adapter, ZIPS[:1])
     assert dict(conn.execute("SELECT source_id, active FROM listings").fetchall())["b"] == 0
+
+
+def test_budget_guard_stops_before_running_out(conn, fake, monkeypatch):
+    calls, plan = fake
+    plan["account"] = 0.25  # below the reserve
+    plan["items"] = lambda inp: [{"id": "x"}]
+    adapter = per_area_adapter()
+    register(monkeypatch, adapter)
+    base_sources = base.load_sources()
+    monkeypatch.setattr(base, "load_sources", lambda: {**base_sources, "spend": {"max_usd_per_run": 1.0,
+                                                                                  "reserve_usd": 0.3}})
+    res = run_source(conn, adapter, ZIPS[:2])
+    assert calls == [] and all(v["state"] == "not_reached" for v in res.counts["areas"].values())
+    assert "Apify credit left" in res.warnings[0]

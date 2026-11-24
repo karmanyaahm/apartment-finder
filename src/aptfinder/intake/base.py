@@ -13,7 +13,7 @@ from .. import identity, settings
 from ..config import Area, load_areas
 from ..store import append_observation, finish_run, start_run
 from ..store.models import ObservationData
-from .apify import ActorRun, run_actor
+from .apify import ActorRun, account_remaining_usd, run_actor
 
 API_PRICE_CACHE: dict[str, dict[str, float]] = {}
 
@@ -145,8 +145,14 @@ def run_source(conn: sqlite3.Connection, adapter: Adapter, areas: list[Area], *,
         for group in groups:
             gids = [a.id for a in group]
             remaining = cap - spent
+            account = account_remaining_usd()
+            reserve = sources["spend"].get("reserve_usd", 0.0)
+            if account is not None:
+                remaining = min(remaining, account - reserve)
             if remaining <= 0.02:
-                warnings.append(f"spend cap reached before {', '.join(gids)}")
+                why = (f"Apify credit left ${account:.2f} minus reserve ${reserve:.2f}" if account is not None
+                       and account - reserve < cap - spent else f"run spend cap ${cap:.2f}")
+                warnings.append(f"stopped before {', '.join(gids)}: {why}")
                 for aid in gids:
                     counts["areas"][aid] = {"items": 0, "state": "not_reached"}
                 continue

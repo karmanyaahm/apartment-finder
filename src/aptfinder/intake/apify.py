@@ -62,3 +62,12 @@ def run_actor(actor: str, run_input: dict[str, Any], *, max_items: int, max_char
         cost_usd=run.get("usageTotalUsd"), charged_events=run.get("chargedEventCounts"),
         console_url=f"https://console.apify.com/actors/runs/{run['id']}",
     )
+
+
+def account_remaining_usd() -> float | None:
+    """Monthly Apify credit left (limit minus usage this cycle); None if the API doesn't say."""
+    with _client() as c:
+        d = c.get("/users/me/limits").json().get("data", {})
+    limit = (d.get("limits") or {}).get("maxMonthlyUsageUsd")
+    used = (d.get("current") or {}).get("monthlyUsageUsd")
+    return None if limit is None or used is None else round(limit - used, 4)
