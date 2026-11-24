@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import re
 import time
 
 import httpx
@@ -95,6 +96,12 @@ def cmd_recall(db: str) -> None:
         with open(NOTES, newline="") as f:
             notes = {r["name"]: r["reason"] for r in csv.DictReader(f)}
     geos = load_geocodes()
+    from ..intake.base import coverage
+
+    from ..config import load_areas
+
+    covered_zips = {aid for (src, aid) in coverage(conn) if src in ("zillow", "apartments_com")}
+    covered_cities = {a.city for a in load_areas()[1] if a.kind == "zip" and a.id in covered_zips}
     tiers: dict[str, list[tuple[str, str]]] = {}
     for r in load_benchmark():
         found = False
@@ -105,13 +112,24 @@ def cmd_recall(db: str) -> None:
                 found = True
             elif r.name in geos:  # fallback: any place within 60 m
                 found = any(p["lat"] and haversine_m(geos[r.name], (p["lat"], p["lon"])) < 60 for p in places)
-        status = "found" if found else ("missed: " + notes.get(r.name, "not found by poller"))
+        zm = re.search(r"\b(9\d{4})\b", r.name)
+        if found:
+            status = "found"
+        elif r.name in notes:
+            status = "missed: " + notes[r.name]
+        elif zm and zm.group(1) not in covered_zips:
+            status = f"not scraped yet: ZIP {zm.group(1)} is TODO"
+        elif not zm and r.city and r.city not in covered_cities:
+            status = f"not scraped yet: no ZIP of {r.city} covered"
+        else:
+            status = "missed: not found by poller"
         tiers.setdefault(r.tier, []).append((r.name, status))
     for tier, items in tiers.items():
-        counted = [s for _, s in items if "taken_down" not in s]
+        counted = [s for _, s in items if "taken_down" not in s and not s.startswith("not scraped")]
         n_found = sum(s == "found" for s in counted)
-        print(f"\n== {tier}: {n_found}/{len(counted)} found"
-              f" ({len(items) - len(counted)} excused as taken down)")
+        n_todo = sum(s.startswith("not scraped") for _, s in items)
+        print(f"\n== {tier}: {n_found}/{len(counted)} found in scraped areas"
+              f" ({n_todo} in areas not scraped yet, {len(items) - len(counted) - n_todo} excused as taken down)")
         for name, s in items:
             print(f"  [{'x' if s == 'found' else ' '}] {name[:70]:70s} {'' if s == 'found' else s}")
 
