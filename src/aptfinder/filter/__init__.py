@@ -56,7 +56,8 @@ def evaluate_all(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> di
     trips = best_trips(conn)
     anns = place_annotations(conn)
     low = low_accuracy(accuracy(conn), cfg.verify.min_samples, cfg.verify.min_accuracy)
-    listings = [dict(r) for r in conn.execute("SELECT * FROM listings")]
+    # site_info rows (a community website's photos and link) are not offers: no goal applies to them
+    listings = [dict(r) for r in conn.execute("SELECT * FROM listings WHERE kind IS NOT 'site_info'")]
     inherit_prices(listings)  # a price-less plan row takes the same plan's price from another source
     out: dict[str, Any] = {"listings": {}, "places": {}}
     for gid, goal in cfg.goals.items():

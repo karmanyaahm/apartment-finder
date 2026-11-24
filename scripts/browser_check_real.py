@@ -53,6 +53,17 @@ with sync_playwright() as p:
           "| plan images loaded:", page.evaluate("[...document.querySelectorAll('#drawer .plan-img')].filter(i => i.naturalWidth > 0).length"))
     page.locator("#drawer").screenshot(path=f"{OUT}/real_3_dean.png")
     page.click("[data-close=drawer]")
+    for name in ("Sevens", "Fayette Arms"):  # photos from the community's own website (platform "photos")
+        page.fill("#q", name)
+        time.sleep(0.5)
+        page.locator(".card").first.click()
+        page.wait_for_selector("#drawer:not(.hidden) h2")
+        time.sleep(4)
+        print("drawer:", page.inner_text("#drawer h2"), "| photos:", page.locator("#drawer .media img").count(),
+              "| loaded:", page.evaluate("[...document.querySelectorAll('#drawer .media img')].filter(i => i.naturalWidth > 0).length"),
+              "| first from own site:", page.evaluate("(document.querySelector('#drawer .media img') || {}).src || ''")[:60])
+        page.locator("#drawer").screenshot(path=f"{OUT}/real_5_{name.split()[0].lower()}.png")
+        page.click("[data-close=drawer]")
     page.fill("#q", "")
     page.click("#verify-btn")
     page.wait_for_selector("#verify-body h2", timeout=60000)

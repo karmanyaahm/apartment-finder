@@ -293,7 +293,7 @@ WITH l AS MATERIALIZED (
 SELECT place_key, MAX(p_address) AS address, MAX(p_city) AS city, MAX(p_name) AS property_name,
        MAX(p_operator) AS operator,
        AVG(lat) AS lat, AVG(lon) AS lon,
-       COUNT(*) AS n_listings, SUM(active) AS n_active, COUNT(DISTINCT unit_key) AS n_units,
+       SUM(kind IS NOT 'site_info') AS n_listings, SUM(active AND kind IS NOT 'site_info') AS n_active, COUNT(DISTINCT unit_key) AS n_units,
        group_concat(DISTINCT source) AS sources,
        MIN(price_month) AS min_price_month, MIN(price_per_bed) AS min_price_per_bed,
        MAX(beds) AS max_beds,

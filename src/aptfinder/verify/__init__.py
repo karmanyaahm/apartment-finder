@@ -93,7 +93,8 @@ def sample_queue(conn: sqlite3.Connection, seed: int = 0, include_trips: bool = 
                           "JOIN observations o ON o.id = c.observation_id"):
         ever[(r["source"], r["source_id"])].add(r["field"])
     groups: dict[str, list[Any]] = defaultdict(list)
-    for r in conn.execute("SELECT source, source_id, obs_id, place_key FROM listings ORDER BY source, source_id"):
+    for r in conn.execute("SELECT source, source_id, obs_id, place_key FROM listings WHERE kind IS NOT 'site_info' "
+                          "ORDER BY source, source_id"):
         key = (r["source"], r["source_id"])
         # in the queue if never checked, or if a field that was checked has since changed
         if key not in ever or not ever[key] <= set(checked.get(key, {})):

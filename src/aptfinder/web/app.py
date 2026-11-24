@@ -34,6 +34,7 @@ LISTING_FIELDS = ["price", "price_basis", "price_month", "price_per_bed", "beds"
 
 def group_plans(listings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Floor plans of a place: listings grouped by beds, baths and plan name across all sources."""
+    listings = [l for l in listings if l["fields"].get("kind") != "site_info"]  # photos and link only
     listings = [l for l in listings if l["active"]] or listings  # inactive rows only if nothing is live
     groups: dict[str, list[dict[str, Any]]] = {}
     summaries = []  # beds-only rows (e.g. Zillow's per-building "3bd from $X", baths unknown)
@@ -93,10 +94,12 @@ HOTLINK_BLOCKED = ("images1.apartments.com",)
 
 def gather_photos(listings: list[dict[str, Any]], limit: int = 30) -> list[dict[str, str]]:
     """Photo URLs from every listing (not mirrored: the browser loads them from the listing site's CDN).
-    Hosts known to block hotlinking go last, so loadable photos fill the limit first."""
+    The community's own website comes first; hosts known to block hotlinking go last, so loadable photos fill
+    the limit first."""
     seen, out = set(), []
-    listings = sorted(listings, key=lambda l: any(
-        h in u for u in (l["data"].get("extra") or {}).get("images") or [] for h in HOTLINK_BLOCKED))
+    listings = sorted(listings, key=lambda l: (any(
+        h in u for u in (l["data"].get("extra") or {}).get("images") or [] for h in HOTLINK_BLOCKED),
+        l["source"] != "direct"))
     for l in listings:
         for u in (l["data"].get("extra") or {}).get("images") or []:
             if u and u not in seen:

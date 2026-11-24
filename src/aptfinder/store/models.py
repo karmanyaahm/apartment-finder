@@ -24,7 +24,7 @@ class ObservationData(BaseModel):
     beds: float | None = None
     baths: float | None = None
     sqft: float | None = None
-    kind: Literal["apartment", "house", "townhome", "room", "entire_place"] | None = None
+    kind: Literal["apartment", "house", "townhome", "room", "entire_place", "site_info"] | None = None
     term: Literal["long", "short"] | None = None
     furnished: bool | None = None
     private_bath: bool | None = None

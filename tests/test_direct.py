@@ -14,6 +14,8 @@ SITES = {
     "landsby": {"id": "landsby", "platform": "jd_floorplans", "url": "https://l.example/floorplans/",
                 "name": "Landsby", "address": "100 Aspen Way, Mountain View, CA 94040"},
     "the-dean": {"id": "the-dean", "platform": "prometheus", "url": "https://p.example/the-dean"},
+    "sevens": {"id": "sevens", "platform": "photos", "url": "https://s.example/", "name": "Sevens",
+               "address": "777 W Middlefield Rd, Mountain View, CA 94043"},
 }
 
 
@@ -76,3 +78,27 @@ def test_prometheus_plans_from_drawing_names():
 
 def test_unknown_page_is_unparsed():
     assert direct.parse(page("https://other.example/", []), {}) is None
+
+
+def test_photos_site_keeps_photos_drops_logos_and_is_not_an_offer(conn):
+    from aptfinder.filter import evaluate_all
+    from aptfinder.store import append_observation, start_run
+
+    imgs = [{"src": "https://cdn.example/og.jpg", "from": "meta"},
+            {"src": "/img/logo.png", "alt": "Sevens logo", "from": "img"},
+            {"src": "/img/small.jpg", "srcset": "/img/a-800.jpg 800w, /img/a-1600.jpg 1600w", "from": "img"},
+            {"src": "/img/thumb.jpg", "w": "120", "from": "img"},
+            {"src": "data:image/gif;base64,xx", "from": "img"},
+            {"src": "/img/pool.webp", "cls": "gallery-item", "from": "style"},
+            {"src": "https://cdn.example/w_598/v1/pool.webp", "from": "img"},
+            {"src": "https://cdn.example/c_fill,h_80,w_80/v1/tiny.jpg", "from": "img"},
+            {"src": "https://cdn.example/q_auto,f_auto/v2/front.jpg", "srcset": "w_998/v2/front.jpg", "from": "img"}]
+    item = {**page("https://s.example/", []), "images": imgs}
+    (p,) = direct.parse(item, {})
+    assert p.data.extra["images"] == ["https://cdn.example/og.jpg", "https://s.example/img/a-1600.jpg",
+                                      "https://s.example/img/pool.webp", "https://cdn.example/q_auto,f_auto/v2/front.jpg"]
+    assert p.data.kind == "site_info" and p.price is None and p.source_id == "sevens:site"
+    run = start_run(conn, "intake", "direct")
+    append_observation(conn, run, "direct", p.source_id, p.data, url=p.url)
+    res = evaluate_all(conn)
+    assert all(not res["listings"][g] for g in res["listings"])  # no goal looks at it

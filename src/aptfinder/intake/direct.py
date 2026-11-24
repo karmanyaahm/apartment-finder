@@ -24,8 +24,24 @@ PAGE_FUNCTION = r"""async function pageFunction(context) {
                                                text: $(s).html() || '' })).get()
     .filter(s => s.text.length > 300 && (s.type.includes('json') || s.id === '__NEXT_DATA__'
              || /Fusion\.globalContent|"floorplans"/.test(s.text.slice(0, 50000))));
+  // every candidate image with its attributes; `parse` decides which are photos (tuning is a free reparse)
+  const images = [];
+  $('meta[property="og:image"], meta[name="twitter:image"]').each((i, m) =>
+    images.push({ src: $(m).attr('content') || '', from: 'meta' }));
+  $('img, source').each((i, el) => {
+    const e = $(el), srcset = e.attr('srcset') || e.attr('data-srcset') || '';
+    const last = srcset.split(/,\s+/).map(x => x.trim().split(/\s+/)[0]).filter(Boolean).pop() || '';
+    images.push({ src: e.attr('data-src') || e.attr('data-lazy-src') || e.attr('src') || '', srcset: last,
+                  alt: e.attr('alt') || '', cls: e.attr('class') || '', w: e.attr('width') || '',
+                  h: e.attr('height') || '', from: el.tagName });
+  });
+  $('[style*="background-image"]').each((i, el) => {
+    const m = /url\(['"]?([^'")]+)/.exec($(el).attr('style') || '');
+    if (m) images.push({ src: m[1], cls: $(el).attr('class') || '', from: 'style' });
+  });
   return { url: context.request.loadedUrl || context.request.url, requested: context.request.url,
-           status: context.response && context.response.status, title: $('title').text(), scripts };
+           status: context.response && context.response.status, title: $('title').text(), scripts,
+           images: images.slice(0, 400) };
 }"""
 
 
@@ -171,7 +187,60 @@ def parse_prometheus(item: dict[str, Any], site: dict[str, Any]) -> list[Parsed]
     return out
 
 
-PARSERS = {"avalon": parse_avalon, "jd_floorplans": parse_jd_floorplans, "prometheus": parse_prometheus}
+# ------------------------------------------------------------------------------- any site: photos only
+SITE_INFO = "site_info"  # kind of a row that only carries a site's photos and link: not a listing (no plan, no goal)
+NOT_PHOTO = re.compile(r"logo|icon|favicon|sprite|pixel|badge|placeholder|spinner|loader|avatar|equal[-_]?housing|"
+                       r"\bada\b|accessib|/maps?/|staticmap|social|facebook|instagram|twitter|google|yelp|"
+                       r"gettyimages|istockphoto|istock-|shutterstock|\.svg|\.gif|\.mp4|\.webm|\.m3u8|stream\.mux\.com|^data:", re.IGNORECASE)
+
+
+CDN_SIZE = re.compile(r"[/,][wh]_(\d+)")  # Cloudinary-style size transforms, e.g. /w_80/ or ,h_80,
+NAME_SIZE = re.compile(r"(\d{2,4})x(\d{2,4})")  # sizes in a file name, e.g. logo250x25.png
+
+
+def site_photos(item: dict[str, Any], site: dict[str, Any] | None = None, limit: int = 24) -> list[str]:
+    """Photo URLs from the page's image candidates: largest srcset entry first, absolute, no logos or icons.
+    A site's `photo_match` (regex) keeps only matching URLs, for operator pages that mix in company-wide images."""
+    keep = re.compile(site["photo_match"]) if site and site.get("photo_match") else None
+    from urllib.parse import urljoin
+
+    out: list[str] = []
+    names: set[str] = set()  # one copy per file: CDNs repeat a photo at several widths (w_598, w_998, ...)
+    for im in item.get("images") or []:
+        # largest srcset entry; entries are split on ", " because CDN URLs carry commas (q_auto,f_auto)
+        srcset = re.split(r",\s+", (im.get("srcset") or "").strip())[-1].split(" ")[0]
+        for raw in (srcset, im.get("src")):
+            if not raw or not raw.startswith(("http", "/")):  # a fragment of a comma-split URL: use src
+                continue
+            u = urljoin(item.get("url") or "", raw.strip())
+            text = " ".join(str(im.get(k) or "") for k in ("cls", "alt")) + " " + u
+            small = any(str(im.get(k) or "").isdigit() and int(im[k]) < 300 for k in ("w", "h")) \
+                or any(int(n) < 300 for n in CDN_SIZE.findall(u)) \
+                or any(min(int(a), int(b)) < 100 for a, b in NAME_SIZE.findall(u.rsplit("/", 1)[-1]))
+            name = u.split("?")[0].rstrip("/").rsplit("/", 1)[-1]
+            if u.startswith("http") and not NOT_PHOTO.search(text) and not small and name not in names \
+                    and (keep is None or keep.search(u)):
+                names.add(name)
+                out.append(u)
+            break  # srcset's largest entry stands for the element
+    return out[:limit]
+
+
+def parse_photos(item: dict[str, Any], site: dict[str, Any]) -> list[Parsed]:
+    """A site whose plans and prices we cannot read: one `site_info` row with its photos, on the site's address."""
+    photos = site_photos(item, site)
+    if not photos:
+        return []
+    street, city, zip_ = _ld_address(item)
+    return [Parsed(source_id=f"{site['id']}:site", url=site["url"], price=None, price_basis=None,
+                   data=ObservationData(address=site.get("address") or (f"{street}, {city}, CA {zip_}" if street else None),
+                                        kind=SITE_INFO, property_name=site.get("name"),
+                                        extra={"site": site["id"], "platform": "photos", "images": photos,
+                                               "note": "community website: photos and link only"}))]
+
+
+PARSERS = {"avalon": parse_avalon, "jd_floorplans": parse_jd_floorplans, "prometheus": parse_prometheus,
+           "photos": parse_photos}
 
 
 def parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] | None:
