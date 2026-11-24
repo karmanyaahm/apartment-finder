@@ -72,7 +72,9 @@ def check_parts(parts: dict[str, Any], address: str) -> dict[str, Any] | None:
 def place_key_from(parts: dict[str, Any], city_fallback: str | None) -> str | None:
     """Same formula as `store.keys.place_key` for an address: 'p_' + hash('street|city')."""
     city = parts.get("city") or (_norm_tokens(city_fallback) if city_fallback else None)
-    return "p_" + _h(f"{parts['street']}|{city or ''}") if parts.get("street") else None
+    # "881-881 E El Camino Real": a one-number range is that number, as in the parser ("4180-4190" stays)
+    street = re.sub(r"^(\d+)-\1\b", r"\1", parts.get("street") or "")
+    return "p_" + _h(f"{street}|{city or ''}") if street else None
 
 
 def argv(model: str) -> list[str]:

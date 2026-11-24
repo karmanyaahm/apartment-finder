@@ -17,3 +17,9 @@ def test_a_city_not_written_in_the_address_is_dropped():
                     "850 Calderon Ave")
     assert p["city"] is None and place_key_from(p, "mountain view") == place_key_from(
         {"street": "850 calderon ave", "city": "mountain view"}, None)
+
+
+def test_a_one_number_range_from_haiku_gets_the_parsers_key():
+    p = check_parts({"number": "881-881", "predirectional": "E", "street_name": "El Camino Real", "city": "Mountain View"},
+                    "881-881 E El Camino Real, Mountain View, CA 94040")
+    assert place_key_from(p, None) == place_key("881 E El Camino Real, Mountain View, CA 94040", None, None, None)
