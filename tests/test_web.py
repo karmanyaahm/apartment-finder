@@ -135,3 +135,10 @@ def test_places_carry_a_cover_photo_for_the_map(client):
     for p in places:
         d = c.get(f"/api/places/{p['place_key']}").json()
         assert p["photo"] == (d["photos"][0]["url"] if d["photos"] else None)
+
+
+def test_index_versions_its_assets(client):
+    c, _ = client
+    r = c.get("/")
+    assert r.headers["cache-control"] == "no-cache"
+    assert 'static/app.js?v=' in r.text and 'static/style.css?v=' in r.text

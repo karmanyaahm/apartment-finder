@@ -483,8 +483,14 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
     @app.get("/")
-    def index() -> FileResponse:
-        return FileResponse(STATIC / "index.html")
+    def index() -> Response:
+        # Asset URLs carry a hash of the file, so a cache in front (Cloudflare keeps .js and .css for hours)
+        # never serves an old version after a deploy.
+        html = (STATIC / "index.html").read_text()
+        for name in ("app.js", "style.css"):
+            v = hashlib.sha1((STATIC / name).read_bytes()).hexdigest()[:10]
+            html = html.replace(f"static/{name}\"", f"static/{name}?v={v}\"")
+        return Response(html, media_type="text/html", headers={"Cache-Control": "no-cache"})
 
     @app.get("/sw.js")
     def sw() -> FileResponse:
