@@ -93,7 +93,10 @@ def zillow_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] | No
                 property_name=p.get("title"), amenities=amen or None)
     extra = {"zpid": zpid, "group_type": p.get("groupType"), "days_on_zillow": p.get("daysOnZillow"),
              "rent_zestimate": item.get("rentZestimate"), "special_offer": item.get("specialOffer"),
-             "images": [((p.get("media") or {}).get("propertyPhotoLinks") or {}).get("highResolutionLink")]}
+             # the whole gallery (up to 24), not just the cover photo
+             "images": ([u for u in ((p.get("media") or {}).get("allPropertyPhotos") or {}).get("highResolution") or []
+                         if u][:24]
+                        or [((p.get("media") or {}).get("propertyPhotoLinks") or {}).get("highResolutionLink")])}
     url = item.get("listingUrl") or f"https://www.zillow.com/homedetails/{zpid}_zpid/"
     groups = p.get("unitsGroup") or []
     if groups:
@@ -241,6 +244,11 @@ def apartments2_input(cfg: dict[str, Any], areas: list) -> dict[str, Any]:
             "maxItems": cfg.get("max_items", 150)}
 
 
+BLUEGROUND_ID = re.compile(r"\(ID #SFO\w+\)")
+STAY_UNIT = re.compile(r"\b(?:FL\d+-)?ID\d+[A-Z]?\b")
+STAY_TEXT = "is the lowest available price, based on"
+
+
 def apartments2_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] | None:
     pid = item.get("listingId")
     if not pid:
@@ -288,9 +296,13 @@ def apartments2_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed]
         kind = {"SingleFamily": "house", "Townhouse": "townhome", "Condo": "apartment"}.get(ptype, "apartment")
         for r in item.get("rentals") or []:
             desc = r.get("Description") or ""
-            operator = "Blueground" if ("blueground" in desc.lower() or re.search(r"\(ID #SFO\d+\)", desc)) else None
+            operator = "Blueground" if ("blueground" in desc.lower() or BLUEGROUND_ID.search(desc)) else None
+            # the furnished-stay listing template (Blueground's, also used by units that never name an operator):
+            # unit label "SI FL1-ID13012A" / "GO ID1309221P", "The advertised rate of $X/month is the lowest
+            # available price, based on a 30 day(s) stay", 1-12 month lease
+            template = bool(STAY_UNIT.search(r.get("UnitNumber") or "")) or STAY_TEXT in desc
             # Blueground only rents furnished homes; its text also advertises against "unfurnished leases"
-            furnished = True if operator == "Blueground" else furnished_from_text(desc)
+            furnished = True if (operator == "Blueground" or template) else furnished_from_text(desc)
             # furnished monthly rentals (Blueground: 1-12 month stays) are short-term stays, not leases
             short = bool(furnished) and (r.get("MinLeaseTerm") or 12) <= 3
             out.append(Parsed(
@@ -303,7 +315,8 @@ def apartments2_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed]
                                      available_from=_avail(r.get("AvailableDate") or r.get("AvailableDateText")),
                                      description=desc[:3000] or None,
                                      furnished=furnished,
-                                     extra={**extra, "property_type": ptype, "min_lease_months": r.get("MinLeaseTerm"),
+                                     extra={**extra, "property_type": ptype, "stay_template": template or None,
+                                            "min_lease_months": r.get("MinLeaseTerm"),
                                             "max_lease_months": r.get("MaxLeaseTerm")})))
     return out
 

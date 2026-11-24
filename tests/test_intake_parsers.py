@@ -142,3 +142,29 @@ def test_furnished_text_and_blueground_units_are_short_stays():
     plain = {**single, "rentals": [{**single["rentals"][0], "MinLeaseTerm": 12, "Description": "unfurnished home"}]}
     (q,) = ADAPTERS["apartments_com"].parse(plain, {})
     assert q.data.furnished is False and q.data.term == "long" and q.data.operator is None
+
+
+def test_furnished_stay_template_without_operator_name():
+    """Units in Blueground's listing template that never name it are still furnished short stays."""
+    item = {"listingId": "e819ehm", "listingName": "", "listingAddress": "908 Rich Ave", "listingCity": "Mountain View",
+            "listingState": "CA", "listingZip": "94040", "location": {}, "propertyType": "ApartmentUnitForRent",
+            "models": [], "rentals": [{"RentalKey": "k", "Beds": 2, "Baths": 2, "Rent": 9822, "MinLeaseTerm": 1,
+                                       "MaxLeaseTerm": 12, "UnitNumber": "SI ID1343876P",
+                                       "Description": "The advertised rate of $9,822/month is the lowest available "
+                                                      "price, based on a 30 day(s) stay"}]}
+    (p,) = ADAPTERS["apartments_com"].parse(item, {})
+    assert p.data.furnished is True and p.data.term == "short" and p.data.operator is None
+    assert p.data.extra["stay_template"] is True
+    bg = {**item, "rentals": [{**item["rentals"][0], "UnitNumber": "SI FL1-ID13012A",
+                               "Description": "furnished apartment ... (ID #SFO13012A)"}]}
+    (q,) = ADAPTERS["apartments_com"].parse(bg, {})
+    assert q.data.operator == "Blueground" and q.data.term == "short"
+
+
+def test_plan_offers_never_mix():
+    from aptfinder.plans import plan_key
+
+    base = {"beds": 1, "baths": 1, "sqft": 701}
+    keys = {plan_key({**base, "term": "long"}), plan_key({**base, "term": "long", "furnished": True}),
+            plan_key({**base, "term": "short", "furnished": True})}
+    assert len(keys) == 3

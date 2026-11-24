@@ -158,7 +158,8 @@ function sorted(list) {
   const nil = (v) => (v == null ? Infinity : v);
   const fns = {
     status: (p) => [RANK[placeStatus(p)], -(p.goals[S.goal]?.nice_score || 0), nil(p.min_price_per_bed)],
-    price: (p) => [nil(p.min_price_month)], ppb: (p) => [nil(p.min_price_per_bed)],
+    price: (p) => [nil(S.goal === "temp" ? p.min_stay_month : S.goal === "lease" ? p.min_lease_month : p.min_price_month)],
+    ppb: (p) => [nil(S.goal === "lease" ? p.min_lease_per_bed : p.min_price_per_bed)],
     beds: (p) => [-(p.max_beds || 0)], minutes: (p) => [nil(minutesFor(p)?.minutes)],
     rating: (p) => [-(p.rating || 0)], nice: (p) => [-(Math.max(0, ...Object.values(p.goals).map((g) => g.nice_score || 0)))],
   };
@@ -168,6 +169,15 @@ function sorted(list) {
     for (let i = 0; i < ka.length; i++) if (ka[i] !== kb[i]) return ka[i] < kb[i] ? -1 : 1;
     return 0;
   });
+}
+
+// Lease rent and furnished-stay prices are different offers: temp shows stays, lease shows leases, All both.
+function priceFacts(p) {
+  const lease = p.min_lease_month != null ? `<span><b>${money(p.min_lease_month)}</b>/mo</span><span><b>${money(p.min_lease_per_bed)}</b>/bed</span>` : "";
+  const stay = p.min_stay_month != null ? `<span title="furnished short stay">stay <b>${money(p.min_stay_month)}</b>/mo</span>` : "";
+  if (S.goal === "temp") return stay || `<span class="muted">no furnished stay</span>`;
+  if (S.goal === "lease") return lease || `<span class="muted">no lease price</span>`;
+  return (lease + stay) || `<span><b>${money(p.min_price_month)}</b>/mo</span>`;
 }
 
 function stars(n) { return n ? `<span class="stars" title="${n}/5">${"★".repeat(n)}${"☆".repeat(5 - n)}</span>` : ""; }
@@ -186,7 +196,7 @@ function renderList() {
     return `<div class="card ${st === "fail" || p.todo ? "dim" : ""} ${S.selected === p.place_key ? "sel" : ""}" data-pk="${esc(p.place_key)}">
       <h4>${esc(p.label)} ${stars(p.rating)}</h4>
       <div class="facts">
-        <span><b>${money(p.min_price_month)}</b>/mo</span><span><b>${money(p.min_price_per_bed)}</b>/bed</span>
+        ${priceFacts(p)}
         <span>${esc(bb)}</span>
         <span>${mins ? `<b>${num(mins.minutes)}</b> min ${esc(mode)} to ${esc(tgt)}${mins.provider === "estimate" ? " (est.)" : ""}` : `${esc(mode)} to ${esc(tgt)}: not computed`}</span>
         <span>${esc(p.sources)}</span>${p.n_active ? "" : '<span style="color:var(--bad)">inactive</span>'}
@@ -309,11 +319,11 @@ async function openPlace(pk) {
       ${r.reasons.map(([s, t]) => `<div class="reason ${s}">${s === "pass" ? "✓" : s === "fail" ? "✗" : "?"} ${esc(t)}</div>`).join("")}
       ${r.nice.length ? `<div class="small muted">nice to have: ${r.nice.map(([s, t]) => `${s === "pass" ? "✓" : s === "fail" ? "✗" : "?"} ${esc(t)}`).join(" · ")}</div>` : ""}
     </div>`).join("");
-  const photos = (d.photos || []).map((ph) => `<figure class="ph"><a href="${esc(ph.url)}" target="_blank" rel="noopener noreferrer"><img loading="lazy" src="${esc(ph.url)}" alt="photo from ${esc(ph.site || ph.source)}" onerror="this.closest('figure').remove()"></a>${ph.page ? `<a class="src" href="${esc(ph.page)}" target="_blank" rel="noopener noreferrer" title="Open the page this photo came from">${esc(ph.site || ph.source)} ↗</a>` : `<span class="src">${esc(ph.source)}</span>`}</figure>`)
+  const photos = (d.photos || []).map((ph) => `<figure class="ph"><a href="${esc(ph.page || ph.url)}" target="_blank" rel="noopener noreferrer" title="Open the ${esc(ph.site || ph.source)} page this photo is from"><img loading="lazy" src="${esc(ph.url)}" alt="photo from ${esc(ph.site || ph.source)}" onerror="this.closest('figure').remove()"></a>${ph.page ? `<a class="src" href="${esc(ph.page)}" target="_blank" rel="noopener noreferrer" title="Open the page this photo came from">${esc(ph.site || ph.source)} ↗</a>` : `<span class="src">${esc(ph.source)}</span>`}</figure>`)
     .concat(d.listings.flatMap((l) => l.media.map((f) => `<a href="/media/${encodeURIComponent(f)}" target="_blank" rel="noopener"><img src="/media/${encodeURIComponent(f)}" alt="file from ${esc(l.source)}"></a>`)));
   const rng = (a, f) => (!a ? '<span class="muted">?</span>' : a[0] === a[1] ? f(a[0]) : `${f(a[0])}–${f(a[1])}`);
-  const plans = d.plans || [];
-  const planTable = plans.length ? `<div class="scroll-x"><table>
+  // leases and furnished offers (the building's own furnished option, operators' furnished stays) never mix
+  const planRows = (plans) => `<div class="scroll-x"><table>
     <tr><th>plan</th><th>bd / ba</th><th>sqft</th><th>$/month</th><th>$/bed</th><th>available</th><th>earliest</th><th>sources</th><th></th></tr>
     ${plans.map((pl) => `<tr>
       <td>${esc(pl.name || "")}${pl.offer !== "lease" ? `<br><span class="chip">${esc(pl.offer)}</span>` : ""}</td>
@@ -326,7 +336,12 @@ async function openPlace(pk) {
       <td>${pl.from_direct ? `<b>own site</b>${pl.also_on.length ? `<br><span class="muted">also on ${esc(pl.also_on.join(", "))}</span>` : ""}` : esc(pl.sources.join(", "))}</td>
       <td>${pl.image ? `<a href="${esc(pl.image)}" target="_blank" rel="noopener noreferrer"><img class="plan-img" loading="lazy" src="${esc(pl.image)}" alt="floor plan" onerror="this.parentNode.remove()"></a>` : ""}</td>
     </tr>`).join("")}
-  </table></div>` : '<p class="muted small">No plan information.</p>';
+  </table></div>`;
+  const leasePlans = (d.plans || []).filter((pl) => pl.offer_kind === "lease");
+  const furnPlans = (d.plans || []).filter((pl) => pl.offer_kind !== "lease");
+  const planTable = (leasePlans.length ? planRows(leasePlans) : '<p class="muted small">No lease plan information.</p>')
+    + (furnPlans.length ? `<h3>Furnished options &amp; stays (${furnPlans.length})</h3>
+      <p class="muted small">Furnished leases offered by the building itself, and furnished short stays by operators (e.g. Blueground) inside it.</p>${planRows(furnPlans)}` : "");
   const unitRows = d.listings.map((l, i) => {
     const f = l.fields;
     const c = (k) => ck(l.checks[k], l.overridden.includes(k));
@@ -358,7 +373,7 @@ async function openPlace(pk) {
     <div class="muted small">${esc(p.address || "address unknown")} ${p.city ? "· " + esc(p.city) : ""} · ${esc(pk)}</div>
     <h3>Goals</h3>${goals}
     ${photos.length ? `<h3>Photos (${photos.length})</h3><div class="media">${photos.join("")}</div>` : '<p class="muted small">No photos from any source.</p>'}
-    <h3>Floor plans</h3>${planTable}
+    <h3>Floor plans (leases)</h3>${planTable}
     ${listingTable}
     <h3>Price history (per month)</h3>${historyChart([...d.listings].sort((a, b) => b.history.length - a.history.length).slice(0, 8))}
     <h3>Commute <button id="route-btn" class="small">${S.meta.google ? "Route with Google" : "Recompute (estimate)"}</button></h3>${matrixTable(d)}

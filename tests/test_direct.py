@@ -34,12 +34,17 @@ def test_avalon_units_match_benchmark_shape():
          "coordinates": {"latitude": 37.39, "longitude": -122.08},
          "units": [{"unitName": "174", "bedroomNumber": 3, "bathroomNumber": 2, "squareFeet": 1056,
                     "floorPlan": {"name": "C1"}, "availableDateUnfurnished": "2026-11-25T05:00:00+00:00",
-                    "startingAtPricesUnfurnished": {"leaseTerm": 15, "prices": {"price": 5320, "totalPrice": 5480}}}]}
+                    "startingAtPricesUnfurnished": {"leaseTerm": 15, "prices": {"price": 5320, "totalPrice": 5480}},
+                    "availableDateFurnished": "2026-11-25T05:00:00+00:00",
+                    "startingAtPricesFurnished": {"leaseTerm": 15, "prices": {"price": 6570}}}]}
     item = page("https://a.example/av/", [{"type": "application/javascript", "id": "fusion-metadata",
                                            "text": "window.Fusion=window.Fusion||{};Fusion.globalContent="
                                                    + json.dumps(g) + ";Fusion.x=1;"}])
-    (p,) = direct.parse(item, {})
+    p, pf = direct.parse(item, {})
     assert p.source_id == "avalon-mountain-view:u:174" and p.price == 5320 and p.price_basis == "month"
+    # AvalonBay's own furnished option on the same unit is a separate offer
+    assert pf.source_id == "avalon-mountain-view:uf:174" and pf.price == 6570 and pf.data.furnished is True
+    assert pf.data.term == "long" and pf.data.extra["offer"] == "Furnished+"
     assert (p.data.beds, p.data.baths, p.data.sqft, p.data.floor_plan) == (3, 2, 1056, "C1")
     assert p.data.available_from == "2026-11-25"
     assert place_key(p.data.address, p.data.city, None, None) == place_key("1600 Villa St, Mountain View, CA 94041",

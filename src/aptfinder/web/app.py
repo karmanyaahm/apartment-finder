@@ -60,8 +60,9 @@ def group_plans(listings: list[dict[str, Any]]) -> list[dict[str, Any]]:
         sqft = [x["sqft"] for x in f if x.get("sqft")]
         avail = sorted(x["available_from"] for x in fb if x.get("available_from"))
         active = [l for l in basis if l["active"]]
-        stay = key.startswith("stay|")
+        kind = key.split("|", 1)[0]  # lease | furnished | stay
         ops = sorted({x["operator"] for x in f if x.get("operator")})
+        tag = f" ({', '.join(ops)})" if ops else ""
         out.append({
             "key": key, "name": next((l["fields"]["floor_plan"] for l in sorted(ls, key=lambda l: l["source"] != "direct")
                                       if l["fields"].get("floor_plan")
@@ -72,7 +73,8 @@ def group_plans(listings: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "price_per_bed": (min(prices) / f[0]["beds"]) if prices and f[0].get("beds") else None,
             "n_listings": len(ls), "n_active": len(active),
             "n_units": len({x.get("unit") for x in fb if x.get("unit")}),
-            "offer": "furnished stay" + (f" ({', '.join(ops)})" if ops else "") if stay else "lease",
+            "offer": {"stay": "furnished stay" + tag, "furnished": "furnished lease" + tag}.get(kind, "lease"),
+            "offer_kind": kind,
             "from_direct": bool(direct),
             "earliest": avail[0] if avail else None,
             "sources": sorted({l["source"] for l in ls}),
@@ -83,7 +85,7 @@ def group_plans(listings: list[dict[str, Any]]) -> list[dict[str, Any]]:
                            if u and not any(h in u for h in HOTLINK_BLOCKED)), None),
             "listing_ids": [f"{l['source']}|{l['source_id']}" for l in ls],
         })
-    return sorted(out, key=lambda p: (p["offer"] != "lease", p["beds"] is None, p["beds"] or 0, p["baths"] or 0,
+    return sorted(out, key=lambda p: (p["offer"] != "lease", p["offer"], p["beds"] is None, p["beds"] or 0, p["baths"] or 0,
                                       (p["price_month"] or [1e9])[0]))
 
 

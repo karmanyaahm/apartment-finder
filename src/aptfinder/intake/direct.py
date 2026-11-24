@@ -121,6 +121,21 @@ def parse_avalon(item: dict[str, Any], site: dict[str, Any]) -> list[Parsed]:
                                         "total_price": prices.get("totalPrice"),
                                         "net_effective_price": prices.get("netEffectivePrice"),
                                         "unit_status": u.get("unitStatus"), "furnish_status": u.get("furnishStatus")})))
+        # AvalonBay's own furnished option ("Furnished+") on the same unit: a separate offer with its own price
+        fpr = u.get("startingAtPricesFurnished") or {}
+        fprices = fpr.get("prices") or {}
+        if fprices.get("price"):
+            out.append(Parsed(
+                source_id=f"{site['id']}:uf:{u.get('unitName')}", url=u.get("url") or site["url"],
+                price=money(fprices.get("price")), price_basis="month",
+                data=ObservationData(**base, unit=str(u.get("unitName")), floor_plan=fp.get("name"), furnished=True,
+                                     beds=u.get("bedroomNumber"), baths=u.get("bathroomNumber"),
+                                     sqft=u.get("squareFeet"), available_from=_date(u.get("availableDateFurnished")),
+                                     extra={"site": site["id"], "platform": "avalon", "offer": "Furnished+",
+                                            "lease_term_months": fpr.get("leaseTerm"),
+                                            "total_price": fprices.get("totalPrice"),
+                                            "unit_status": u.get("unitStatus"),
+                                            "furnish_status": u.get("furnishStatus")})))
     return out
 
 
