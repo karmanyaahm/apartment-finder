@@ -164,7 +164,7 @@ Python 3.12 (pinned through `uv`; the system Python is 3.10), `apify-client`, Fa
 ## Still open
 
 - Goal 1 budget; whether the last days need covering.
-- Apify token and spend cap (step 8). Google key: enable the Routes API on it, then run `aptf-eval commute-check --provider google` for the step 4 hand check.
+- Apify token and spend cap (step 8). Google routing works (step 4 hand check done 2026-11-24).
 - Google bus stop list.
 
 ## Decision log
@@ -214,4 +214,5 @@ Each entry: date, decision, why, what it replaced.
 - **2026-11-24: `aptf-intake reparse <source> <raw file>`** re-ingests a saved raw file with the current parser as a new targeted run, so parser fixes never require paying for a scrape again.
 - **2026-11-24: Blueground dropped as a direct source.** Its Bay Area market page lists only San Francisco neighborhoods, and the embedded listing data has no Peninsula listings, so there is nothing to collect in the search area. Its few Peninsula units arrive through Apartments.com.
 - **2026-11-24: Working rule: name blockers, don't detour** (`AGENTS.md`). User's instruction after an exploratory Blueground scraping detour.
+- **2026-11-24: Step 4 hand check passed with Google Routes.** Against the benchmark's Google Maps columns: drive to Meta HQ mean error 1.0 min (17 of 19 within 2 min); walk to nearest Caltrain mean error 1.9 min (17 of 22). Outliers: Shadowbrook (+8.8: the check routes only to the straight-line-nearest station; trip computation uses k = 2), Spruce (+6.1), Park Place (+3.6), The Shadows (-3.2); likely geocode or station-point placement, not yet confirmed. The earlier 403 was the Routes API not being enabled on the project, then a few minutes of propagation.
 - **2026-11-23: Rengstorff industrial complex replaced by "Rengstorff industrial complex", 1000 N Rengstorff Ave, Mountain View.** User's choice: a stand-in for an office that may go in the industrial area south of the Googleplex. Replaced: the Rengstorff industrial complex target.
