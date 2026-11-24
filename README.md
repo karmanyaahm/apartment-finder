@@ -78,6 +78,18 @@ nix run .#eval -- recall                                         # found vs. a h
 
 Run `identity` and `commute compute` after each intake run. Goal results are computed on read, so editing `goals.toml` needs no rerun.
 
+Buildings' own websites (the source of truth when found) and facts that sit only in listing text. These call a local, logged-in Claude Code (`claude -p`); `nix shell --impure nixpkgs/nixos-unstable#claude-code` provides a current one (set `NIXPKGS_ALLOW_UNFREE=1`):
+
+```sh
+nix run .#intake -- extract craigslist                           # Haiku reads listing text: address, name, website, furnished, ...
+nix run .#intake -- extract furnishedfinder
+nix run .#intake -- promote-sites --chunk mountain_view          # websites listings name -> fetched via Apify, address-checked, scraped
+nix run .#intake -- discover-sites --chunk mountain_view --limit 40   # web search for buildings still without a site
+nix run .#intake -- run direct --chunk mountain_view             # re-scrape every known building website
+```
+
+A diagram of the whole pipeline, with what has run and what is planned: [pipeline flow chart](https://claude.ai/artifact/JAGKeZFdoEGYFBRyzzaG7B) (a private claude.ai page; only people it is shared with can open it).
+
 ## 3. Run the dashboard
 
 ```sh
