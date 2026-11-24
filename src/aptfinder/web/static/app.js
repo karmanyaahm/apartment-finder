@@ -531,7 +531,10 @@ async function boot() {
   S.meta = await api("api/meta");
   $("#dbname").textContent = S.meta.db;
   const gs = $("#goal-switch");
-  gs.innerHTML = [`<button data-goal="all" class="on">All</button>`, ...S.meta.goals.map((g) => `<button data-goal="${esc(g.id)}" title="${esc(g.label)}">${esc(g.id)}</button>`)].join("");
+  // start on the lease goal when there is one, else All
+  S.goal = S.meta.goals.some((g) => g.id === "lease") ? "lease" : "all";
+  gs.innerHTML = [`<button data-goal="all">All</button>`, ...S.meta.goals.map((g) => `<button data-goal="${esc(g.id)}" title="${esc(g.label)}">${esc(g.id)}</button>`)].join("");
+  $$("button", gs).forEach((x) => x.classList.toggle("on", x.dataset.goal === S.goal));
   $$("button", gs).forEach((b) => b.addEventListener("click", () => {
     S.goal = b.dataset.goal;
     $$("button", gs).forEach((x) => x.classList.toggle("on", x === b));
