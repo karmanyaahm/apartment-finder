@@ -4,7 +4,7 @@
 
 const S = {
   meta: null, places: [], points: {}, goal: "all", base: "sat", markers: {}, layers: {},
-  selected: null, verifySkip: 0, verifySeed: 0,
+  selected: null, verifySkip: 0, verifySeed: 0, verifyMode: "conflict", conflictSkip: 0,
 };
 const $ = (sel, el = document) => el.querySelector(sel);
 const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
@@ -441,16 +441,65 @@ async function refreshAfterWrite(pk) {
 /* ---------------------------------------------------------------- verify mode */
 async function openVerify() {
   $("#verify").classList.remove("hidden");
+  S.verifyMode = "conflict"; S.conflictSkip = 0; S.verifySkip = 0;
   await renderVerify();
 }
 
-async function renderVerify() {
+const CONFLICT_PAGE = 10;
+const gotoPlace = (pk) => { $("#verify").classList.add("hidden"); openPlace(pk); };
+
+/* conflicts, ten to a screen: one block per conflict, a row per disagreeing field, a column per source */
+function conflictBlock(e) {
+  const it = e.item, obs = e.observations;
+  const unit = it.unit_key ? it.unit_key.split("/").slice(1).join("/") : "";
+  const tags = [
+    it.pending_render ? `<span class="chip pending" title="${esc(it.pending_reason || "")}">own-site render pending: will update this</span>` : "",
+    it.text ? `<span class="chip">source vs its own text</span>` : "",
+  ].join("");
+  const textTh = it.text ? `<th>${esc(it.text_label)}<br><span class="muted">read from the text</span></th>` : "";
+  const textTd = (f) => (it.text ? `<td>${fmtField(f, it.text[f])}</td>` : "");
+  return `<div class="vconf${it.pending_render ? " pending" : ""}">
+    <div class="vconf-head"><a href="#" data-goto="${esc(it.place_key)}">${esc(e.label || it.place_key)}</a>
+      ${unit ? `<span class="muted small">unit ${esc(unit)}</span>` : ""} ${tags}</div>
+    <div class="scroll-x"><table class="vconf-t"><tr><th></th>${obs.map((o) => `<th><a href="${esc(o.url)}" target="_blank" rel="noopener noreferrer">${esc(o.source)} ↗</a> <span class="muted">${esc((o.observed_at || "").slice(0, 10))}</span></th>`).join("")}${textTh}</tr>
+    ${e.fields.map((f) => `<tr><th>${esc(f)}</th>${obs.map((o) => `<td><b>${fmtField(f, o.fields[f])}</b> ${vbtns({ observation_id: o.obs_id, field: f, queue: "conflict" })}</td>`).join("")}${textTd(f)}</tr>`).join("")}
+    </table></div></div>`;
+}
+
+async function renderConflicts() {
   const body = $("#verify-body");
   body.innerHTML = '<p class="muted">Loading…</p>';
-  const d = await api(`api/verify/next?seed=${S.verifySeed}&skip=${S.verifySkip}`);
+  const d = await api(`api/verify/batch?kind=conflict&skip=${S.conflictSkip}&n=${CONFLICT_PAGE}`);
+  if (!d.items.length && S.conflictSkip > 0 && d.total > 0) { S.conflictSkip = Math.max(0, d.total - CONFLICT_PAGE); return renderConflicts(); }
+  if (!d.items.length) { S.verifyMode = "rest"; S.verifySkip = 0; return renderVerify(); }
+  const from = S.conflictSkip + 1, to = S.conflictSkip + d.items.length;
+  const more = to < d.total;
+  body.innerHTML = `<h2>${d.total} conflicts: ${d.actionable} to check, ${d.pending} waiting for an own-site render</h2>
+    <p class="small">Sources disagree on these units. Open each listing, then mark every stored value: ✓ correct, ✗ wrong (type the true value), ? cannot tell. Conflicts tagged <i>own-site render pending</i> come last: the building's own site will be read again and will likely settle them.</p>
+    <p class="muted small">Showing ${from}–${to} of ${d.total}</p>
+    ${d.items.map(conflictBlock).join("")}
+    <p style="margin-top:14px"><button id="v-prev" ${S.conflictSkip ? "" : "disabled"}>Previous ${CONFLICT_PAGE}</button>
+      ${more ? `<button id="v-more" class="accent">Next ${CONFLICT_PAGE}</button>` : ""}
+      <button id="v-rest" class="${more ? "" : "accent"}">${more ? "Skip to" : "Continue:"} buildings without a website and the sample</button></p>`;
+  $$(".vbtns", body).forEach(wireVbtns);
+  $$("[data-goto]", body).forEach((a) => a.addEventListener("click", (ev) => { ev.preventDefault(); gotoPlace(a.dataset.goto); }));
+  $("#v-prev").addEventListener("click", () => { S.conflictSkip = Math.max(0, S.conflictSkip - CONFLICT_PAGE); renderConflicts(); loadStatus(); });
+  $("#v-more")?.addEventListener("click", () => {
+    // a conflict whose every value got a verdict has left the queue, so the next page starts that much earlier
+    const done = $$(".vconf", body).filter((b) => $$(".vbtns", b).every((v) => $("button.on", v))).length;
+    S.conflictSkip += d.items.length - done; renderConflicts(); loadStatus();
+  });
+  $("#v-rest").addEventListener("click", () => { S.verifyMode = "rest"; S.verifySkip = 0; renderVerify(); loadStatus(); });
+}
+
+async function renderVerify() {
+  if (S.verifyMode === "conflict") return renderConflicts();
+  const body = $("#verify-body");
+  body.innerHTML = '<p class="muted">Loading…</p>';
+  const d = await api(`api/verify/next?seed=${S.verifySeed}&skip=${S.verifySkip}&conflicts=false`);
   if (d.done) { body.innerHTML = "<h2>Queue empty</h2><p>Nothing left to check. 🎉</p>"; return; }
   const it = d.item;
-  const head = `<p class="muted small">${d.remaining} items in queue (conflicts first, then buildings without a website, then an even sample across sources) · item ${S.verifySkip + 1}</p>`;
+  const head = `<p class="muted small">${d.remaining} items in queue (buildings without a website, then an even sample across sources) · item ${S.verifySkip + 1} · <a href="#" id="v-back">back to the conflicts</a></p>`;
   const nav = `<p style="margin-top:14px"><button id="v-skip">Skip</button> <button id="v-next" class="accent">Next</button></p>`;
   if (it.kind === "no_website") {
     // a named apartment community with no website known: unusual, so you look it up
@@ -470,7 +519,8 @@ async function renderVerify() {
     };
     $("#nw-save").addEventListener("click", () => { const u = $("#nw-url").value.trim(); if (u) save(u); });
     $("#nw-none").addEventListener("click", () => save("none"));
-    $("[data-goto]", body).addEventListener("click", (e) => { e.preventDefault(); $("#verify").classList.add("hidden"); openPlace(it.place_key); });
+    $("[data-goto]", body).addEventListener("click", (e) => { e.preventDefault(); gotoPlace(it.place_key); });
+    $("#v-back").addEventListener("click", backToConflicts);
     $("#v-skip").addEventListener("click", () => { S.verifySkip++; renderVerify(); });
     $("#v-next").addEventListener("click", () => { renderVerify(); loadStatus(); });
     return;
@@ -499,9 +549,12 @@ async function renderVerify() {
       </table></div>${nav}`;
   }
   $$(".vbtns", body).forEach(wireVbtns);
+  $("#v-back").addEventListener("click", backToConflicts);
   $("#v-skip").addEventListener("click", () => { S.verifySkip++; renderVerify(); });
   $("#v-next").addEventListener("click", () => { renderVerify(); loadStatus(); });
 }
+
+function backToConflicts(e) { e.preventDefault(); S.verifyMode = "conflict"; S.conflictSkip = 0; renderVerify(); }
 
 function vbtns(ctx) {
   return `<span class="vbtns" data-ctx='${esc(JSON.stringify(ctx))}'>
@@ -627,7 +680,8 @@ async function loadStatus() {
   for (const [src, list] of Object.entries(accBySource)) parts.push(`<span title="hand-checked accuracy">✓ ${esc(src)}: ${esc(list.join(", "))}</span>`);
   if (!s.accuracy.length) parts.push(`<span>no hand checks yet</span>`);
   $("#status-strip").innerHTML = parts.join("");
-  $("#queue-count").textContent = `(${s.queues.conflict} conflicts · ${s.queues.no_website ?? 0} no website · ${s.queues.sample})`;
+  const pend = s.queues.conflict_pending ? ` + ${s.queues.conflict_pending} pending render` : "";
+  $("#queue-count").textContent = `(${s.queues.conflict} conflicts${pend} · ${s.queues.no_website ?? 0} no website · ${s.queues.sample})`;
 }
 
 /* ---------------------------------------------------------------- boot */

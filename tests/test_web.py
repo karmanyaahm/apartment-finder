@@ -70,6 +70,23 @@ def test_verify_flow_conflict_first_and_override(client):
     assert status["accuracy"][0]["source"] == "apartments_com"
 
 
+def test_verify_batch_of_conflicts(client):
+    c, _ = client
+    d = c.get("/api/verify/batch?kind=conflict&skip=0&n=10").json()
+    assert (d["total"], d["actionable"], d["pending"]) == (1, 1, 0)
+    (e,) = d["items"]
+    assert e["item"]["kind"] == "conflict" and e["item"]["pending_render"] is False
+    assert set(e["fields"]) == {"price", "baths", "available_from"}
+    assert "Showers" in e["label"] and {o["source"] for o in e["observations"]} == {"zillow", "apartments_com"}
+    assert all("baths" in o["fields"] for o in e["observations"])
+    assert c.get("/api/verify/batch?kind=conflict&skip=10").json()["items"] == []
+    assert c.get("/api/verify/batch?kind=sample").status_code == 400
+    q = c.get("/api/status").json()["queues"]
+    assert (q["conflict"], q["conflict_pending"]) == (1, 0)
+    # the one-at-a-time flow without conflicts starts at the rest of the queue
+    assert c.get("/api/verify/next?conflicts=false").json()["item"]["kind"] != "conflict"
+
+
 def test_trip_check(client):
     c, db = client
     from aptfinder.store import append_trip

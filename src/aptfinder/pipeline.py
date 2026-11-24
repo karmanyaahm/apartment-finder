@@ -356,14 +356,18 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
 
     # 10. verify
     n_checks = conn.execute("SELECT COUNT(*) FROM checks").fetchone()[0]
-    conflicts = len(verify.conflict_queue(conn)) + len(verify.text_conflict_queue(conn))
+    open_conflicts = verify.all_conflicts(conn)
+    conflicts = len(open_conflicts)
+    pending = sum(c["pending_render"] for c in open_conflicts)  # an own-site render will likely settle these
     # the no-website queue: named buildings with no site known and no answer from you
     no_web = sum(1 for p in named if p["web"] in ("not_searched", "no_site", "blocked", "rejected"))
     stage("verify", "Verify (hand checks)",
           "done" if not conflicts and not no_web else "todo" if not n_checks else "partial",
-          f"{n_checks} checks made; {conflicts} open conflicts; {no_web} named buildings without a website",
+          f"{n_checks} checks made; {conflicts} open conflicts ({pending} waiting for an own-site render); "
+          f"{no_web} named buildings without a website",
           ["Verify button in this dashboard"] if conflicts or no_web else [],
-          counts={"checks": n_checks, "conflicts": conflicts, "no_website": no_web})
+          counts={"checks": n_checks, "conflicts": conflicts, "conflicts_pending_render": pending,
+                  "no_website": no_web})
 
     # 11. filter (computed on every read)
     per_goal = {g: dict(Counter(r["status"] for r in pres.values())) for g, pres in res["places"].items()}

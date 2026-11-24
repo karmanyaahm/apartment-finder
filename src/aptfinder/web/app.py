@@ -361,7 +361,8 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         with lock:
             acc = verify.accuracy(conn)
             agree = verify.agreement(conn)
-            n_conflict = len(verify.conflict_queue(conn)) + len(verify.text_conflict_queue(conn))
+            conflicts = verify.all_conflicts(conn)
+            n_pending = sum(c["pending_render"] for c in conflicts)
             n_sample = len(verify.sample_queue(conn))
             n_nosite = len(verify.no_website_queue(conn))
         from ..trips import google_usage
@@ -371,7 +372,8 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         return {
             "runs": runs, "spend": spend, "errors": errors, "google": google,
             "accuracy": [{"source": s, "field": f, **a} for (s, f), a in sorted(acc.items())],
-            "agreement": agree, "queues": {"conflict": n_conflict, "sample": n_sample,
+            "agreement": agree, "queues": {"conflict": len(conflicts) - n_pending, "conflict_pending": n_pending,
+                                           "sample": n_sample,
                                            "no_website": n_nosite},
             "counts": q("SELECT (SELECT COUNT(*) FROM places) AS places, "
                         "(SELECT COUNT(*) FROM listings) AS listings, "
@@ -394,10 +396,41 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         return {"obs_id": obs_id, "source": r["source"], "source_id": r["source_id"], "url": r["url"],
                 "observed_at": r["observed_at"], "fields": out, "lat": data.get("lat"), "lon": data.get("lon")}
 
-    @app.get("/api/verify/next")
-    def verify_next(seed: int = 0, skip: int = 0) -> dict[str, Any]:
+    def _listing_detail(item: dict[str, Any]) -> dict[str, Any]:
+        """A conflict's or sample listing's observations, the fields to check and the place."""
+        ids = [x["obs_id"] for x in item["listings"]] if item["kind"] == "conflict" else [item["obs_id"]]
+        out: dict[str, Any] = {"observations": [_obs_fields(i) for i in ids]}
+        if item["kind"] == "conflict":
+            # the queue's price_month conflicts are checked on the stored price
+            out["fields"] = sorted({verify.CHECK_FIELD.get(f, f) for f in item["fields"]})
+        else:
+            out["fields"] = load_goals().verify.sample_fields
+        p = q("SELECT place_key, address, property_name, operator FROM places WHERE place_key = ?",
+              (item["place_key"],))
+        out["place"] = {"address": p[0]["address"], "property_name": p[0]["property_name"]} if p else None
+        out["label"] = place_label(p[0]) if p else None
+        return out
+
+    @app.get("/api/verify/batch")
+    def verify_batch(kind: str = "conflict", skip: int = 0, n: int = 10) -> dict[str, Any]:
+        """Up to n conflicts from `skip` (actionable first, those waiting for an own-site render last), each with
+        its observations, disagreeing fields and place label, plus the totals."""
+        if kind != "conflict":
+            raise HTTPException(400, "batch is for conflicts; use /api/verify/next for the rest")
         with lock:
-            items = (verify.conflict_queue(conn) + verify.text_conflict_queue(conn) + verify.no_website_queue(conn)
+            items = verify.all_conflicts(conn)
+        n = max(1, min(n, 50))
+        pending = sum(c["pending_render"] for c in items)
+        return {"kind": kind, "skip": skip, "n": n, "total": len(items), "actionable": len(items) - pending,
+                "pending": pending,
+                "items": [{"item": it, **_listing_detail(it)} for it in items[max(0, skip):max(0, skip) + n]]}
+
+    @app.get("/api/verify/next")
+    def verify_next(seed: int = 0, skip: int = 0, conflicts: bool = True) -> dict[str, Any]:
+        """One item at a time: conflicts (unless conflicts=false: the dashboard pages them with /batch), buildings
+        without a website, then the sample."""
+        with lock:
+            items = ((verify.all_conflicts(conn) if conflicts else []) + verify.no_website_queue(conn)
                      + verify.sample_queue(conn, seed))
         if skip >= len(items):
             return {"done": True, "remaining": 0}
@@ -406,15 +439,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         if item["kind"] == "no_website":
             return out
         if item["kind"] in ("conflict", "listing"):
-            ids = [x["obs_id"] for x in item["listings"]] if item["kind"] == "conflict" else [item["obs_id"]]
-            out["observations"] = [_obs_fields(i) for i in ids]
-            if item["kind"] == "conflict":
-                # the queue's price_month conflicts are checked on the stored price
-                out["fields"] = sorted({verify.CHECK_FIELD.get(f, f) for f in item["fields"]})
-            else:
-                out["fields"] = load_goals().verify.sample_fields
-            label = q("SELECT address, property_name FROM places WHERE place_key = ?", (item["place_key"],))
-            out["place"] = label[0] if label else None
+            out.update(_listing_detail(item))
         else:
             t = q("SELECT * FROM trips WHERE id = ?", (item["trip_id"],))[0]
             p = q("SELECT lat, lon, address FROM places WHERE place_key = ?", (t["place_key"],))

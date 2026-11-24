@@ -128,13 +128,37 @@ def _differs(field: str, a: Any, b: Any) -> bool:
     return a != b
 
 
+def pending_render(conn: sqlite3.Connection) -> dict[str, str]:
+    """place_key -> reason, for places with an own site (any `direct` row, retired ones too) that has not been
+    rendered yet (`aptf-intake render`: no direct row with extra.platform = 'render'). Avalon sites never need a
+    render: their page data gives exact units. A pending render will replace the own-site plans, so a conflict
+    there is likely to settle without a hand check."""
+    from ..config import load_sites
+
+    avalon = {sid for sid, s in load_sites().items() if s.get("platform") == "avalon"}
+    out = {}
+    for r in conn.execute("""
+            SELECT place_key, GROUP_CONCAT(DISTINCT json_extract(data, '$.extra.site')) AS sites,
+                   SUM(json_extract(data, '$.extra.platform') IN ('render', 'avalon')) AS done
+            FROM listings WHERE source = 'direct' AND place_key IS NOT NULL GROUP BY place_key"""):
+        sites = sorted(set((r["sites"] or "").split(",")) - {""})
+        if r["done"] or any(s in avalon for s in sites):
+            continue
+        out[r["place_key"]] = f"own site {', '.join(sites) or '(unnamed)'} not rendered yet"
+    return out
+
+
 def conflict_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    """Units with listings from more than one source that disagree on a field. A conflict drops out
-    once every disagreeing field has a current check on every listing (see the current_checks view)."""
+    """Units with active listings from more than one source that disagree on a field (a retired listing never
+    makes a conflict). A conflict drops out once every disagreeing field has a current check on every listing
+    (see the current_checks view). Conflicts at a place whose own site awaits a render carry
+    `pending_render: True` and a `pending_reason`, and come after the actionable ones."""
     by_unit: dict[str, list[sqlite3.Row]] = defaultdict(list)
-    for r in conn.execute("SELECT * FROM listings WHERE unit_key IS NOT NULL"):
+    for r in conn.execute("SELECT * FROM listings WHERE unit_key IS NOT NULL AND active = 1 "
+                          "AND kind IS NOT 'site_info'"):
         by_unit[r["unit_key"]].append(r)
     checked = current_checks(conn)
+    pending = pending_render(conn)
     out = []
     for uk, rows in sorted(by_unit.items()):
         if len({r["source"] for r in rows}) < 2:
@@ -147,10 +171,20 @@ def conflict_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                 if not all(cf in checked.get((r["source"], r["source_id"]), {}) for r in rows):
                     fields.append(f)
         if fields:
-            out.append({"kind": "conflict", "unit_key": uk, "place_key": rows[0]["place_key"], "fields": fields,
+            pk = rows[0]["place_key"]
+            out.append({"kind": "conflict", "unit_key": uk, "place_key": pk, "fields": fields,
+                        "pending_render": pk in pending, "pending_reason": pending.get(pk),
                         "listings": [{"source": r["source"], "source_id": r["source_id"], "obs_id": r["obs_id"]}
                                      for r in rows]})
-    return out
+    return sorted(out, key=lambda c: c["pending_render"])  # stable: actionable first, unit order within
+
+
+def all_conflicts(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Every open conflict in Verify order: actionable cross-source ones, then text conflicts (a render does not
+    settle those), then cross-source ones waiting for an own-site render."""
+    cross = conflict_queue(conn)
+    return ([c for c in cross if not c["pending_render"]] + text_conflict_queue(conn)
+            + [c for c in cross if c["pending_render"]])
 
 
 def text_conflict_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -166,7 +200,7 @@ def text_conflict_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         open_ = {f: v for f, v in text.items() if f not in checked.get((r["source"], r["source_id"]), {})}
         if open_:
             out.append({"kind": "conflict", "unit_key": None, "place_key": r["place_key"], "fields": sorted(open_),
-                        "text": open_, "text_label": f"{r['source']} (text)",
+                        "pending_render": False, "text": open_, "text_label": f"{r['source']} (text)",
                         "listings": [{"source": r["source"], "source_id": r["source_id"], "obs_id": r["obs_id"]}]})
     return out
 
@@ -208,7 +242,8 @@ def no_website_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 def agreement(conn: sqlite3.Connection) -> dict[str, dict[str, int]]:
     """Cross-source agreement per field over multi-source units (free signal, no manual work)."""
     by_unit: dict[str, list[sqlite3.Row]] = defaultdict(list)
-    for r in conn.execute("SELECT * FROM listings WHERE unit_key IS NOT NULL"):
+    for r in conn.execute("SELECT * FROM listings WHERE unit_key IS NOT NULL AND active = 1 "
+                          "AND kind IS NOT 'site_info'"):
         by_unit[r["unit_key"]].append(r)
     out = {f: {"agree": 0, "compared": 0} for f in CONFLICT_FIELDS}
     for rows in by_unit.values():

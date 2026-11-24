@@ -6,8 +6,8 @@ from aptfinder import identity
 from aptfinder.config import GoalsConfig, load_goals
 from aptfinder.filter import evaluate_all
 from aptfinder.filter.rules import CHECK, FAIL, PASS, Ctx, evaluate
-from aptfinder.store import append_check, append_link, append_observation, append_trip, start_run
-from aptfinder.verify import accuracy, agreement, conflict_queue, sample_queue, wilson
+from aptfinder.store import append_check, append_link, append_observation, append_trip, finish_run, start_run
+from aptfinder.verify import accuracy, agreement, conflict_queue, pending_render, sample_queue, wilson
 
 DOWNTOWN = "commute_targets:Downtown Palo Alto"
 
@@ -217,6 +217,51 @@ def test_conflict_detection_and_resolution(conn):
     assert conflict_queue(conn) == []
     # the wrong price check overrides apartments' price in the views
     assert conn.execute("SELECT price FROM listings WHERE source='apartments' AND source_id='9'").fetchone()[0] == 5000
+
+
+def test_retired_listing_never_makes_a_conflict(conn):
+    """A plan the own site no longer offers (absent from a later complete run) is not compared."""
+    r1 = start_run(conn, "intake", "direct")
+    obs(conn, r1, "direct", "s:old", 3000, address="10 Retired Way, Mountain View", beds=1, sqft=763,
+        unit="101")
+    finish_run(conn, r1, "ok")
+    r2 = start_run(conn, "intake", "apartments_com")
+    obs(conn, r2, "apartments_com", "a1", 3000, address="10 Retired Way, Mountain View", beds=1, sqft=738,
+        unit="101")
+    finish_run(conn, r2, "ok")
+    identity.run(conn)
+    assert [c["fields"] for c in conflict_queue(conn)] == [["sqft"]]
+    r3 = start_run(conn, "intake", "direct")  # a later full run of the site without that plan
+    obs(conn, r3, "direct", "s:new", 3100, address="10 Retired Way, Mountain View", beds=2, unit="202")
+    finish_run(conn, r3, "ok")
+    identity.run(conn)
+    assert conn.execute("SELECT active FROM listings WHERE source_id = 's:old'").fetchone()[0] == 0
+    assert conflict_queue(conn) == []
+    assert agreement(conn)["sqft"] == {"agree": 0, "compared": 0}
+
+
+def test_conflicts_waiting_for_an_own_site_render_come_last(conn):
+    r = start_run(conn, "intake", "zillow")
+    for addr, sid in (("1 Alpha St, Mountain View", "a"), ("2 Beta St, Mountain View", "b")):
+        obs(conn, r, "zillow", sid, 5000, address=addr, beds=2, baths=1)
+        obs(conn, r, "apartments", sid, 5000, address=addr, beds=2, baths=2)
+    # 1 Alpha St has an own site (photos only so far) that has not been rendered
+    obs(conn, r, "direct", "alpha:photos", None, None, address="1 Alpha St, Mountain View", kind="site_info",
+        extra={"site": "alpha", "platform": "photos"})
+    identity.run(conn)
+    q = conflict_queue(conn)
+    assert [(c["listings"][0]["source_id"], c["pending_render"]) for c in q] == [("b", False), ("a", True)]
+    assert "alpha" in q[1]["pending_reason"] and q[0]["pending_reason"] is None
+    # once the site is rendered, the conflict is actionable again
+    obs(conn, r, "direct", "alpha:r:x", 4800, address="1 Alpha St, Mountain View", beds=3,
+        extra={"site": "alpha", "platform": "render"})
+    identity.run(conn)
+    assert not any(c["pending_render"] for c in conflict_queue(conn))
+    # an Avalon site never needs a render
+    obs(conn, r, "direct", "avalon-mountain-view:1", 4000, address="2 Beta St, Mountain View", beds=1,
+        extra={"site": "avalon-mountain-view", "platform": "avalon"})
+    identity.run(conn)
+    assert pending_render(conn) == {}
 
 
 @pytest.mark.parametrize("goal", ["temp", "lease"])
