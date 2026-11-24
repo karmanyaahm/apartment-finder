@@ -6,7 +6,7 @@ Local apartment finder: gathers listings through Apify actors into an append-onl
 
 ## What it does
 
-- **Gathers wide, filters late.** Zillow, Apartments.com, Craigslist, Airbnb, Furnished Finder, buildings' own websites and Google Places (an official API), all through Apify actors, area by area (Caltrain station walk zones) with a coverage ledger of what's done and what's left. Goals never narrow what gets collected.
+- **Gathers wide, filters late.** Zillow, Apartments.com, Craigslist, Airbnb, Furnished Finder, Zumper, PadMapper, buildings' own websites and Google Places (an official API), all through Apify actors, area by area (Caltrain station walk zones) with a coverage ledger of what's done and what's left. Goals never narrow what gets collected.
 - **One building, every source.** Listings from different sites are matched to the same place and unit, so a building shows its own website's floor plans and units next to the aggregator listings, with photos from all of them.
 - **Goals are filters you can change any time.** Each listing gets pass, fail (with reasons) or needs check (naming the missing field). Unknown never rejects.
 - **Real commutes.** Walk, bike, transit, drive, bike + Caltrain + bike and bike + bus + bike to your targets, with free straight-line estimates for everything and metered Google routing only where a goal needs it.
@@ -87,6 +87,9 @@ nix run .#intake -- promote-sites --chunk mountain_view          # websites list
 nix run .#intake -- discover-sites --chunk mountain_view --limit 40   # web search for buildings still without a site
 nix run .#intake -- run direct --chunk mountain_view             # re-scrape every known building website
 nix run .#intake -- run google_places --chunk mountain_view     # apartment communities from Google Places (official API; metered, caps in config/google.toml)
+nix run .#intake -- run zumper --chunk mountain_view            # Zumper: floor plans and building websites, per city
+nix run .#intake -- run padmapper --chunk mountain_view         # PadMapper (Zumper's inventory, search results only), per city
+nix run .#verify -- samples --source zumper --n 5 --seed 1     # random rows of a source with the page to open, to check by hand
 ```
 
 The dashboard's **Pipeline** button shows, live, every stage from intake to Google routing: done, partial, todo, stale (over a week old) or blocked, per chunk, area, source and building website, with the command that runs the rest.

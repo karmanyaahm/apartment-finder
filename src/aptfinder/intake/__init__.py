@@ -1,8 +1,8 @@
 """intake: source adapters writing runs, observations and raw files (every listing source through Apify; Google
 Places is an official API called directly). No goal filtering."""
 
-from . import airbnb, direct, furnishedfinder, lease, places
+from . import airbnb, direct, furnishedfinder, lease, places, zumper
 
 ADAPTERS = {a.name: a for a in (airbnb.ADAPTER, furnishedfinder.ADAPTER, lease.ZILLOW, lease.APARTMENTS,
                                  lease.CRAIGSLIST, direct.ADAPTER,
-                                 places.ADAPTER)}
+                                 places.ADAPTER, zumper.ZUMPER, zumper.PADMAPPER)}

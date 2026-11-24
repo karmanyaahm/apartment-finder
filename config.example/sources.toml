@@ -49,3 +49,17 @@ queries = [
   { text = "apartments", type = "apartment_complex" },
   { text = "apartments", type = "apartment_building" },
 ]
+
+[zumper]
+# Chosen 2026-11-24 by a 25-item probe (design.md): with getDetails a building comes with its offered floor plans
+# and its own website. $0.00099 per item (each item is a building or a single unit), $0.00005 per start.
+actor = "scrapemind/zumperCom-Scraper"
+max_items = 300          # per city; the actor has no item limit of its own, Apify's maxItems stops it
+full_scrape = true       # every results page (false: the first page, about 25)
+
+[padmapper]
+# PadMapper is Zumper's (same listing ids). Search results only: buildings as ranges, single units exact.
+# $0.0024 per item, $0.00005 per start.
+actor = "bovi/padmapper-scraper"
+max_items = 300
+max_pages = 20

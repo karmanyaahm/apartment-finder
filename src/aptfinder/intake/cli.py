@@ -19,7 +19,7 @@ from . import ADAPTERS
 from .base import coverage, done, reparse, run_source
 
 SHORT = {"direct": "direct", "zillow": "zillow", "apartments_com": "apts.com", "craigslist": "craigsl", "furnishedfinder": "ff",
-         "airbnb": "airbnb", "google_places": "g.places"}
+         "airbnb": "airbnb", "google_places": "g.places", "zumper": "zumper", "padmapper": "padmapper"}
 
 
 def print_coverage(conn) -> None:
