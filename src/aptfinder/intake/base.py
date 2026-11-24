@@ -37,6 +37,10 @@ class Adapter:
     parse: Callable[[dict[str, Any], dict[str, Any]], "Parsed | list[Parsed] | None"]
     area_kind: str = "zip"  # zip | city | box: the smallest area this source searches efficiently
     required: tuple[str, ...] = ("price", "lat")  # fields whose absence in many items is suspicious
+    # batch=True: one actor run for all areas (worth it when the actor's start fee is high); then
+    # area_of(item, area ids) must attribute each item to its area. Otherwise one actor run per area.
+    batch: bool = False
+    area_of: Callable[[dict[str, Any], list[str]], str | None] | None = None
 
 
 @dataclass
@@ -99,65 +103,110 @@ def suspicious(parsed: list[Parsed], n_items: int, required: tuple[str, ...], n_
     return warnings
 
 
+def _area_states(per_area: dict[str, int], cap_each: int, exhausted: bool, ok: bool) -> dict[str, str]:
+    """complete: the actor finished the area under its cap; partial: cap hit or the actor failed after
+    returning items; empty: finished with nothing; not_reached: the run stopped before getting to it."""
+    out = {}
+    for aid, n in per_area.items():
+        if n >= cap_each:
+            out[aid] = "partial"
+        elif n == 0:
+            out[aid] = "empty" if (exhausted and ok) else "not_reached"
+        else:
+            out[aid] = "complete" if (exhausted and ok) else "partial"
+    return out
+
+
 def run_source(conn: sqlite3.Connection, adapter: Adapter, areas: list[Area], *, max_items: int | None = None,
                max_usd: float | None = None) -> IntakeResult:
-    """One actor run covering a batch of areas (batched so the actor's start fee is paid once).
-    The run's params record which areas it covered; `coverage()` derives the done/left ledger from that."""
+    """Collect a source over some areas. Records, per area, how many items came back and whether the area
+    is complete (counts.areas), which is what the coverage ledger and liveness read."""
     sources = load_sources()
     cfg = sources[adapter.name]
     cap = max_usd if max_usd is not None else sources["spend"]["max_usd_per_run"]
+    cap_each = max_items or cfg.get("max_items", 200)
     bad = [a.id for a in areas if a.kind != adapter.area_kind]
     if bad:
         raise ValueError(f"{adapter.name} runs on {adapter.area_kind} areas, not {bad}")
     ids = [a.id for a in areas]
     run_id = start_run(conn, "intake", adapter.name, {"actor": cfg["actor"], "area_kind": adapter.area_kind,
-                                                     "areas": ids, "scope": "partial", "max_usd": cap})
-    counts: dict[str, Any] = {"items": 0, "observations": 0, "new": 0, "changed": 0, "unparsed": 0}
+                                                     "areas": ids, "scope": "partial", "max_usd": cap,
+                                                     "max_items_per_area": cap_each})
+    counts: dict[str, Any] = {"items": 0, "observations": 0, "new": 0, "changed": 0, "unparsed": 0, "areas": {}}
     warnings: list[str] = []
     spent, console = 0.0, ""
     raw_dir = settings.RAW_DIR / adapter.name
     raw_dir.mkdir(parents=True, exist_ok=True)
+    seen: set[str] = set()
     try:
         prev = {r["source_id"]: r["content_hash"] for r in conn.execute(
             "SELECT source_id, content_hash FROM latest_obs WHERE source = ?", (adapter.name,))}
-        run: ActorRun = run_actor(cfg["actor"], adapter.build_input(cfg, areas),
-                                  max_items=max_items or cfg.get("max_items", 200), max_charge_usd=cap,
-                                  memory_mb=cfg.get("memory_mb"))
-        spent = event_cost(cfg["actor"], run.charged_events) or (run.cost_usd or 0.0)
-        console = run.console_url
-        raw_path = raw_dir / f"run{run_id}.json"
-        raw_path.write_text(json.dumps({"actor": cfg["actor"], "areas": ids, "apify_run": run.run_id,
-                                        "status": run.status, "cost_usd": spent, "items": run.items}))
-        if run.status != "SUCCEEDED":
-            warnings.append(f"actor run {run.status} ({run.console_url})")
-        parsed: list[Parsed] = []
-        for item in run.items:
-            p = adapter.parse(item, cfg)
-            if not p:
-                counts["unparsed"] += 1
-            else:
-                parsed.extend(p if isinstance(p, list) else [p])
-        warnings += suspicious(parsed, len(run.items), adapter.required, counts["unparsed"])
-        if len(run.items) >= (max_items or cfg.get("max_items", 200)):
-            warnings.append(f"hit the {len(run.items)}-item cap: these areas are probably incomplete")
-        counts["items"] = len(run.items)
-        seen: set[str] = set()
-        for p in parsed:
-            if p.source_id in seen:
+        groups = [areas] if adapter.batch else [[a] for a in areas]
+        for group in groups:
+            gids = [a.id for a in group]
+            remaining = cap - spent
+            if remaining <= 0.02:
+                warnings.append(f"spend cap reached before {', '.join(gids)}")
+                for aid in gids:
+                    counts["areas"][aid] = {"items": 0, "state": "not_reached"}
                 continue
-            seen.add(p.source_id)
-            append_observation(conn, run_id, adapter.name, p.source_id, p.data, url=p.url, price=p.price,
-                               price_basis=p.price_basis, query_checkin=p.query_checkin,
-                               query_checkout=p.query_checkout, raw_path=str(raw_path), commit=False)
-            counts["observations"] += 1
-        conn.commit()
+            run: ActorRun = run_actor(cfg["actor"], adapter.build_input(cfg, group),
+                                      max_items=cap_each * len(group), max_charge_usd=remaining,
+                                      memory_mb=cfg.get("memory_mb"))
+            cost = event_cost(cfg["actor"], run.charged_events) or (run.cost_usd or 0.0)
+            spent += cost
+            console = run.console_url
+            raw_path = raw_dir / f"run{run_id}_{re.sub(r'[^A-Za-z0-9]+', '_', '-'.join(gids))[:60]}.json"
+            raw_path.write_text(json.dumps({"actor": cfg["actor"], "areas": gids, "apify_run": run.run_id,
+                                            "status": run.status, "cost_usd": cost, "items": run.items}))
+            ok = run.status == "SUCCEEDED"
+            if not ok:
+                warnings.append(f"{', '.join(gids)}: actor run {run.status} ({run.console_url})")
+            per_area = {aid: 0 for aid in gids}
+            parsed: list[tuple[Parsed, str | None]] = []
+            unparsed = 0
+            for item in run.items:
+                aid = gids[0] if len(gids) == 1 else (adapter.area_of(item, gids) if adapter.area_of else None)
+                if aid in per_area:
+                    per_area[aid] += 1
+                p = adapter.parse(item, cfg)
+                if not p:
+                    unparsed += 1
+                    continue
+                for q in p if isinstance(p, list) else [p]:
+                    parsed.append((q, aid))
+            exhausted = len(run.items) < cap_each * len(group)
+            states = _area_states(per_area, cap_each, exhausted, ok)
+            for aid in gids:
+                counts["areas"][aid] = {"items": per_area[aid], "state": states[aid], "cost_usd": round(
+                    cost / len(gids), 4)}
+                if states[aid] == "partial":
+                    warnings.append(f"{aid}: incomplete ({per_area[aid]} items, cap {cap_each})")
+            warnings += [f"{', '.join(gids)}: {w}" for w in suspicious(
+                [q for q, _ in parsed], len(run.items), adapter.required, unparsed)
+                if not w.startswith("actor returned no items")]
+            counts["items"] += len(run.items)
+            counts["unparsed"] += unparsed
+            for q, aid in parsed:
+                if q.source_id in seen:
+                    continue
+                seen.add(q.source_id)
+                if aid:
+                    q.data.extra = {**(q.data.extra or {}), "area": aid}
+                append_observation(conn, run_id, adapter.name, q.source_id, q.data, url=q.url, price=q.price,
+                                   price_basis=q.price_basis, query_checkin=q.query_checkin,
+                                   query_checkout=q.query_checkout, raw_path=str(raw_path), commit=False)
+                counts["observations"] += 1
+            conn.commit()
         for r in conn.execute("SELECT source_id, content_hash FROM observations WHERE run_id = ?", (run_id,)):
             if r["source_id"] not in prev:
                 counts["new"] += 1
             elif prev[r["source_id"]] != r["content_hash"]:
                 counts["changed"] += 1
+        if counts["items"] == 0:
+            warnings.append("actor returned no items for any area")
         counts["warnings"] = warnings
-        status = "error" if any("no items" in w for w in warnings) else "ok"
+        status = "error" if counts["items"] == 0 else "ok"
         finish_run(conn, run_id, status, counts, est_cost=round(spent, 4),
                    error="; ".join(warnings) if status == "error" else None)
     except Exception as e:  # record the failure, then re-raise
@@ -179,33 +228,47 @@ def _overlap(a: list[float], b: list[float]) -> float:
     return (n - s) * (e - w) / ((a[2] - a[0]) * (a[3] - a[1]))
 
 
+LEGACY_PARTIAL = {"craigslist"}  # its whole-city run hit the 300-item cap
+
+
 def coverage(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
-    """(source, area id) -> latest successful run covering it: {run_id, date, legacy}."""
+    """(source, area id) -> {run_id, date, state, items, legacy} from the latest run that reached the area.
+    state: complete | empty | partial (cap hit or actor failed). Areas never reached are absent (TODO)."""
     from .. import intake
 
     _, areas = load_areas()
     out: dict[tuple[str, str], dict[str, Any]] = {}
     legacy_box = load_sources().get("airbnb", {}).get("box")
-    for r in conn.execute("SELECT id, source, started_at, params FROM runs WHERE component = 'intake' "
+    for r in conn.execute("SELECT id, source, started_at, params, counts FROM runs WHERE component = 'intake' "
                           "AND status = 'ok' ORDER BY id"):
         params = json.loads(r["params"])
+        counts = json.loads(r["counts"] or "{}")
         if params.get("reparse_of") or r["source"] not in intake.ADAPTERS:
             continue
         kind = intake.ADAPTERS[r["source"]].area_kind
-        info = {"run_id": r["id"], "date": r["started_at"][:10], "legacy": False}
+        base = {"run_id": r["id"], "date": r["started_at"][:10]}
         if "areas" in params:
-            covered = params["areas"]
-        else:  # legacy city / box runs
-            info["legacy"] = True
-            cities = set(params.get("cities") or [])
-            if kind == "box":
-                covered = [a.id for a in areas if a.kind == "box" and legacy_box
-                           and "Palo Alto box" in cities and _overlap(a.bbox, legacy_box) >= 0.9]
-            else:
-                covered = [a.id for a in areas if a.kind == kind and a.city in (cities & LEGACY_CITY_COVERS)]
+            per = counts.get("areas") or {aid: {"state": "complete", "items": None} for aid in params["areas"]}
+            for aid, a in per.items():
+                if a.get("state") in ("complete", "empty", "partial"):
+                    out[(r["source"], aid)] = {**base, "state": a["state"], "items": a.get("items"),
+                                               "legacy": False}
+            continue
+        cities = set(params.get("cities") or [])  # legacy whole-city / box runs
+        if kind == "box":
+            covered = [a.id for a in areas if a.kind == "box" and legacy_box
+                       and "Palo Alto box" in cities and _overlap(a.bbox, legacy_box) >= 0.9]
+        else:
+            covered = [a.id for a in areas if a.kind == kind and a.city in (cities & LEGACY_CITY_COVERS)]
+        state = "partial" if r["source"] in LEGACY_PARTIAL else "complete"
         for aid in covered:
-            out[(r["source"], aid)] = info
+            out[(r["source"], aid)] = {**base, "state": state, "items": None, "legacy": True}
     return out
+
+
+def done(cov: dict, source: str, area_id: str) -> bool:
+    c = cov.get((source, area_id))
+    return bool(c) and c["state"] in ("complete", "empty")
 
 
 def reparse(conn: sqlite3.Connection, adapter: Adapter, raw_file: str) -> dict[str, Any]:

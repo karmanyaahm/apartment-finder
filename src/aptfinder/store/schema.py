@@ -204,7 +204,15 @@ SELECT source, source_id, field, true_value, check_id FROM current_checks WHERE 
 CREATE VIEW listings_base AS
 SELECT lo.source, lo.source_id, lo.url, lo.id AS obs_id, lo.run_id, lo.observed_at,
        ls.first_seen, ls.last_seen, ls.n_obs, ls.n_versions,
-       CASE WHEN sl.run_id IS NULL OR lo.run_id >= sl.run_id THEN 1 ELSE 0 END AS active,
+       -- inactive: absent from a newer whole-area run, or from a newer run that completed this listing's
+       -- intake area (counts.areas.<id>.state). Partial or failed reruns prove nothing.
+       CASE WHEN sl.run_id IS NOT NULL AND lo.run_id < sl.run_id THEN 0
+            WHEN json_extract(lo.data, '$.extra.area') IS NOT NULL AND EXISTS (
+                SELECT 1 FROM runs r
+                WHERE r.source = lo.source AND r.component = 'intake' AND r.status = 'ok' AND r.id > lo.run_id
+                  AND json_extract(r.counts, '$.areas."' || json_extract(lo.data, '$.extra.area') || '".state')
+                      IN ('complete', 'empty')) THEN 0
+            ELSE 1 END AS active,
        cl.place_key, cl.unit_key,
        {_overridden('price')} AS price,
        lo.price_basis, lo.query_checkin, lo.query_checkout,

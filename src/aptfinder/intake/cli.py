@@ -15,7 +15,7 @@ from .. import settings
 from ..config import load_areas
 from ..store import connect, init_db
 from . import ADAPTERS
-from .base import coverage, reparse, run_source
+from .base import coverage, done, reparse, run_source
 
 SHORT = {"zillow": "zillow", "apartments_com": "apts.com", "craigslist": "craigsl", "furnishedfinder": "ff",
          "airbnb": "airbnb"}
@@ -27,7 +27,7 @@ def print_coverage(conn) -> None:
     kinds = {"zip": [s for s, a in ADAPTERS.items() if a.area_kind == "zip"],
              "city": [s for s, a in ADAPTERS.items() if a.area_kind == "city"],
              "box": [s for s, a in ADAPTERS.items() if a.area_kind == "box"]}
-    left = done = 0
+    left = n_done = 0
     for chunk in chunks:
         print(f"\n=== chunk {chunk}")
         for kind, srcs in kinds.items():
@@ -39,14 +39,19 @@ def print_coverage(conn) -> None:
                 cells = []
                 for s in srcs:
                     c = cov.get((s, a.id))
-                    if c:
-                        done += 1
-                        cells.append(f"{c['date'][5:]}{'*' if c['legacy'] else ''} r{c['run_id']}")
+                    if c and c["state"] in ("complete", "empty"):
+                        n_done += 1
+                        tag = "empty" if c["state"] == "empty" else c["date"][5:]
+                        cells.append(f"{tag}{'*' if c['legacy'] else ''} r{c['run_id']}")
+                    elif c:
+                        left += 1
+                        cells.append(f"PARTIAL r{c['run_id']}")
                     else:
                         left += 1
                         cells.append("TODO")
                 print(f"  {'':5s} {a.label[:24]:24s}" + "".join(f"{x:>13s}" for x in cells))
-    print(f"\n{done} area-source pairs done, {left} TODO.  * = covered by an earlier whole-city / box query.")
+    print(f"\n{n_done} area-source pairs done, {left} left (TODO or PARTIAL).  * = earlier whole-city / box "
+          "query; PARTIAL = cap hit or actor failed, rerun with --reload or a higher --max-items.")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -82,7 +87,7 @@ def main(argv: list[str] | None = None) -> None:
             and (a.id in args.area or any(c in a.chunks for c in args.chunk))]
     if not args.reload:
         cov = coverage(conn)
-        pick = [a for a in pick if (args.source, a.id) not in cov]
+        pick = [a for a in pick if not done(cov, args.source, a.id)]
     if not pick:
         raise SystemExit("nothing to run: no matching areas, or all already covered (use --reload)")
     print(f"{args.source}: {len(pick)} areas: {', '.join(a.id for a in pick)}")

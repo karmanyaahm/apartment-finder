@@ -57,7 +57,7 @@ def _avail(text: str | None, ref: date | None = None) -> str | None:
 # ------------------------------------------------------------------------------------------- Zillow
 def zillow_input(cfg: dict[str, Any], areas: list) -> dict[str, Any]:
     return {"locations": [a.id for a in areas], "propertyType": "forRent",
-            "maxResultsPerLocation": cfg.get("max_items", 400)}
+            "maxResultsPerLocation": cfg.get("max_items", 400)}  # per ZIP; the run's maxItems scales with ZIPs
 
 
 ZILLOW_KIND = {"apartment": "apartment", "condo": "apartment", "singlefamily": "house", "single_family": "house",
@@ -205,7 +205,19 @@ def craigslist_parse(item: dict[str, Any], cfg: dict[str, Any]) -> Parsed | None
                   price_basis=CL_BASIS.get(period, "month"))
 
 
-ZILLOW = Adapter(name="zillow", build_input=zillow_input, parse=zillow_parse, area_kind="zip")
+def zillow_area(item: dict[str, Any], ids: list[str]) -> str | None:
+    zp = str(((item.get("rawData") or {}).get("property") or {}).get("address", {}).get("zipcode") or "")
+    loc = str(item.get("location") or "")
+    return loc if loc in ids else (zp if zp in ids else None)
+
+
+def apartments_area(item: dict[str, Any], ids: list[str]) -> str | None:
+    z = str(item.get("listingZip") or "")
+    return z if z in ids else None
+
+
+ZILLOW = Adapter(name="zillow", build_input=zillow_input, parse=zillow_parse, area_kind="zip", batch=True,
+                 area_of=zillow_area)
 CRAIGSLIST = Adapter(name="craigslist", build_input=craigslist_input, parse=craigslist_parse, area_kind="zip")
 
 
@@ -274,4 +286,4 @@ def apartments2_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed]
 
 
 APARTMENTS = Adapter(name="apartments_com", build_input=apartments2_input, parse=apartments2_parse,
-                     area_kind="zip")
+                     area_kind="zip", batch=True, area_of=apartments_area)
