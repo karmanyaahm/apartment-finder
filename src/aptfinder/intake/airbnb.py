@@ -18,7 +18,8 @@ def build_input(cfg: dict[str, Any], areas: list) -> dict[str, Any]:
     urls = []
     for a in areas:
         s, w, n, e = a.bbox
-        urls.append({"url": f"https://www.airbnb.com/s/Palo-Alto--CA/homes?ne_lat={n}&ne_lng={e}&sw_lat={s}"
+        slug = a.slug or "Palo-Alto--CA"  # results only stay in the box when the slug is the box's own place
+        urls.append({"url": f"https://www.airbnb.com/s/{slug}/homes?ne_lat={n}&ne_lng={e}&sw_lat={s}"
                             f"&sw_lng={w}&search_by_map=true&zoom=14&checkin={cfg['checkin']}"
                             f"&checkout={cfg['checkout']}&adults={cfg.get('adults', 1)}"})
     return {"startUrls": urls, "checkIn": cfg["checkin"], "checkOut": cfg["checkout"],

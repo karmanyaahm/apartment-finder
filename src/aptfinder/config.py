@@ -107,6 +107,7 @@ class Area(BaseModel):
     chunks: list[str]
     city: str | None = None
     bbox: list[float] | None = None
+    slug: str | None = None  # box: Airbnb place slug for the search URL (default Palo-Alto--CA)
 
 
 def load_areas(config_dir: Path | None = None) -> tuple[list[str], list[Area]]:
@@ -115,7 +116,8 @@ def load_areas(config_dir: Path | None = None) -> tuple[list[str], list[Area]]:
            for z in raw.get("zip", [])]
     out += [Area(kind="city", id=c["name"], label=c["name"], chunks=c["chunks"], city=c["name"])
             for c in raw.get("city", [])]
-    out += [Area(kind="box", id=b["id"], label=f"{b['station']} station zone", chunks=[b["chunk"]], bbox=b["bbox"])
+    out += [Area(kind="box", id=b["id"], label=f"{b['station']} station zone", chunks=[b["chunk"]], bbox=b["bbox"],
+                 slug=b.get("slug"))
             for b in raw.get("box", [])]
     sites_path = (config_dir or settings.CONFIG_DIR) / "direct_sites.toml"
     if sites_path.exists():
