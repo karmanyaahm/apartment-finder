@@ -466,6 +466,7 @@ async function boot() {
   $$("button", gs).forEach((b) => b.addEventListener("click", () => {
     S.goal = b.dataset.goal;
     $$("button", gs).forEach((x) => x.classList.toggle("on", x === b));
+    if (S.goal === "temp") $("#sort").value = "price"; // temp: cheaper is better within the ~$4k budget
     renderList();
   }));
   $("#target").innerHTML = S.meta.targets.map((t) => `<option value="${esc(t)}">${esc(t.split(":")[1])}</option>`).join("");
