@@ -13,8 +13,8 @@ from . import run
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="aptf-identity")
     ap.add_argument("--db", default=str(settings.DB_PATH))
-    ap.add_argument("cmd", nargs="?", default="run", choices=["run", "normalize", "geocode", "duplicates"],
-                    help="run: link listings (default); normalize: read new address strings with Haiku, then run; "
+    ap.add_argument("cmd", nargs="?", default="run", choices=["run", "geocode", "duplicates"],
+                    help="run: link listings (default); geocode: read new address strings with Google, then run; "
                          "duplicates: list suspected duplicate buildings")
     ap.add_argument("--limit", type=int, default=5000)
     ap.add_argument("--dry-run", action="store_true")
@@ -30,13 +30,6 @@ def main(argv: list[str] | None = None) -> None:
         from .addresses import geocode
 
         res = geocode(conn, limit=args.limit, dry_run=args.dry_run)
-        print(json.dumps(res, indent=1))
-        if args.dry_run:
-            return
-    if args.cmd == "normalize":
-        from .addresses import normalize
-
-        res = normalize(conn, limit=args.limit, dry_run=args.dry_run)
         print(json.dumps(res, indent=1))
         if args.dry_run:
             return

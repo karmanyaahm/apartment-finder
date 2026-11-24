@@ -16,18 +16,14 @@ from ..store.keys import place_key, unit_key
 NEAR_M = 80.0
 NO_NEAR_MERGE = {"airbnb"}
 
-# address string -> parts read by Haiku and checked, and Google's geocoded reading (identity/addresses.py);
-# loaded by run()
-_ADDRESS_PARTS: dict = {}
+# address string -> Google's geocoded reading (identity/addresses.py); loaded by run()
 _GEOCODES: dict = {}
 
 
 def _address_place_key(address: str | None, city: str | None) -> str | None:
-    """The building key for an address: Google's geocoded reading first, then the Haiku parts, then the parser.
-    All use the same formula, so a clean address keeps its key either way."""
+    """The building key for an address: Google's geocoded reading when it placed the address precisely, else the
+    parser. Both use the same formula, so a clean address keeps its key either way."""
     parts = _GEOCODES.get(address) if address else None
-    if not parts or parts.get("fallback"):
-        parts = _ADDRESS_PARTS.get(address) if address else None
     if parts and not parts.get("fallback"):
         from .addresses import place_key_from
 
@@ -117,10 +113,9 @@ def _near_address(decisions: dict, rows: list) -> None:
 
 
 def run(conn: sqlite3.Connection) -> dict[str, int]:
-    global _ADDRESS_PARTS, _GEOCODES
-    from .addresses import load_cache, load_geocodes
+    global _GEOCODES
+    from .addresses import load_geocodes
 
-    _ADDRESS_PARTS = load_cache()
     _GEOCODES = load_geocodes()
     rows = conn.execute(
         "SELECT source, source_id, address, unit, city, floor_plan, property_name, kind, lat, lon, beds, price, term, "

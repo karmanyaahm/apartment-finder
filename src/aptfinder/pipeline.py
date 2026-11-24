@@ -216,19 +216,20 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
           ["nix run .#identity"] if left else [],
           counts={"listings": n_list, "unlinked": len(unlinked), "placeable": left}, **_run_info(runs, "identity"))
 
-    # 3b. address reading and suspected duplicate buildings (identity/addresses.py)
-    from .identity.addresses import load_cache, suspected_duplicates
+    # 3b. addresses geocoded and suspected duplicate buildings (identity/addresses.py)
+    from .identity.addresses import load_geocodes, suspected_duplicates
 
-    cache = load_cache()
-    n_addr = conn.execute("SELECT COUNT(DISTINCT address) FROM listings WHERE address IS NOT NULL AND address != ''"
-                          ).fetchone()[0]
-    unread = n_addr - sum(1 for a in cache)
+    geo = load_geocodes()
+    addrs = {r[0] for r in conn.execute("SELECT DISTINCT address FROM listings WHERE address IS NOT NULL AND address != ''")}
+    done_ = sum(1 for a in addrs if a in geo)
+    precise = sum(1 for a in addrs if a in geo and not geo[a].get("fallback"))
     dups = suspected_duplicates(conn)
-    stage("duplicates", "Addresses read and duplicate buildings", "partial" if (dups or unread > 0) else "done",
-          f"{len(cache)} of {n_addr} address strings read by Haiku "
-          f"({sum(1 for v in cache.values() if v.get('fallback'))} kept the parser's reading); "
-          f"{len(dups)} suspected duplicate buildings (same number, similar street, within 150 m)",
-          (["nix run .#identity -- normalize"] if unread > 0 else [])
+    stage("duplicates", "Addresses geocoded and duplicate buildings",
+          "partial" if (dups or done_ < len(addrs)) else "done",
+          f"{done_} of {len(addrs)} address strings geocoded by Google ({precise} placed precisely; the rest keep "
+          f"the parser's reading); {len(dups)} suspected duplicate buildings (same number, similar street, "
+          "within 150 m)",
+          (["nix run .#identity -- geocode"] if done_ < len(addrs) else [])
           + (["nix run .#identity -- duplicates"] if dups else []),
           duplicates=dups[:20])
 
