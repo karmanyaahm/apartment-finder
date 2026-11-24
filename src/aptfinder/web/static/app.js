@@ -378,7 +378,8 @@ async function openPlace(pk) {
     <h3>${isStay ? "Furnished stays" : "Floor plans"}</h3>${planTable}
     ${listingTable}
     <h3>Price history (per month)</h3>${historyChart([...d.listings].sort((a, b) => b.history.length - a.history.length).slice(0, 8))}
-    <h3>Commute <button id="route-btn" class="small">${S.meta.google ? "Route with Google" : "Recompute (estimate)"}</button></h3>${matrixTable(d)}
+    <h3>Commute <button id="route-btn" class="small">${S.meta.google ? "Route with Google" : "Recompute (estimate)"}</button></h3>
+    ${S.meta.google ? `<p class="muted small">Routes every target by every mode (about 20 Google calls). Google is metered and capped per month (config/google.toml); when the cap is reached routing stops and the straight-line estimates stay.</p>` : ""}${matrixTable(d)}
     <h3>Nearby</h3>${nearestBlock(d)}
     <h3>Your notes & ratings</h3>${attributesBlock(d, pk)}
   `;
@@ -426,7 +427,7 @@ function wireDrawer(pk) {
       const r = await post(`api/trips/${encodeURIComponent(pk)}`);
       toast(`${r.new_trips} new trips (${r.provider}, ${r.api_calls} API calls)`);
       await refreshAfterWrite(pk);
-    } catch (err) { toast("Routing failed: " + err.message, 6000); e.target.disabled = false; e.target.textContent = "Retry routing"; }
+    } catch (err) { toast((/cap/i.test(err.message) ? "Google limit reached, estimates kept: " : "Routing failed: ") + err.message, 6000); e.target.disabled = false; e.target.textContent = "Retry routing"; }
   });
 }
 
