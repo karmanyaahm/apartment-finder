@@ -79,6 +79,12 @@ def test_verify_batch_of_conflicts(client):
     assert set(e["fields"]) == {"price", "baths", "available_from"}
     assert "Showers" in e["label"] and {o["source"] for o in e["observations"]} == {"zillow", "apartments_com"}
     assert all("baths" in o["fields"] for o in e["observations"])
+    assert all(o["checked"] == {} for o in e["observations"])
+    z = next(o for o in e["observations"] if o["source"] == "zillow")
+    c.post("/api/checks", json={"queue": "conflict", "observation_id": z["obs_id"], "field": "baths",
+                                "verdict": "correct"})
+    (e,) = c.get("/api/verify/batch?kind=conflict").json()["items"]  # partly checked: still open, verdict shown
+    assert next(o for o in e["observations"] if o["source"] == "zillow")["checked"] == {"baths": "correct"}
     assert c.get("/api/verify/batch?kind=conflict&skip=10").json()["items"] == []
     assert c.get("/api/verify/batch?kind=sample").status_code == 400
     q = c.get("/api/status").json()["queues"]

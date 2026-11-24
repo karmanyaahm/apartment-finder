@@ -419,11 +419,15 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             raise HTTPException(400, "batch is for conflicts; use /api/verify/next for the rest")
         with lock:
             items = verify.all_conflicts(conn)
+            checked = verify.current_checks(conn)
         n = max(1, min(n, 50))
         pending = sum(c["pending_render"] for c in items)
+        page = [{"item": it, **_listing_detail(it)} for it in items[max(0, skip):max(0, skip) + n]]
+        for e in page:  # verdicts already given on a partly checked conflict, so the screen shows them
+            for o in e["observations"]:
+                o["checked"] = checked.get((o["source"], o["source_id"]), {})
         return {"kind": kind, "skip": skip, "n": n, "total": len(items), "actionable": len(items) - pending,
-                "pending": pending,
-                "items": [{"item": it, **_listing_detail(it)} for it in items[max(0, skip):max(0, skip) + n]]}
+                "pending": pending, "items": page}
 
     @app.get("/api/verify/next")
     def verify_next(seed: int = 0, skip: int = 0, conflicts: bool = True) -> dict[str, Any]:

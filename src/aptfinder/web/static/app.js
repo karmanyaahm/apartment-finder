@@ -462,7 +462,7 @@ function conflictBlock(e) {
     <div class="vconf-head"><a href="#" data-goto="${esc(it.place_key)}">${esc(e.label || it.place_key)}</a>
       ${unit ? `<span class="muted small">unit ${esc(unit)}</span>` : ""} ${tags}</div>
     <div class="scroll-x"><table class="vconf-t"><tr><th></th>${obs.map((o) => `<th><a href="${esc(o.url)}" target="_blank" rel="noopener noreferrer">${esc(o.source)} ↗</a> <span class="muted">${esc((o.observed_at || "").slice(0, 10))}</span></th>`).join("")}${textTh}</tr>
-    ${e.fields.map((f) => `<tr><th>${esc(f)}</th>${obs.map((o) => `<td><b>${fmtField(f, o.fields[f])}</b> ${vbtns({ observation_id: o.obs_id, field: f, queue: "conflict" })}</td>`).join("")}${textTd(f)}</tr>`).join("")}
+    ${e.fields.map((f) => `<tr><th>${esc(f)}</th>${obs.map((o) => `<td><b>${fmtField(f, o.fields[f])}</b> ${vbtns({ observation_id: o.obs_id, field: f, queue: "conflict" }, (o.checked || {})[f])}</td>`).join("")}${textTd(f)}</tr>`).join("")}
     </table></div></div>`;
 }
 
@@ -556,11 +556,13 @@ async function renderVerify() {
 
 function backToConflicts(e) { e.preventDefault(); S.verifyMode = "conflict"; S.conflictSkip = 0; renderVerify(); }
 
-function vbtns(ctx) {
+function vbtns(ctx, verdict) {
+  // verdict: one already given (a current check), shown as pressed
+  const on = (v) => (v === verdict ? " on" : "");
   return `<span class="vbtns" data-ctx='${esc(JSON.stringify(ctx))}'>
-    <button data-v="correct" class="correct" title="correct">✓</button>
-    <button data-v="wrong" class="wrong" title="wrong">✗</button>
-    <button data-v="cannot_tell" class="cannot_tell" title="cannot tell">?</button>
+    <button data-v="correct" class="correct${on("correct")}" title="correct">✓</button>
+    <button data-v="wrong" class="wrong${on("wrong")}" title="wrong">✗</button>
+    <button data-v="cannot_tell" class="cannot_tell${on("cannot_tell")}" title="cannot tell">?</button>
     <input class="hidden" placeholder="true value"><button class="hidden" data-save>save</button></span>`;
 }
 
