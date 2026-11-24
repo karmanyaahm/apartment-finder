@@ -59,7 +59,7 @@ Keys are deterministic so annotations and trips survive any rebuild: `place_key`
 - `config/area.toml`: cities and bounding box.
 - `config/points/*.csv`: one file per point set, columns `set,name,lat,lon` plus free columns. The single concept for anything a place can be near or travel to:
   - `commute_targets.csv`: Googleplex, Meta HQ, Downtown Palo Alto, Rengstorff industrial complex.
-  - `caltrain_stations.csv`: extra columns `service` (best tier that stops there) and `other_transit`.
+  - `caltrain_stations.csv`: Redwood City, Menlo Park, Palo Alto, California Ave, San Antonio, Mountain View, Sunnyvale, Lawrence. Extra columns `service` (best tier that stops there: `express` or `local`), `patterns` and `other_transit`.
   - `grocery_chains.csv` (Walmart, Safeway, Whole Foods, Trader Joe's) and `grocery_any.csv` (every supermarket and grocery), generated once from OpenStreetMap by `scripts/osm_groceries.py` and committed.
   - `google_bus_stops.csv`: empty until the user supplies the list.
 - `config/point_sets.toml`: per set, which modes to compute and how many nearest points to route to. "Proximity" is a query (the minimum walk `trips` row for a set), not a table.
@@ -185,3 +185,5 @@ Each entry: date, decision, why, what it replaced.
 - **2026-11-23: Manual verification built in from the first run** (sample and conflict queues, accuracy with intervals). Confidence in scraped data is measured, not assumed.
 - **2026-11-23: `handoff.md` deleted, replaced by this file.** Its candidate actor table and the Airbnb 28-day tip were moved into the intake section as untested leads.
 - **2026-11-23: Python 3.12 via `uv`, FastAPI, plain JS plus Leaflet.** One language for every component; no front-end build step.
+- **2026-11-23: Caltrain set is 8 stations, Redwood City to Lawrence.** User's choice. Atherton closed 2020; Stanford is event-only and left out; Lawrence added because it is the nearest station for east Sunnyvale (the benchmark uses it). Ride times and tiers from the Caltrain GTFS feed of 13-Nov-2026 (valid to 2027-01-31; recheck after). Limited trains stop everywhere in this segment at Local timings, so the train table has two patterns: local and express. Replaced: "7 stations, Redwood City to Sunnyvale".
+- **2026-11-23: Rengstorff industrial complex target at 1000 N Rengstorff Ave, Mountain View, marked unverified.** User's choice; only aggregator sites give the street address.
