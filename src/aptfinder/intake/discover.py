@@ -248,6 +248,16 @@ def promote(conn, chunks: list[str], *, limit: int, dry_run: bool = False, fetch
             continue
         by_place.setdefault(r["place_key"], Counter())[(r["website"], r["source"])] += 1
         info[r["place_key"]] = r
+    # a website you typed in Verify (annotation `website` on the place) outranks any listing's link
+    for r in conn.execute(
+            "SELECT a.entity_key AS place_key, a.comment AS website, p.property_name, p.address, p.lat, p.lon "
+            "FROM annotations a JOIN places p ON p.place_key = a.entity_key "
+            "WHERE a.entity_type = 'place' AND a.attribute = 'website' AND a.comment LIKE 'http%' "
+            "AND p.address IS NOT NULL ORDER BY a.id"):
+        if r["place_key"] in have or chunk_of(r["lat"], r["lon"]) not in chunks:
+            continue
+        by_place[r["place_key"]] = Counter({(clean_url(r["website"], keep_query=True)[0] or r["website"], "you"): 10**6})
+        info[r["place_key"]] = r
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     taken = set(load_sites()) | {r["id"] for r in rec.get("found", [])}
     rows = []
@@ -259,7 +269,8 @@ def promote(conn, chunks: list[str], *, limit: int, dry_run: bool = False, fetch
         taken.add(sid)
         rows.append({"id": sid, "place_key": pk, "name": name, "address": r["address"],
                      "chunk": chunk_of(r["lat"], r["lon"]), "found_at": now, "platform": platform_of(url), "url": url,
-                     "found_by": f"{source} listing", "note": f"website field of {n} listing(s)"})
+                     "found_by": "you (Verify)" if source == "you" else f"{source} listing",
+                     "note": "typed in Verify" if source == "you" else f"website field of {n} listing(s)"})
     if dry_run or not rows:
         return {"sites": [(r["name"], r["url"]) for r in rows]}
     append("found", rows)

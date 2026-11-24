@@ -67,3 +67,26 @@ def test_a_weaker_models_miss_does_not_block_a_stronger_search(conn, tmp_path, m
         % conn.execute("SELECT place_key FROM places").fetchone()[0])
     assert [c["name"] for c in candidates(conn, ["mountain_view"], "sonnet")] == ["Harken"]
     assert candidates(conn, ["mountain_view"], "haiku") == []
+
+
+def test_named_building_without_website_is_queued_and_your_url_is_promoted(conn, tmp_path, monkeypatch):
+    import shutil
+
+    from aptfinder import identity, settings, verify
+    from aptfinder.intake.discover import promote
+    from aptfinder.store import append_annotation, append_observation, start_run
+
+    shutil.copytree(settings.ROOT / "config.example", tmp_path / "cfg")
+    monkeypatch.setattr(settings, "CONFIG_DIR", tmp_path / "cfg")
+    run = start_run(conn, "intake", "apartments_com", {})
+    append_observation(conn, run, "apartments_com", "h1", {
+        "property_name": "Harken", "address": "100 View St, Mountain View, CA 94041", "lat": 37.3947, "lon": -122.0763})
+    append_observation(conn, run, "zillow", "z1", {  # a house: an address as its name, not queued
+        "property_name": "12 Elm St", "address": "12 Elm St, Mountain View, CA 94041", "lat": 37.395, "lon": -122.077})
+    identity.run(conn)
+    (item,) = verify.no_website_queue(conn)
+    assert item["name"] == "Harken" and item["status"] == "not searched yet"
+    append_annotation(conn, "user", "place", item["place_key"], "website", comment="https://harken.example/?utm=x")
+    assert verify.no_website_queue(conn) == []
+    (site,) = promote(conn, ["mountain_view"], limit=10, dry_run=True)["sites"]
+    assert site == ("Harken", "https://harken.example/?utm=x")

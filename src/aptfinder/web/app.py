@@ -358,6 +358,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             agree = verify.agreement(conn)
             n_conflict = len(verify.conflict_queue(conn)) + len(verify.text_conflict_queue(conn))
             n_sample = len(verify.sample_queue(conn))
+            n_nosite = len(verify.no_website_queue(conn))
         from ..trips import google_usage
 
         with lock:
@@ -365,7 +366,8 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         return {
             "runs": runs, "spend": spend, "errors": errors, "google": google,
             "accuracy": [{"source": s, "field": f, **a} for (s, f), a in sorted(acc.items())],
-            "agreement": agree, "queues": {"conflict": n_conflict, "sample": n_sample},
+            "agreement": agree, "queues": {"conflict": n_conflict, "sample": n_sample,
+                                           "no_website": n_nosite},
             "counts": q("SELECT (SELECT COUNT(*) FROM places) AS places, "
                         "(SELECT COUNT(*) FROM listings) AS listings, "
                         "(SELECT COUNT(*) FROM listings WHERE active = 1) AS active")[0],
@@ -383,11 +385,14 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
     @app.get("/api/verify/next")
     def verify_next(seed: int = 0, skip: int = 0) -> dict[str, Any]:
         with lock:
-            items = verify.conflict_queue(conn) + verify.text_conflict_queue(conn) + verify.sample_queue(conn, seed)
+            items = (verify.conflict_queue(conn) + verify.text_conflict_queue(conn) + verify.no_website_queue(conn)
+                     + verify.sample_queue(conn, seed))
         if skip >= len(items):
             return {"done": True, "remaining": 0}
         item = items[skip]
         out: dict[str, Any] = {"done": False, "remaining": len(items), "item": item}
+        if item["kind"] == "no_website":
+            return out
         if item["kind"] in ("conflict", "listing"):
             ids = [x["obs_id"] for x in item["listings"]] if item["kind"] == "conflict" else [item["obs_id"]]
             out["observations"] = [_obs_fields(i) for i in ids]

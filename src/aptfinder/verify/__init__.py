@@ -162,6 +162,42 @@ def text_conflict_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return out
 
 
+def no_website_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Named apartment communities with no website known yet: unusual for a real property (a house or a single
+    unit is not expected to have one), so worth a look. Each item says how far the search got. Answering
+    (a URL, or "none") is an annotation `website` on the place; the item then drops out, and
+    `promote-sites` turns a URL you typed into a site like any other lead."""
+    import re
+
+    from ..config import load_sites
+    from ..intake.discover import _records
+
+    have = {r[0] for r in conn.execute(
+        "SELECT DISTINCT place_key FROM listings WHERE place_key IS NOT NULL AND "
+        "(source = 'direct' OR json_extract(data, '$.extra.website') IS NOT NULL)")}
+    have |= {s.get("place_key") for s in load_sites().values()}
+    answered = {r[0] for r in conn.execute(
+        "SELECT DISTINCT entity_key FROM annotations WHERE entity_type = 'place' AND attribute = 'website'")}
+    rec = _records()
+    checks = {c["id"]: c for c in rec.get("check", [])}
+    status: dict[str, str] = {}
+    for m in rec.get("miss", []):
+        status[m.get("place_key")] = f"searched ({m.get('model') or 'model?'}): no site. {m.get('note') or ''}".strip()
+    for f in rec.get("found", []):
+        c = checks.get(f["id"])
+        why = c.get("reason") if c else "not fetched yet"
+        status[f.get("place_key")] = f"found {f['url']} ({f.get('found_by')}), but {why}"
+    out = []
+    for r in conn.execute("SELECT place_key, property_name, address, n_listings FROM places "
+                          "WHERE property_name IS NOT NULL AND address IS NOT NULL ORDER BY n_listings DESC"):
+        name = r["property_name"].strip()
+        if r["place_key"] in have or r["place_key"] in answered or re.match(r"^\d", name):
+            continue  # a site known, already answered, or an address used as a name (a house or a unit)
+        out.append({"kind": "no_website", "place_key": r["place_key"], "name": name, "address": r["address"],
+                    "listings": r["n_listings"], "status": status.get(r["place_key"], "not searched yet")})
+    return out
+
+
 def agreement(conn: sqlite3.Connection) -> dict[str, dict[str, int]]:
     """Cross-source agreement per field over multi-source units (free signal, no manual work)."""
     by_unit: dict[str, list[sqlite3.Row]] = defaultdict(list)

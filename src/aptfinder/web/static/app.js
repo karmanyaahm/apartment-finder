@@ -447,8 +447,31 @@ async function renderVerify() {
   const d = await api(`api/verify/next?seed=${S.verifySeed}&skip=${S.verifySkip}`);
   if (d.done) { body.innerHTML = "<h2>Queue empty</h2><p>Nothing left to check. 🎉</p>"; return; }
   const it = d.item;
-  const head = `<p class="muted small">${d.remaining} items in queue (conflicts first, then an even sample across sources) · item ${S.verifySkip + 1}</p>`;
+  const head = `<p class="muted small">${d.remaining} items in queue (conflicts first, then buildings without a website, then an even sample across sources) · item ${S.verifySkip + 1}</p>`;
   const nav = `<p style="margin-top:14px"><button id="v-skip">Skip</button> <button id="v-next" class="accent">Next</button></p>`;
+  if (it.kind === "no_website") {
+    // a named apartment community with no website known: unusual, so you look it up
+    const gs = `https://www.google.com/search?q=${encodeURIComponent(`${it.name} ${it.address}`)}`;
+    body.innerHTML = `${head}<h2>No website found for ${esc(it.name)}</h2>
+      <p>${esc(it.address)} · ${it.listings} listing(s) · <a href="#" data-goto="${esc(it.place_key)}">open the building</a></p>
+      <p class="small">Search so far: ${esc(it.status)}</p>
+      <p><a href="${esc(gs)}" target="_blank" rel="noopener noreferrer">Search Google ↗</a></p>
+      <p><input id="nw-url" type="url" placeholder="https://… the community's own site" style="width:min(100%,420px)">
+         <button id="nw-save" class="accent">Save website</button> <button id="nw-none">No website</button></p>${nav}`;
+    const save = async (comment) => {
+      try {
+        await post("api/annotations", { entity_key: it.place_key, attribute: "website", comment });
+        toast(comment === "none" ? "Marked: no website" : "Website saved; promote-sites will check and scrape it");
+        renderVerify(); loadStatus();
+      } catch (e) { toast("Not saved: " + e.message, 5000); }
+    };
+    $("#nw-save").addEventListener("click", () => { const u = $("#nw-url").value.trim(); if (u) save(u); });
+    $("#nw-none").addEventListener("click", () => save("none"));
+    $("[data-goto]", body).addEventListener("click", (e) => { e.preventDefault(); $("#verify").classList.add("hidden"); openPlace(it.place_key); });
+    $("#v-skip").addEventListener("click", () => { S.verifySkip++; renderVerify(); });
+    $("#v-next").addEventListener("click", () => { renderVerify(); loadStatus(); });
+    return;
+  }
   if (it.kind === "trip") {
     const t = d.trip;
     const tm = { walk: "walking", bike: "bicycling", transit: "transit", drive: "driving", bike_train_bike: "transit", bike_bus_bike: "transit" }[t.mode];
@@ -521,7 +544,7 @@ async function loadStatus() {
   for (const [src, list] of Object.entries(accBySource)) parts.push(`<span title="hand-checked accuracy">✓ ${esc(src)}: ${esc(list.join(", "))}</span>`);
   if (!s.accuracy.length) parts.push(`<span>no hand checks yet</span>`);
   $("#status-strip").innerHTML = parts.join("");
-  $("#queue-count").textContent = `(${s.queues.conflict} conflicts · ${s.queues.sample})`;
+  $("#queue-count").textContent = `(${s.queues.conflict} conflicts · ${s.queues.no_website ?? 0} no website · ${s.queues.sample})`;
 }
 
 /* ---------------------------------------------------------------- boot */
