@@ -127,11 +127,15 @@ def load_sites(config_dir: Path | None = None) -> dict[str, dict[str, Any]]:
     if (d / "discovered_sites.toml").exists():
         raw = _toml(d / "discovered_sites.toml")
         failed = {c["id"] for c in raw.get("check", []) if not c.get("ok")}
+        moved = {c["id"]: c for c in raw.get("check", []) if c.get("ok") and c.get("final_url")}
         urls = {s["url"].rstrip("/") for s in out.values()}
         places = {s.get("place_key") for s in out.values()} - {None}
         for s in raw.get("found", []):
             if s["id"] in failed or s["id"] in out or s["url"].rstrip("/") in urls or s.get("place_key") in places:
                 continue
+            m = moved.get(s["id"])  # a redirect link that landed on the building's page: use where it landed
+            s = {**s, "url": m["final_url"], "platform": m.get("platform") or s.get("platform"),
+                 "link": s["url"]} if m else s
             out[s["id"]] = {**s, "verify_address": True}
     return out
 

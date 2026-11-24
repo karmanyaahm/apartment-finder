@@ -81,14 +81,18 @@ def check_result(out: dict[str, Any]) -> list[dict[str, Any]]:
     return out["structured_output"].get("results") or []
 
 
-def clean_url(url: str | None) -> tuple[str | None, str]:
-    """(url, why-not): no query or fragment, path cut before a tour/apply/contact segment, aggregators refused."""
+def clean_url(url: str | None, keep_query: bool = False) -> tuple[str | None, str]:
+    """(url, why-not): no query or fragment, path cut before a tour/apply/contact segment, aggregators refused.
+    `keep_query` keeps a link whole (a redirect link names its building in the query) for fetching; the page it
+    lands on is cleaned and recorded by `fetch_and_check`."""
     if not url or not url.startswith("http"):
         return None, "no url"
     p = urlsplit(url.strip())
     host = p.netloc.lower().removeprefix("www.")
     if AGGREGATORS.search(host):
         return None, f"aggregator or social host {host}"
+    if keep_query:
+        return urlunsplit((p.scheme, p.netloc, p.path or "/", p.query, "")), ""
     path = ACTION_PATH.split(p.path)[0] if ACTION_PATH.search(p.path) else p.path
     path = path if path.endswith("/") or "." in path.rsplit("/", 1)[-1] else path + "/"
     return urlunsplit((p.scheme, p.netloc, path, "", "")), ""
@@ -274,7 +278,11 @@ def fetch_and_check(conn, ids: list[str]) -> dict[str, Any]:
         seen.add(s["id"])
         ok = direct.address_on_page(it, s.get("address"))
         n = len(direct.PARSERS[s["platform"]](it, s)) if ok else 0
+        # where the link landed after redirects; later scrapes go there directly
+        final, _ = clean_url(it.get("url"))
+        moved = final if final and final.rstrip("/") != s["url"].rstrip("/") else None
         checks.append({"id": s["id"], "ok": bool(ok), "at": now, "run_id": res.run_id,
+                       "final_url": moved, "platform": platform_of(moved) if moved and ok else None,
                        "reason": ("address shown; rows: %d" % n) if ok else
                        ("page does not show the street address" if ok is False else "page has no text")})
     checks += [{"id": i, "ok": False, "at": now, "run_id": res.run_id, "reason": "page not fetched"}

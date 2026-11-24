@@ -88,7 +88,7 @@ nix run .#intake -- discover-sites --chunk mountain_view --limit 40   # web sear
 nix run .#intake -- run direct --chunk mountain_view             # re-scrape every known building website
 ```
 
-A diagram of the whole pipeline, with what has run and what is planned: [pipeline flow chart](https://claude.ai/artifact/JAGKeZFdoEGYFBRyzzaG7B) (a private claude.ai page; only people it is shared with can open it).
+A diagram of the whole pipeline, with what has run and what is planned: [pipeline flow chart](https://claude.ai/artifact/JAGKeZFdoEGYFBRyzzaG7B) (a claude.ai page, shared by link).
 
 ## 3. Run the dashboard
 

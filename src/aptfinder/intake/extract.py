@@ -70,7 +70,7 @@ def check_answer(ans: dict[str, Any], text: str) -> dict[str, Any]:
         out["property_name"] = name
     url = (ans.get("website") or "").strip()
     if url and url.lower().rstrip("/").split("://")[-1].removeprefix("www.") in text.lower():
-        cleaned, _ = clean_url(url if url.startswith("http") else f"https://{url}")
+        cleaned, _ = clean_url(url if url.startswith("http") else f"https://{url}", keep_query=True)
         if cleaned:
             out["website"] = cleaned
     for k in ("furnished", "private_bath", "utilities_included"):
@@ -106,11 +106,18 @@ def ask(batch: list[dict[str, Any]], model: str, max_usd: float) -> tuple[list[d
     return out["structured_output"].get("results") or [], float(out.get("total_cost_usd") or 0)
 
 
-def _pending(conn, source: str) -> list[dict[str, Any]]:
+def _pending(conn, source: str, reread: bool = False) -> list[dict[str, Any]]:
+    """Active listings not read yet; with `reread`, also those already read (their answers come from the cache,
+    so applying a changed check costs nothing). A reread starts from the observation before the extraction."""
     rows = conn.execute(
         "SELECT lo.* FROM latest_obs lo JOIN listings l ON l.source = lo.source AND l.source_id = lo.source_id "
-        "WHERE lo.source = ? AND l.active = 1 AND json_extract(lo.data, '$.extra.extracted') IS NULL "
-        "ORDER BY lo.source_id", (source,)).fetchall()
+        "WHERE lo.source = ? AND l.active = 1 AND (? OR json_extract(lo.data, '$.extra.extracted') IS NULL) "
+        "ORDER BY lo.source_id", (source, reread)).fetchall()
+    if reread:  # the scraped observation under an extracted one
+        rows = [conn.execute(
+            "SELECT * FROM observations WHERE source = ? AND source_id = ? "
+            "AND json_extract(data, '$.extra.extracted') IS NULL ORDER BY id DESC LIMIT 1",
+            (source, r["source_id"])).fetchone() or r for r in rows]
     out = []
     for r in rows:
         d = json.loads(r["data"])
@@ -121,10 +128,10 @@ def _pending(conn, source: str) -> list[dict[str, Any]]:
 
 
 def extract(conn, source: str, *, limit: int, batch: int, model: str, max_usd: float,
-            dry_run: bool = False) -> dict[str, Any]:
+            dry_run: bool = False, reread: bool = False) -> dict[str, Any]:
     if source not in SOURCES:
         raise SystemExit(f"extract supports {', '.join(SOURCES)}")
-    todo = _pending(conn, source)[:limit]
+    todo = _pending(conn, source, reread)[:limit]
     cache_path = settings.DATA_DIR / CACHE
     cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
     for t in todo:

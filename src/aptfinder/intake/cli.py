@@ -95,6 +95,8 @@ def main(argv: list[str] | None = None) -> None:
     ex.add_argument("--model", default="haiku")
     ex.add_argument("--max-usd", type=float, default=1.0, help="cap on Claude spend for this command")
     ex.add_argument("--dry-run", action="store_true")
+    ex.add_argument("--reread", action="store_true", help="apply cached answers again to listings already read "
+                                                          "(free; after a change to the checks)")
     args = ap.parse_args(argv)
 
     conn = connect(args.db)
@@ -114,7 +116,7 @@ def main(argv: list[str] | None = None) -> None:
             res = (promote(conn, args.chunk, limit=args.limit, dry_run=args.dry_run, fetch=not args.no_fetch)
                    if args.cmd == "promote-sites" else
                    extract(conn, args.source, limit=args.limit, batch=args.batch, model=args.model,
-                           max_usd=args.max_usd, dry_run=args.dry_run))
+                           max_usd=args.max_usd, dry_run=args.dry_run, reread=args.reread))
         except Blocker as e:
             raise SystemExit(f"BLOCKED: {e}")
         print(json.dumps(res, indent=1, default=str))
