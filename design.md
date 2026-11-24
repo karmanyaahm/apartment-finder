@@ -166,11 +166,22 @@ Python 3.12 (pinned through `uv`; the system Python is 3.10), `apify-client`, Fa
 
 Status 2026-11-24 night: steps 1 to 7 done; step 8 (intake) running chunk by chunk. `aptf-intake coverage` is the ledger of what is done and left.
 
-- Spend: Apify $0.55 of $5 left this cycle (resets Dec 23); Google 477 of 5,000 capped calls this month (inside the free tier).
+- Spend: Apify $4.42 left after the user's top-up (cycle resets Dec 23); Google 495 of 5,000 capped calls this month (inside the free tier).
 - Blockers: Airbnb map-box search only works for boxes around the place named in the URL (station boxes other than Palo Alto's); Apartments.com photos refuse hotlinking (shown instead: photos from the community's own website where we have its URL); Prometheus and Landsby prices load with JavaScript (needs a browser-rendering actor); memo23, the Apartments.com actor in use, carries no community website URL (the old epctex actor did; sites listed by hand in `config/direct_sites.toml`). 36 Mountain View buildings have no website URL yet.
 - Left in the Mountain View chunk: Airbnb station boxes (partial), Craigslist for the Mountain View ZIPs and 94306 (partial). Other chunks: all TODO.
 - Google bus stop list (user).
 - BICYCLE SKU (Essentials or Enterprise) unconfirmed; bike calls capped at 900 a month until then.
+
+### Simplification TODOs (suggested 2026-11-24, not done; the user prefers simpler design)
+
+1. **Shrink `discover-sites`.** It keeps its own append-only file (`config/discovered_sites.toml`: found, miss, check), `load_sites()` merges it with the hand list, and `direct.parse` re-checks addresses for discovered sites. Simpler: search, fetch and check the address once, then print proposed `[[site]]` lines for the user to paste into `config/direct_sites.toml`. One site list, every entry approved by the user; removes the extra file, the merge and most of `intake/discover.py`.
+2. **One price per card.** Third-party stays are now their own places, so a building's minimum is its lease minimum (its own furnished option always costs more) and a stay place's minimum is its stay price. Drop `min_lease_month`, `min_lease_per_bed`, `min_stay_month` from the `places` view and `priceFacts` / goal-dependent price sorting from `app.js`.
+3. **Route stay places like any place.** Remove `filter._Trips` (stay places reading the building's trips), the candidate merge in `trips.py` and the stay exclusion in `compute_all`. Cost: a few extra Google calls inside the free tier (a stay place's pin usually sits slightly off its building's, so most are real calls, not cache hits).
+4. **Remove `bike_bus_bike`** until the Google bus stop list exists (`config/points/google_bus_stops.csv` is empty, so the mode does nothing).
+5. **Remove legacy-run coverage handling** (`LEGACY_CITY_COVERS`, `LEGACY_PARTIAL`, legacy box overlap in `intake/base.coverage`): either re-run the Mountain View city searches through the area ledger (about $1 to 2) or mark those areas done by hand once.
+6. **Optional: drop the service worker** (offline cache of tiles and pages): little use on this machine, and it can serve stale pages.
+
+Kept on purpose: the verify queue, the area ledger, the photo filters, the three offer kinds in `plans.plan_key`.
 
 ## Decision log
 
