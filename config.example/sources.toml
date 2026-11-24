@@ -63,3 +63,21 @@ full_scrape = true       # every results page (false: the first page, about 25)
 actor = "bovi/padmapper-scraper"
 max_items = 300
 max_pages = 20
+
+[portfolio]
+# Operators' own city pages, rendered through Apify (one run for all operator x city pages), read by Claude Haiku
+# with every answer checked against the page (intake/portfolio.py). URL templates were found by web search
+# 2026-11-24; `{slug}` is the city, e.g. mountain-view. A city an operator has no page for answers 404 (nothing).
+actor = "apify/playwright-scraper"
+memory_mb = 2048
+model = "haiku"
+max_claude_usd = 0.5     # per run
+operators = [
+  { name = "Equity Residential", url = "https://www.equityapartments.com/san-francisco-bay/{slug}-apartments" },
+  { name = "Essex", url = "https://www.essexapartmenthomes.com/apartments/{slug}" },
+  { name = "Irvine Company", url = "https://www.irvinecompanyapartments.com/locations/northern-california/{slug}.html" },
+  { name = "Greystar", url = "https://www.greystar.com/s/{slug}-ca" },
+  { name = "UDR", url = "https://www.udr.com/san-francisco-bay-area-apartments/{slug}" },
+  { name = "Prometheus", url = "https://prometheusapartments.com/ca/{slug}-apartments/" },
+  { name = "AvalonBay", url = "https://www.avaloncommunities.com/california/{slug}-apartments" },
+]
