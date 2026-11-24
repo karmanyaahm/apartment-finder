@@ -112,8 +112,9 @@ def _records(config_dir: Path | None = None) -> dict[str, list[dict[str, Any]]]:
 def candidates(conn, chunks: list[str]) -> list[dict[str, Any]]:
     """Named buildings in the chunks with no community site yet, not searched before; most listings first."""
     rec = _records()
-    seen = {r.get("place_key") for k in ("found", "miss") for r in rec.get(k, [])}
-    have = {s.get("place_key") for s in load_sites().values()}
+    seen = {r.get("place_key") for r in rec.get("miss", [])}
+    seen |= {r.get("place_key") for r in rec.get("found", []) if str(r.get("found_by", "")).startswith("claude")}
+    have = {s.get("place_key") for s in load_sites().values()}  # passed or not yet checked
     have |= {r["place_key"] for r in conn.execute("SELECT DISTINCT place_key FROM listings WHERE source = 'direct'")}
     out = []
     for r in conn.execute("SELECT place_key, property_name, address, lat, lon, n_listings FROM places "
@@ -206,6 +207,48 @@ def discover(conn, chunks: list[str], *, limit: int, batch: int, model: str, max
                            "claude_usd": round(spent, 4), "sites": [(r["name"], r["url"]) for r in found]}
     if fetch and found:
         res["fetch"] = fetch_and_check(conn, [r["id"] for r in found])
+    return res
+
+
+def promote(conn, chunks: list[str], *, limit: int, dry_run: bool = False, fetch: bool = True) -> dict[str, Any]:
+    """Websites that listings already name (Apartments.com's website field, URLs read from Craigslist text by
+    `extract`) become `[[found]]` sites without a search, then go through the same Apify fetch and address check
+    as searched ones. One proposal per place: the URL most of its listings give."""
+    from collections import Counter
+
+    rec = _records()
+    proposed = {r.get("place_key") for r in rec.get("found", [])}
+    have = {s.get("place_key") for s in load_sites().values()} | proposed
+    have |= {r["place_key"] for r in conn.execute("SELECT DISTINCT place_key FROM listings WHERE source = 'direct'")}
+    by_place: dict[str, Counter] = {}
+    info: dict[str, Any] = {}
+    for r in conn.execute(
+            "SELECT l.place_key, l.source, json_extract(l.data, '$.extra.website') AS website, p.property_name, "
+            "p.address, p.lat, p.lon FROM listings l JOIN places p ON p.place_key = l.place_key "
+            "WHERE l.active = 1 AND l.source <> 'direct' AND p.address IS NOT NULL "
+            "AND json_extract(l.data, '$.extra.website') IS NOT NULL"):
+        if r["place_key"] in have or chunk_of(r["lat"], r["lon"]) not in chunks:
+            continue
+        by_place.setdefault(r["place_key"], Counter())[(r["website"], r["source"])] += 1
+        info[r["place_key"]] = r
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    taken = set(load_sites()) | {r["id"] for r in rec.get("found", [])}
+    rows = []
+    for pk, c in list(by_place.items())[:limit]:
+        (url, source), n = c.most_common(1)[0]
+        r = info[pk]
+        name = html.unescape(r["property_name"] or r["address"]).strip()
+        sid = _slug(name, taken)
+        taken.add(sid)
+        rows.append({"id": sid, "place_key": pk, "name": name, "address": r["address"],
+                     "chunk": chunk_of(r["lat"], r["lon"]), "found_at": now, "platform": platform_of(url), "url": url,
+                     "found_by": f"{source} listing", "note": f"website field of {n} listing(s)"})
+    if dry_run or not rows:
+        return {"sites": [(r["name"], r["url"]) for r in rows]}
+    append("found", rows)
+    res: dict[str, Any] = {"proposed": len(rows)}
+    if fetch:
+        res["fetch"] = fetch_and_check(conn, [r["id"] for r in rows])
     return res
 
 

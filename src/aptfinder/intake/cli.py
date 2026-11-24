@@ -81,6 +81,20 @@ def main(argv: list[str] | None = None) -> None:
     ds.add_argument("--max-usd", type=float, default=0.5, help="cap on Claude spend for this command")
     ds.add_argument("--no-fetch", action="store_true", help="record proposals only; no Apify fetch")
     ds.add_argument("--dry-run", action="store_true", help="list the buildings that would be searched")
+    ps = sub.add_parser("promote-sites", help="turn websites that listings already name into community sites: "
+                                              "fetch through Apify, keep the ones showing the address, scrape them")
+    ps.add_argument("--chunk", action="append", required=True)
+    ps.add_argument("--limit", type=int, default=100)
+    ps.add_argument("--no-fetch", action="store_true")
+    ps.add_argument("--dry-run", action="store_true")
+    ex = sub.add_parser("extract", help="read facts from listing text with Claude Haiku (address, name, website, "
+                                        "furnished, private bath, minimum stay, utilities)")
+    ex.add_argument("source", choices=["craigslist", "furnishedfinder"])
+    ex.add_argument("--limit", type=int, default=1000)
+    ex.add_argument("--batch", type=int, default=10, help="listings per Claude call")
+    ex.add_argument("--model", default="haiku")
+    ex.add_argument("--max-usd", type=float, default=1.0, help="cap on Claude spend for this command")
+    ex.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
 
     conn = connect(args.db)
@@ -90,6 +104,20 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.cmd == "reparse":
         print(json.dumps(reparse(conn, ADAPTERS[args.source], args.raw_file), indent=1))
+        return
+
+    if args.cmd in ("promote-sites", "extract"):
+        from .discover import Blocker, promote
+        from .extract import extract
+
+        try:
+            res = (promote(conn, args.chunk, limit=args.limit, dry_run=args.dry_run, fetch=not args.no_fetch)
+                   if args.cmd == "promote-sites" else
+                   extract(conn, args.source, limit=args.limit, batch=args.batch, model=args.model,
+                           max_usd=args.max_usd, dry_run=args.dry_run))
+        except Blocker as e:
+            raise SystemExit(f"BLOCKED: {e}")
+        print(json.dumps(res, indent=1, default=str))
         return
 
     if args.cmd == "discover-sites":
