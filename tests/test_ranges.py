@@ -90,3 +90,17 @@ def test_not_the_same_building_and_a_user_link_win(conn):
 def test_norm_name():
     assert norm_name("The University Gardens Apartments") == norm_name("university gardens") == "university gardens"
     assert norm_name("Apartments") is None
+
+
+def test_a_place_merged_by_hand_is_left_alone(conn):
+    from aptfinder.store.keys import place_key
+
+    _gardens(conn)
+    town = place_key("1226 University Dr, Menlo Park, CA 94025", None, None, None)
+    # you merged the range place into the townhouse's place by hand (Palo Alto Plaza on the live data): moving the
+    # townhouse's rule listings to the range place would leave the hand-linked plans behind
+    for sid in ("plan:2", "plan:3"):
+        append_link(conn, "user", "rentcafe", sid, town, f"{town}/{sid}", "manual merge")
+    c = identity.run(conn)
+    assert "range_merged_places" not in c
+    assert {pk for pk, _, _ in links(conn).values()} == {town}

@@ -6,7 +6,8 @@ list its townhouses one by one ('1226 University Dr'). A place whose address is 
 place on the same street, city and ZIP whose house number falls inside the range, when the two share a property
 name (normalised) or an operator. A range alone is no evidence: on a long street it spans unrelated houses.
 
-Run inside `identity.run` on the rule decisions, before same-site, so it is recomputed every run (idempotent, undone
+A place you merged or split by hand (a current user link points at it, or one of its listings has one) is left to
+you. Run inside `identity.run` on the rule decisions, before same-site, so it is recomputed every run (idempotent, undone
 by answering 'not the same building' on the pair). An absorbed listing's unit is its house number
 ('<range>/1226', or '<range>/1226-<unit>' when it names its own unit), so two townhouses never become one unit and
 the sources listing one townhouse share it. A user link (split, drawer merge) still wins over the rule row.
@@ -79,6 +80,15 @@ def _answered_no(conn: sqlite3.Connection | None) -> set[str]:
     return {k for k, v in out.items() if v == "no"}
 
 
+def _by_hand(conn: sqlite3.Connection | None) -> tuple[set[str], set[tuple[str, str]]]:
+    """(places a current user link points at, listings with a current user link): a place you merged or split by
+    hand is left to you, since moving its rule listings would leave the hand-linked ones behind."""
+    if conn is None:
+        return set(), set()
+    rows = conn.execute("SELECT source, source_id, place_key FROM current_links WHERE author = 'user'").fetchall()
+    return {r["place_key"] for r in rows}, {(r["source"], r["source_id"]) for r in rows}
+
+
 def candidates(conn: sqlite3.Connection | None, decisions: dict, rows: list, geocodes: dict) -> dict[str, Any]:
     """{'merges': [...], 'near_misses': [...]} over the rule decisions. A merge: a single-number place inside a range
     place on the same street, city and ZIP, sharing a name or operator. A near miss: inside a range on the same street
@@ -87,10 +97,13 @@ def candidates(conn: sqlite3.Connection | None, decisions: dict, rows: list, geo
 
     places: dict[str, dict[str, Any]] = defaultdict(lambda: {"reads": set(), "names": set(), "ops": set(),
                                                              "pts": [], "address": None, "n": 0})
+    hand, hand_listings = _by_hand(conn)
     for r in rows:
         d = decisions.get((r["source"], r["source_id"]))
         if not d or not _ok_key(d[1]):
             continue
+        if (r["source"], r["source_id"]) in hand_listings:
+            hand.add(d[1])
         p = places[d[1]]
         p["n"] += 1
         p["address"] = p["address"] or r["address"]
@@ -137,6 +150,8 @@ def candidates(conn: sqlite3.Connection | None, decisions: dict, rows: list, geo
                     near.append({**item, "why_not": "no shared name or operator"})
                 elif _pair_key(pk, rpk) in no:
                     near.append({**item, "why_not": "you answered not the same building"})
+                elif pk in hand or rpk in hand:
+                    near.append({**item, "why_not": "merged or split by hand"})
                 else:
                     cur = best.get(pk)
                     if cur is None or (rhi - rlo, rpk) < (cur["_span"], cur["kept"]):
