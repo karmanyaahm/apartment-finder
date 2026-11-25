@@ -103,26 +103,19 @@ FACTS: dict[str, dict[str, Any]] = {
 RESTRICTIONS = ("income", "senior", "veterans", "student", "employer", "other", "none")
 RESTRICTION = {
     "type": "object", "required": ["value", "evidence"],
-    "description": "who may rent this home, if the entry limits it in explicit eligibility words: income (income "
-                   "limits, a % of AMI / area median income, income-restricted, low-income, subsidized, tax credit / "
-                   "LIHTC, project-based Section 8 / PBV, Section 8 or voucher holders only, a BMR / below market "
-                   "rate program unit, 'affordable housing' as a program: an affordable housing community or "
-                   "development), senior (55+, 62+, seniors only), veterans (veterans only, VASH), student (students "
-                   "only), employer (only employees of a company or institution), other (any other rule on who may "
-                   "live there: disability, supportive or transitional housing, members only, one gender only). "
-                   "Marketing words are no limit: 'affordable' as a price word ('affordable luxury', 'affordable "
-                   "garden apartments'), 'great value', a menu or link label such as 'Below-Market Rates'. none when "
-                   "the entry sets no such limit, the usual rental. Not limits (none): accepting Section 8 or vouchers "
+    "description": "who may rent this home, if the entry limits it: income (income-restricted, affordable housing, BMR, "
+                   "below market rate, income limits apply, tax credit / LIHTC, Section 8 or voucher holders only, "
+                   "project-based vouchers / PBV), "
+                   "senior (55+, 62+, seniors only), veterans (veterans only, VASH), student (students only), employer "
+                   "(only employees of a company or institution), other (any other rule on who may live there: "
+                   "disability, supportive or transitional housing, members only, one gender only). none when the "
+                   "entry sets no such limit, the usual rental. Not limits (none): accepting Section 8 or vouchers "
                    "('Section 8 welcome'); a minimum income to qualify ('income 3x rent', 'income requirements' about "
                    "earning enough), which is ordinary screening, unlike a maximum income; house or booking rules "
                    "(21+, no children, vaccinated guests, no smoking or drugs, reviews needed, 1 person max); being "
                    "near a campus or an employer. evidence: the exact words that state the limit, copied character "
-                   "for character; when the text has several, the strongest (an income limit, AMI, subsidized, "
-                   "Section 8, tax credit / LIHTC first, then 'affordable housing community', then others). "
-                   "evidence_2: optionally a second such quote, else empty. For none, evidence is empty unless the "
-                   "text explicitly says the homes are market-rate or have no income restrictions: then those words.",
-    "properties": {"value": {"type": "string", "enum": list(RESTRICTIONS)}, "evidence": {"type": "string"},
-                   "evidence_2": {"type": "string"}}}
+                   "for character; empty for none.",
+    "properties": {"value": {"type": "string", "enum": list(RESTRICTIONS)}, "evidence": {"type": "string"}}}
 PARKING_KINDS = ("garage", "carport", "covered", "assigned", "uncovered", "off_street", "street", "tandem",
                  "ev_charging", "other")
 PARKING = {
@@ -288,50 +281,19 @@ def described(text: str) -> bool:
     return len(_norm(rest)) >= MIN_DESCRIBED
 
 
-# an income limit needs explicit eligibility words in its quote (normalized): a price word ('affordable garden
-# apartments') or a menu label ('Below-Market Rates': MV Apartments, $4,037-5,998) is no evidence. Rank 2 (a limit,
-# AMI, subsidy, voucher program, tax credit) beats rank 1 (affordable housing as a program, BMR).
-INCOME_STRONG = re.compile(r"income (?:\w+ ){0,2}(?:limit|restrict|qualif|eligib|based)|maximum (?:\w+ ){0,3}income|"
-                           r"\bami\b|median income|subsidi[sz]ed|section 8|project based|\bpbv\b|\bhud\b|"
-                           r"tax credit|\blihtc\b|low income|moderate income|rent restricted")
-INCOME_PROGRAM = re.compile(r"affordable (?:rental |senior |family )?(?:housing|apartment community|community|"
-                            r"communities|development|program)|\d+ affordable|\bbmr\b|"
-                            r"below market rate (?:unit|program|apartment|home|housing)")
-MARKET_RATE = re.compile(r"(?<!below )market rate|no income (?:limit|restriction)|not income restricted")
-
-
-def restriction_rank(value: str, quote: str) -> int:
-    """How strongly a quote states its limit: 0 = no evidence (an income quote without eligibility words)."""
-    if value != "income":
-        return 1
-    q = _norm(quote)
-    return 2 if INCOME_STRONG.search(q) else 1 if INCOME_PROGRAM.search(q) else 0
-
-
 def check_restriction(rx: Any, text: str) -> dict[str, Any] | None:
-    """{value, evidence[, evidence_2]} of a limit whose quote is in `text` (an income quote must also hold explicit
-    eligibility words, `restriction_rank`; the stronger of two quotes first); {value: 'none'} only when `text` is
-    `described`, with `evidence` when it quotes an explicit market-rate statement; else None (unknown). Shared by
-    extract and render's page reading."""
+    """{value, evidence} of a limit whose quote is in `text`; {value: 'none'} only when `text` is `described`;
+    else None (unknown). Shared by extract and render's page reading."""
     if not isinstance(rx, dict) or rx.get("value") not in RESTRICTIONS:
         return None
-    t = f" {_norm(text)} "
-
-    def on_page(q: str) -> bool:  # a limit needs its quote ('55+' -> '55')
-        n = _norm(q)
-        # whole words, except a long quote may touch a word the scrape glued on ('Educator HousingAt least one ...')
-        return len(n) >= 2 and (f" {n} " in t or (len(n) >= 20 and n in t))
-    quotes = [q for q in (rx.get("evidence"), rx.get("evidence_2")) if isinstance(q, str) and on_page(q)]
     if rx["value"] == "none":
-        if not described(text):
-            return None
-        said = next((q for q in quotes if MARKET_RATE.search(_norm(q))), None)
-        return {"value": "none", **({"evidence": said} if said else {})}
-    quotes = sorted((q for q in quotes if restriction_rank(rx["value"], q)),
-                    key=lambda q: -restriction_rank(rx["value"], q))
-    if not quotes:
-        return None
-    return {"value": rx["value"], "evidence": quotes[0], **({"evidence_2": quotes[1]} if len(quotes) > 1 else {})}
+        return {"value": "none"} if described(text) else None
+    q = _norm(rx.get("evidence") or "")  # a limit needs its quote ('55+' -> '55')
+    t = _norm(text)
+    # whole words, except a long quote may touch a word the scrape glued on ('Educator HousingAt least one ...')
+    if len(q) >= 2 and (f" {q} " in f" {t} " or (len(q) >= 20 and q in t)):
+        return {"value": rx["value"], "evidence": rx["evidence"]}
+    return None
 
 
 # beds / baths read from text (`check_units`): only for a row whose own source left them empty (`units_wanted`)
@@ -624,7 +586,7 @@ def _pending(conn, source: str, reread: bool = False, pages: set[str] | None = N
 def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: str = "haiku", max_usd: float = 1.0,
             workers: int = 8, dry_run: bool = False, reread: bool = False, cached_only: bool = False,
             ask_fn: Callable | None = None, rebuild_identity: bool = True,
-            id_like: str | None = None, recheck_none: bool = False, recheck: str | None = None, units_missing: bool = False) -> dict[str, Any]:
+            id_like: str | None = None, recheck_none: bool = False, units_missing: bool = False) -> dict[str, Any]:
     """Read the whole entry of every unread active listing of `source`. `cached_only`: apply cached answers, ask
     nothing (after a reparse). `ask_fn` replaces `ask` (tests). `rebuild_identity=False`: the caller rebuilds it.
     `id_like`: only source_ids matching this SQL LIKE pattern. `recheck_none`: only listings whose current reading
@@ -633,7 +595,7 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
     and unit lines make a new text, so only they are asked; a Zillow single unit gets its page's values)."""
     if units_missing:
         reread = True
-    if recheck_none or recheck:
+    if recheck_none:
         reread = cached_only = True
     if source not in TEXT_SOURCES:
         raise SystemExit(f"extract supports {', '.join(TEXT_SOURCES)} or all")
@@ -666,11 +628,6 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
             "SELECT source_id FROM listings WHERE source = ? "
             "AND json_extract(data, '$.extra.extracted.restriction.value') = 'none'", (source,))}
         todo = [t for t in todo if t["row"]["source_id"] in said_none and not described(t["text"])]
-    if recheck:  # listings whose current reading says this restriction: cached answers applied again (free)
-        said = {r[0] for r in conn.execute(
-            "SELECT source_id FROM listings WHERE source = ? "
-            "AND json_extract(data, '$.extra.extracted.restriction.value') = ?", (source, recheck))}
-        todo = [t for t in todo if t["row"]["source_id"] in said]
     cache = load_cache()
     uniq: dict[str, str] = {}
     for t in todo:

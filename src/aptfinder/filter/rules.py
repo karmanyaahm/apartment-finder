@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..plans import baths_note
+
 PASS, FAIL, CHECK = "pass", "fail", "needs_check"
 RANK = {PASS: 0, CHECK: 1, FAIL: 2}
 
@@ -191,9 +193,10 @@ def evaluate(rule: dict[str, Any], row: dict[str, Any], ctx: Ctx) -> tuple[str, 
             return CHECK, f"{label}: baths unknown"
         if (u := _untrusted(ctx, "beds", "baths")):
             return CHECK, f"{label}: {u}"
+        via = f" ({baths_note(row['baths_from'])})" if row.get("baths_from") else ""  # borrowed / drawing
         if any(baths >= o["min_baths"] for o in opts):
-            return PASS, f"{beds:g}bd/{baths:g}ba"
-        return FAIL, f"{label}: is {beds:g}bd/{baths:g}ba"
+            return PASS, f"{beds:g}bd/{baths:g}ba{via}"
+        return FAIL, f"{label}: is {beds:g}bd/{baths:g}ba{via}"
 
     if t == "dates_cover":
         start, end = rule["start"], rule["end"]

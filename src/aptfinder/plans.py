@@ -9,20 +9,24 @@ Without a size, the plan name decides.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Callable
+
+
+def offer_kind(f: dict[str, Any]) -> str:
+    # three offers never share a row: an ordinary lease, a furnished lease (e.g. AvalonBay Furnished+ on the
+    # same unit at a higher rent), and a furnished short stay (Blueground and its listing template). Term first, as
+    # the cards' lease / stay prices and the goals' term rule read it; only an unknown term falls back to furnished
+    # (furnished = stay). A furnished long lease keeps its own 'furnished' row.
+    term = f.get("term")
+    return ("stay" if term == "short" or (term is None and f.get("furnished")) else
+            "furnished" if f.get("furnished") else "lease")
 
 
 def plan_key(f: dict[str, Any]) -> str:
     beds, baths = f.get("beds"), f.get("baths")
     size = f"{'studio' if beds == 0 else (f'{beds:g}bd' if beds is not None else '?bd')}/" \
            f"{f'{baths:g}' if baths is not None else '?'}ba"
-    # three offers never share a row: an ordinary lease, a furnished lease (e.g. AvalonBay Furnished+ on the
-    # same unit at a higher rent), and a furnished short stay (Blueground and its listing template). Term first, as
-    # the cards' lease / stay prices and the goals' term rule read it; only an unknown term falls back to furnished
-    # (furnished = stay). A furnished long lease keeps its own 'furnished' row.
-    term = f.get("term")
-    offer = ("stay" if term == "short" or (term is None and f.get("furnished")) else
-             "furnished" if f.get("furnished") else "lease")
+    offer = offer_kind(f)
     if f.get("sqft"):
         return f"{offer}|{size}|{round(f['sqft'] / 10) * 10:.0f}sqft"
     return f"{offer}|{size}|{(f.get('floor_plan') or '').strip().lower()}"
@@ -45,6 +49,70 @@ def inherit_prices(rows: list[dict[str, Any]]) -> None:
                 r["price_month"], r["price_from"] = hit
                 if r.get("beds") is not None:  # a studio counts as one bedroom, as in the listings view
                     r["price_per_bed"] = hit[0] / max(r["beds"], 1)
+
+
+# ------------------------------------------------------------------------------------- baths an own site leaves out
+SQFT_TOL = 0.03  # a plan elsewhere is the same plan when its size is within 3%
+# a plan "name" that only states a bed count ('Studio', '2 BR', 'One Bedroom', Zillow's '3bd') names no plan
+_GENERIC_NAME = re.compile(r"(studio|\d+|one|two|three|four|five|six)( ?(bd|br|bdr|bed|beds|bedroom|bedrooms))?"
+                           r"( (unit|units|floor plan|apartment|apartments|home|homes))?")
+
+
+def _plan_name(f: dict[str, Any]) -> str | None:
+    n = _norm(f.get("floor_plan") or "")
+    return None if len(n) < 2 or _GENERIC_NAME.fullmatch(n) else n
+
+
+def inherit_baths(rows: list[dict[str, Any]], readings: dict[tuple[str, str], dict[str, Any]] | None = None,
+                  fields: Callable[[dict[str, Any]], dict[str, Any]] = lambda r: r) -> list[dict[str, Any]]:
+    """In place, for an own-site plan row (`direct`) whose baths are unknown (after the user's corrections, which
+    always win): baths borrowed from the same plan on another source at the same place (active, same kind of offer
+    and beds, and size within 3% or the same distinctive plan name), only when every such plan agrees; else the
+    reading of the row's own floor-plan drawing (`readings`, aptfinder.planread). Sets `baths_from` ({how:
+    'borrowed', source, source_id, n} or {how: 'drawing', seen, file}), a lower-trust value the drawer and reasons
+    name. `fields(r)` is the dict holding the row's fields (the drawer keeps them under 'fields'). Returns the
+    disagreements: [{source_id, place_key, values: {baths: [source|source_id, ...]}}]."""
+    by_place: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        if r.get("place_key") and r.get("active") and fields(r).get("baths") is not None \
+                and r["source"] != "direct" and fields(r).get("kind") != "site_info":
+            by_place.setdefault(r["place_key"], []).append(r)
+    out = []
+    for r in rows:
+        f = fields(r)
+        if r["source"] != "direct" or f.get("baths") is not None or f.get("kind") == "site_info" \
+                or f.get("beds") is None or not r.get("place_key"):
+            continue
+        name = _plan_name(f)
+        hits = []
+        for o in by_place.get(r["place_key"], []):
+            g = fields(o)
+            if g.get("beds") != f["beds"] or offer_kind(g) != offer_kind(f):
+                continue
+            if (f.get("sqft") and g.get("sqft") and abs(g["sqft"] - f["sqft"]) <= SQFT_TOL * f["sqft"]) \
+                    or (name and _plan_name(g) == name):
+                hits.append(o)
+        vals = {fields(o)["baths"] for o in hits}
+        if len(vals) == 1:
+            o = hits[0]
+            f["baths"] = fields(o)["baths"]
+            f["baths_from"] = {"how": "borrowed", "source": o["source"], "source_id": o["source_id"], "n": len(hits)}
+        elif len(vals) > 1:
+            groups: dict[float, list[str]] = {}
+            for o in hits:
+                groups.setdefault(fields(o)["baths"], []).append(f"{o['source']}|{o['source_id']}")
+            out.append({"source_id": r["source_id"], "place_key": r["place_key"], "values": groups})
+        elif (rd := (readings or {}).get((r["source"], r["source_id"]))) is not None:
+            f["baths"] = rd["baths"]
+            f["baths_from"] = {"how": "drawing", "seen": rd.get("seen"), "file": rd.get("file")}
+    return out
+
+
+def baths_note(b: dict[str, Any] | None) -> str:
+    """'baths from rentcafe' / 'baths read from the floor plan drawing', for reasons and the drawer."""
+    if not b:
+        return ""
+    return f"baths from {b['source']}" if b.get("how") == "borrowed" else "baths read from the floor plan drawing"
 
 
 def is_own_priced(r: dict[str, Any]) -> bool:

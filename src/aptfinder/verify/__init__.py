@@ -50,6 +50,8 @@ def accuracy(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
             LEFT JOIN observations o ON o.id = c.observation_id
             LEFT JOIN trips t ON t.id = c.trip_id
             WHERE c.field != 'active'  -- the 'no longer for rent' mark is not a field reading (view withdrawals)
+              -- a value the user filled where the source stated none (drawer 'set ba') is no error of the source
+              AND (c.trip_id IS NOT NULL OR json_type(COALESCE(c.stored_value, 'null')) != 'null')
         ) WHERE rn = 1 AND verdict != 'cannot_tell'
     """).fetchall()
     tally: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])

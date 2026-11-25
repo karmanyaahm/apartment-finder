@@ -152,11 +152,11 @@ SYSTEM = ("You read an apartment community's own website (rendered page text) an
           "properties'). Also say who may rent this community (restriction) and its parking. Answer in the requested JSON.")
 # who may rent: extract's field, worded for a whole website (a limit must hold for this community as a whole)
 PAGE_RESTRICTION = {**RESTRICTION, "description": RESTRICTION["description"] + (
-    " The limit must hold for this community as a whole: 'This community is income restricted', 'an affordable "
-    "housing community', 'income limits', 'AMI', 'tax credit', 'subsidized family housing', 'senior community "
-    "62+', 'project-based Section 8'. none when the pages describe the community and set no such limit; also none "
-    "for a few BMR units in an otherwise market-rate building, a menu or link label ('Below-Market Rates'), other "
-    "properties of the same operator, 'Section 8 accepted' and equal housing notices.")}
+    " The limit must hold for this community as a whole: 'This community is income restricted', 'affordable "
+    "apartments', 'income limits', 'AMI', 'tax credit', 'BMR', 'senior community 62+', 'project-based Section 8'. "
+    "none when the pages describe the community and set no such limit; also none for a few BMR units in an "
+    "otherwise market-rate building, other properties of the same operator, 'Section 8 accepted' and equal "
+    "housing notices.")}
 # parking: extract's object, worded for a community's site (its residents' parking, often a fee list)
 PAGE_PARKING = {**PARKING, "description": PARKING["description"] + (
     " Read it for a resident of this community: 'Garage parking $75/month', 'one assigned covered space per "
@@ -558,8 +558,7 @@ def reread_restrictions(conn, *, sites: list[str] | None = None, model: str = "h
                         workers: int = 4, dry_run: bool = False, parking: bool = False) -> dict[str, Any]:
     """Who may rent, read again from the raw page text of sites already rendered (no Apify): for each site with
     active rendered plan rows (`<site>:r:%`), the pages of its newest raw file go to Haiku (`ask_restriction`);
-    each plan row whose reading changed gets a new observation, its scraped data plus `extra.page_restriction`, or
-    without it when the answer is now unknown (`cleared`; append-only; run
+    each plan row gets a new observation, its scraped data plus `extra.page_restriction` (append-only; run
     component `render_restriction`), then the cached extract answers are applied over them (free), so the plan
     rows' own readings stay current. `sites`: only these. A site whose raw file is gone is reported, not read.
     `parking`: read the community's parking instead (`ask_parking`, stored as `extra.page_parking`; run component
@@ -629,21 +628,15 @@ def reread_restrictions(conn, *, sites: list[str] | None = None, model: str = "h
                     v = prx["value"] if prx else "unknown"
                     report[sid] = f"{v}" + (f': "{prx["evidence"]}"' if prx and prx.get("evidence") else "")
                 counts[v] = counts.get(v, 0) + 1
+                if not prx:
+                    continue
                 for r in rows[sid]:
                     base = conn.execute(  # the scraped observation, not an extract reading
                         "SELECT * FROM observations WHERE source = 'direct' AND source_id = ? "
                         "AND json_extract(data, '$.extra.extracted') IS NULL ORDER BY id DESC LIMIT 1",
                         (r["source_id"],)).fetchone() or r
                     d = json.loads(base["data"])
-                    extra = dict(d.get("extra") or {})
-                    if extra.get(key) == prx:
-                        continue  # unchanged: nothing to append
-                    if prx:
-                        extra[key] = prx
-                    else:  # unknown now: an earlier reading the stricter check rejects is dropped
-                        del extra[key]
-                        counts["cleared"] = counts.get("cleared", 0) + 1
-                    d["extra"] = extra
+                    d["extra"] = {**(d.get("extra") or {}), key: prx}
                     append_observation(conn, run, "direct", r["source_id"], ObservationData(**d), url=base["url"],
                                        price=base["price"], price_basis=base["price_basis"],
                                        raw_path=base["raw_path"], commit=False)

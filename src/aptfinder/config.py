@@ -81,51 +81,6 @@ def load_media(config_dir: Path | None = None) -> dict[str, Any]:
     return _toml(path).get("media", {}) if path.exists() else {}
 
 
-_OPERATORS: dict[Any, list[dict[str, Any]]] = {}
-OPERATOR_KIND = {"income": "affordable-housing nonprofit", "none": "market-rate"}
-
-
-def load_operators(config_dir: Path | None = None) -> list[dict[str, Any]]:
-    """config/operators.toml `[[operator]]` {name, restriction income | none, domains, names}: affordable-housing
-    nonprofits and housing authorities (income), market-rate REITs and managers (none); the committed
-    config.example/ list when config/ has none. Re-read when the file changes."""
-    path = (config_dir or settings.CONFIG_DIR) / "operators.toml"
-    if not path.exists():
-        path = settings.ROOT / "config.example" / "operators.toml"
-    if not path.exists():
-        return []
-    key = (str(path), path.stat().st_mtime)
-    if key not in _OPERATORS:
-        ops = []
-        for o in _toml(path).get("operator", []):
-            if o.get("restriction") not in OPERATOR_KIND:
-                raise ValueError(f"{path}: operator {o.get('name')!r}: restriction must be income or none")
-            ops.append({"name": str(o["name"]), "restriction": o["restriction"],
-                        "domains": [str(d).lower() for d in o.get("domains", [])],
-                        "names": [str(n).strip().lower() for n in o.get("names", [])]})
-        _OPERATORS.clear()
-        _OPERATORS[key] = ops
-    return _OPERATORS[key]
-
-
-def operator_restriction(urls: list[str], operators: list[str | None] = (), config_dir: Path | None = None
-                         ) -> dict[str, Any] | None:
-    """{value, evidence 'operator: <name> (affordable-housing nonprofit | market-rate)', source 'operator'} of the
-    operator one of `urls` belongs to (its domain: the host or a subdomain of it) or one of `operators` names (a
-    listing's operator field, exact, any case); an income operator first. None when none matches."""
-    from urllib.parse import urlparse
-
-    hosts = [(urlparse(u if "://" in u else f"https://{u}").hostname or "").lower() for u in urls if u]
-    names = {str(n).strip().lower() for n in operators if n}
-    hits = [o for o in load_operators(config_dir)
-            if names & set(o["names"]) or any(h == d or h.endswith("." + d) for h in hosts for d in o["domains"])]
-    if not hits:
-        return None
-    o = next((o for o in hits if o["restriction"] != "none"), hits[0])
-    return {"value": o["restriction"], "evidence": f"operator: {o['name']} ({OPERATOR_KIND[o['restriction']]})",
-            "source": "operator"}
-
-
 def load_goals(config_dir: Path | None = None) -> GoalsConfig:
     return GoalsConfig.model_validate(_toml((config_dir or settings.CONFIG_DIR) / "goals.toml"))
 

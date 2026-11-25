@@ -23,7 +23,7 @@ from ..filter import (AMENITY_FLAGS, amenity_flags, place_parking, place_restric
                       place_commute_terms)
 from ..filter import goals as goalstore
 from ..filter.rules import AGGS, EQUALS_FIELDS, KNOWN_FIELDS, NUMERIC_FIELDS, RULE_TYPES
-from ..plans import plan_image, site_drawings
+from ..plans import inherit_baths, plan_image, site_drawings
 from ..plans import plan_key as _plan_key
 from ..store import append_annotation, append_check, append_link, connect, init_db
 from ..store.models import CHECKABLE_FIELDS
@@ -92,6 +92,8 @@ def group_plans(listings: list[dict[str, Any]], files: dict[str, dict[str, Any]]
                                       if l["fields"].get("floor_plan")
                                       and not re.fullmatch(r"(studio|\d+bd)", l["fields"]["floor_plan"])), None),
             "beds": f[0].get("beds"), "baths": next((x["baths"] for x in f if x.get("baths") is not None), None),
+            # where those baths came from when the row had none of its own (plans.inherit_baths): lower trust
+            "baths_from": next((x.get("baths_from") for x in f if x.get("baths") is not None), None),
             "sqft": [min(sqft), max(sqft)] if sqft else None,
             "price_month": [min(prices), max(prices)] if prices else None,
             "price_per_bed": (min(prices) / max(f[0]["beds"], 1)) if prices and f[0].get("beds") is not None else None,
@@ -535,6 +537,11 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         web = cached("website_status", lambda: pipeline.website_status(conn))
         with lock:
             pstatus = pipeline.place_status(conn, place_key, web=web)
+        # an own-site plan row without baths: the same plan's baths on another source, else its drawing's reading
+        from ..planread import readings as plan_readings
+
+        inherit_baths([{**l, "place_key": place_key} for l in out_listings],
+                      cached("plan_readings", lambda: plan_readings(conn)), fields=lambda r: r["fields"])
         return {
             "pipeline": pstatus,
             "place": place,

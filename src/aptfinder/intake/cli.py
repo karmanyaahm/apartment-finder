@@ -120,8 +120,6 @@ def main(argv: list[str] | None = None) -> None:
     ex.add_argument("--dry-run", action="store_true")
     ex.add_argument("--reread", action="store_true", help="apply cached answers again to listings already read "
                                                           "(free; after a change to the checks)")
-    ex.add_argument("--recheck-restriction", metavar="VALUE", help="only listings read as this restriction (e.g. "
-                    "income): apply cached answers again (free), after a stricter check")
     ex.add_argument("--recheck-none", action="store_true", help="only listings read as restriction 'none' from a "
                                                                 "name or title alone: apply cached answers again "
                                                                 "(free), so they become unknown")
@@ -243,7 +241,7 @@ def main(argv: list[str] | None = None) -> None:
             try:
                 res = extract(conn, src, limit=args.limit, batch=args.batch, model=args.model, max_usd=left,
                               workers=args.workers, dry_run=args.dry_run, reread=args.reread,
-                              id_like=args.id_like, recheck_none=args.recheck_none, recheck=args.recheck_restriction,
+                              id_like=args.id_like, recheck_none=args.recheck_none,
                               units_missing=args.units_missing)
             except Blocker as e:
                 raise SystemExit(f"BLOCKED: extract {e}")

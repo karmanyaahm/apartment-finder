@@ -797,6 +797,14 @@ function ck(verdict, overridden) {
   return `<span class="ck ${verdict}" title="hand check: ${verdict}">${sym}</span>`;
 }
 
+// baths an own-site plan row did not state, filled at read time (plans.inherit_baths): lower trust, marked
+function bathsMark(b) {
+  if (!b) return "";
+  const why = b.how === "borrowed" ? `borrowed from ${b.source} ${b.source_id} (the same plan there${b.n > 1 ? `, ${b.n} listings agree` : ""}); the own site does not state baths`
+    : `read from the floor plan drawing by Haiku: ${b.seen || ""}`;
+  return `<span class="ck borrowed" title="${esc(why)}">${b.how === "borrowed" ? "≈" : "▣"}</span>`;
+}
+
 function fmtField(f, v) {
   if (v == null) return '<span class="muted">?</span>';
   if (f.startsWith("price")) return typeof v === "number" ? money(v) : esc(v);
@@ -925,7 +933,7 @@ async function openPlace(pk) {
     <tr><th>plan</th><th>bd / ba</th><th>sqft</th><th>$/month</th><th>$/bed</th><th>available</th><th>earliest</th><th>sources</th><th>drawing</th></tr>
     ${plans.map((pl) => `<tr>
       <td>${esc(pl.name || "")}${pl.offer !== "lease" ? `<br><span class="chip">${esc(pl.offer)}</span>` : ""}</td>
-      <td>${pl.beds === 0 ? "studio" : esc(pl.beds ?? "?")} / ${esc(pl.baths ?? "?")}</td>
+      <td>${pl.beds === 0 ? "studio" : esc(pl.beds ?? "?")} / ${esc(pl.baths ?? "?")}${bathsMark(pl.baths_from)}</td>
       <td>${rng(pl.sqft, (v) => num(v))}</td>
       <td>${rng(pl.price_month, money)}</td>
       <td>${pl.price_per_bed != null ? money(pl.price_per_bed) : ""}</td>
@@ -949,7 +957,7 @@ async function openPlace(pk) {
     return `<tr class="${l.active ? "" : "inactive"}">
       <td><a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">${esc(l.source)}</a></td>
       <td>${esc(f.unit || "")}</td><td>${esc(f.floor_plan || "")}</td>
-      <td>${fmtField("beds", f.beds)}${c("beds")} / ${fmtField("baths", f.baths)}${c("baths")}</td>
+      <td class="nowrap">${fmtField("beds", f.beds)}${c("beds")} / ${fmtField("baths", f.baths)}${bathsMark(f.baths_from)}${c("baths")}${f.kind !== "site_info" ? ` <button class="small" data-set-baths="${esc(l.obs_id)}" data-stored="${esc(l.data.baths ?? "")}" data-now="${esc(f.baths ?? "")}" data-label="${esc(`${l.source} ${f.floor_plan || f.unit || l.source_id}`)}" title="Set the baths by hand (a hand check on this listing; it wins over the source and any borrowed or drawing value)">set ba</button>` : ""}</td>
       <td>${fmtField("sqft", f.sqft)}${c("sqft")}</td>
       <td>${fmtField("price", f.price)}${f.price_basis && f.price_basis !== "month" ? ` <span class="muted">/${esc(f.price_basis)}</span>` : ""}${c("price")}</td>
       <td>${esc(f.available_from || "")}${c("available_from")}</td>
@@ -1058,6 +1066,18 @@ function wireDrawer(pk) {
       await post("api/listings/gone", { source, source_id: rest.join("|"), gone, queue: "adhoc" });
       toast(gone ? "Marked no longer for rent" : "Undone: back on the list"); await loadPlaces(); openPlace(pk);
     } catch (err) { toast("Failed: " + err.message, 6000); }
+  }));
+  $$("#drawer [data-set-baths]").forEach((b) => b.addEventListener("click", async () => {
+    const v = prompt(`Baths for ${b.dataset.label} (e.g. 2 or 2.5):`, b.dataset.now);
+    if (v == null || v.trim() === "") return;
+    const n = Number(v);
+    if (!(n >= 0.5 && n <= 10 && n * 2 === Math.round(n * 2))) { toast("Baths must be a number like 1, 2 or 2.5", 6000); return; }
+    const same = b.dataset.stored !== "" && Number(b.dataset.stored) === n;  // the source already says this: confirm it
+    try {
+      await post("api/checks", { queue: "adhoc", observation_id: +b.dataset.setBaths, field: "baths",
+                                 verdict: same ? "correct" : "wrong", true_value: same ? null : n });
+      toast(`Baths set to ${n}`); await loadPlaces(); openPlace(pk);
+    } catch (err) { toast("Not saved: " + err.message, 6000); }
   }));
   $$("#drawer [data-split]").forEach((b) => b.addEventListener("click", async () => {
     const [source, source_id] = b.dataset.split.split("|");
