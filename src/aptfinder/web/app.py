@@ -23,7 +23,7 @@ from .. import pipeline, settings, verify
 from ..areas import in_walk_zone
 from ..areas import zones as area_zones
 from ..config import Goal, load_goals, load_point_sets, load_points
-from ..filter import (AMENITY_FLAGS, place_parking, place_restriction, best_trips, evaluate_all, evaluate_goal, goal_inputs, nearest_by_set,
+from ..filter import (AMENITY_FLAGS, place_building_units, place_parking, place_restriction, best_trips, evaluate_all, evaluate_goal, goal_inputs, nearest_by_set,
                       place_commute_terms)
 from ..filter import goals as goalstore
 from ..filter.rules import AGGS, EQUALS_FIELDS, KNOWN_FIELDS, NUMERIC_FIELDS, RULE_TYPES
@@ -602,6 +602,8 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 "restriction": place_restriction(parsed, a),
                 # parking as the most informative listing here states it (filter.place_parking): the card's line
                 "parking": place_parking(parsed),
+                # how many units the building has, with its evidence (filter.building): the card's 🏢 / 🏠 line
+                "building_units": place_building_units(parsed),
                 "rating": (a.get("overall") or {}).get("rating"),
                 "user_status": (a.get("status") or {}).get("comment"),
             })
@@ -636,6 +638,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         parsed = [{**x, "data": json.loads(x["data"])} for x in listings]
         place["restriction"] = place_restriction(parsed, latest_annotations("place", place_key).get(place_key, {}))
         place["parking"] = place_parking(parsed)
+        place["building_units"] = place_building_units(parsed)
         res = results()
         trips = all_trips().get(place_key, {})
         out_listings = []

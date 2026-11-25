@@ -183,8 +183,13 @@ def evaluate(rule: dict[str, Any], row: dict[str, Any], ctx: Ctx) -> tuple[str, 
             return CHECK, f"{label}: {u}"
         lim, strict = rule["value"], rule.get("strict")
         ok = (v < lim if strict else v <= lim) if t == "max" else (v > lim if strict else v >= lim)
+        if row.get(f"{f}_floor") and ok == (t == "max"):
+            # a lower bound (building_units: the units seen, not the building's total): it decides only a floor
+            # that already passes a `min` or already fails a `max`; otherwise the true value may lie either side
+            return CHECK, f"{label}: at least {v:,.0f} known ({row.get(f'{f}_evidence') or 'lower bound'})"
+        ev = f", {row[f'{f}_evidence']}" if f == "building_units" and row.get(f"{f}_evidence") else ""  # its source
         via = f", price from {row['price_from']}" if row.get("price_from") and f.startswith("price") else ""
-        return (PASS, f"{label} ({v:,.0f}{via})") if ok else (FAIL, f"{label}: is {v:,.0f}{via}")
+        return (PASS, f"{label} ({v:,.0f}{via}{ev})") if ok else (FAIL, f"{label}: is {v:,.0f}{via}{ev}")
 
     if t == "size_options":
         beds, baths = row.get("beds"), row.get("baths")
@@ -310,8 +315,9 @@ def combine(statuses: list[str]) -> str:
 # ---------------------------------------------------------------- rule shapes (goals edited in the dashboard)
 # parking (extract's and render's `parking` reading, filter.parking_values): spaces that come with the home (0 when
 # the text says no parking) and the monthly price of one (0 when included)
+# building_units: how many units the building has (filter.building; 1 = a house), the same for every listing there
 NUMERIC_FIELDS = ["price", "price_month", "price_per_bed", "beds", "baths", "sqft", "parking_spots",
-                  "parking_usd_month"]
+                  "parking_usd_month", "building_units"]
 EQUALS_FIELDS: dict[str, list[Any]] = {"term": ["short", "long"], "furnished": [True, False],
                                        "private_bath": [True, False],
                                        "kind": ["apartment", "house", "townhome", "entire_place", "room"],

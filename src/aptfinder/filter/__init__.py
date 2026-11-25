@@ -11,6 +11,7 @@ from typing import Any
 from ..config import Goal, GoalsConfig, load_goals, operator_restriction
 from ..plans import inherit_baths, inherit_prices, is_own_priced
 from ..verify import accuracy, low_accuracy
+from .building import building_note, building_units_by_place, place_building_units
 from .rules import CHECK, FAIL, PASS, RANK, Ctx, combine, commute_trips, evaluate, fact, in_net
 
 PROVIDER_PREF = {"google": 0, "knn": 1, "estimate": 9}
@@ -149,7 +150,14 @@ def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None, trips:
         op = pk and operator_restriction(own_site_urls(r["source"], r["url"], r["website"]), [r["operator"]])
         if op:
             (op_market if op["value"] == "none" else op_income).setdefault(pk, op)
+    # how many units the building has (filter.building: a stated count, a house type, or a floor from the units and
+    # plans one source lists): a place-level fact every listing there is judged on, like pooled amenities
+    bu = building_units_by_place(conn)
     for r in listings:
+        b = bu.get(r["place_key"] or "")
+        r["building_units"] = b["value"] if b else None
+        r["building_units_floor"] = bool(b and b["floor"])
+        r["building_units_evidence"] = building_note(b)
         if r["place_key"] in pooled:
             own_am = json.loads(r["amenities"]) if isinstance(r.get("amenities"), str) else (r.get("amenities") or [])
             r["amenities"] = sorted(pooled[r["place_key"]] | set(own_am))
@@ -388,4 +396,4 @@ def routing_candidates(conn: sqlite3.Connection, cfg: GoalsConfig | None = None,
     return out
 
 
-__all__ = ["evaluate_all", "evaluate_goal", "goal_inputs", "place_restriction", "place_parking", "routing_candidates", "AMENITY_FLAGS", "best_trips", "nearest_by_set", "PASS", "FAIL", "CHECK"]
+__all__ = ["place_building_units", "evaluate_all", "evaluate_goal", "goal_inputs", "place_restriction", "place_parking", "routing_candidates", "AMENITY_FLAGS", "best_trips", "nearest_by_set", "PASS", "FAIL", "CHECK"]

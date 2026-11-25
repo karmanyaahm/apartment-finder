@@ -369,6 +369,7 @@ function ruleTemplates() {
     ["parking included", { type: "equals", field: "parking_included", value: true }],
     ["parking spots at least", { type: "min", field: "parking_spots", value: 1 }],
     ["parking cost at most ($/month)", { type: "max", field: "parking_usd_month", value: 100 }],
+    ["apartment building (≥ N units)", { type: "min", field: "building_units", value: 5 }],
     ["available for dates", { type: "dates_cover", start: new Date().toISOString().slice(0, 10), end: new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10) }],
     ["field known", { type: "known", field: "sqft" }],
     ["net commute (the commute rules counted in it)", { type: "net_commute", agg: $("#agg").value || "total", max: 90 }],
@@ -377,7 +378,8 @@ function ruleTemplates() {
 const opt = (v, label, sel) => `<option value="${esc(v)}"${String(v) === String(sel) ? " selected" : ""}>${esc(label)}</option>`;
 const FIELD_LABEL = { price: "price", price_month: "price / month", price_per_bed: "price / bed", beds: "beds", baths: "baths",
   sqft: "sqft", term: "term", furnished: "furnished", private_bath: "private bath", kind: "kind", restriction: "who may rent",
-  parking_included: "parking included", parking_spots: "parking spots", parking_usd_month: "parking $/month" };
+  parking_included: "parking included", parking_spots: "parking spots", parking_usd_month: "parking $/month",
+  building_units: "units in building" };
 const fieldName = (f) => FIELD_LABEL[f] || f.replace(/_/g, " ");
 // one rule row's inputs; each input names the path it sets in data-p ("value", "options.0.max", ...); `part` is
 // "rules" (must-haves) or "nice"
@@ -792,6 +794,17 @@ function parkingFact(pk, fails = []) {
   return `<span${mk || ` title="${esc(`"${(pk.evidence || []).join(" | ")}" (${pk.source})`)}"`}>🅿 ${esc(parkingText(pk))}</span>`;
 }
 
+// How many units the building has (filter.place_building_units): "🏢 167 units", "🏢 ≥ 7 units" (a floor: the units
+// and plans one source lists), "🏠 single-family", "🏢 apartment building, units ?"; evidence and source on hover;
+// red / amber when the selected goal's building_units rule fails or needs a check on it
+function buildingFact(b, fails = []) {
+  const mk = markFor(fails, (x) => x.f === "building_units");
+  if (!b) return mk ? `<span${mk}>🏢 units ?</span>` : "";
+  const text = b.house ? `🏠 ${b.type}` : b.value == null ? `🏢 ${b.type}, units ?`
+    : `🏢 ${b.floor ? "≥ " : ""}${num(b.value)} unit${b.value === 1 ? "" : "s"}`;
+  return `<span${mk || ` title="${esc(`${b.evidence} (${b.source})`)}"`}>${esc(text)} <span class="muted">(${esc(b.source)})</span></span>`;
+}
+
 function stars(n) { return n ? `<span class="stars" title="${n}/5">${"★".repeat(n)}${"☆".repeat(5 - n)}</span>` : ""; }
 
 function renderList() {
@@ -812,7 +825,7 @@ function renderList() {
       : `<span${bm || am}>beds ?</span>`;
     const facts = `${priceFacts(p, fails)}
         <span>${bb}</span>
-        ${limitFacts(p, fails)}${netFact(p, fails)}${parkingFact(p.parking, fails)}`;
+        ${limitFacts(p, fails)}${netFact(p, fails)}${parkingFact(p.parking, fails)}${buildingFact(p.building_units, fails)}`;
     const rxb = restrictionBadge(p.restriction, fails);
     const extra = rxb + fails.filter((x) => !x.used).map(failChip).join("");
     return `<div class="card ${st === "fail" ? "dim" : ""} ${S.selected === p.place_key ? "sel" : ""}" data-pk="${esc(p.place_key)}">
@@ -1027,7 +1040,7 @@ async function openPlace(pk) {
     <h2>${esc(label)} ${restrictionBadge(p.restriction)} ${stars(d.annotations.filter((a) => a.attribute === "overall" && a.rating).slice(-1)[0]?.rating)}</h2>
     ${(d.websites || []).length ? `<div class="website">${d.websites.map((w) => `<a href="${esc(w.url)}" target="_blank" rel="noopener noreferrer">🌐 ${esc(w.site)} ↗</a>`).join(" ")}</div>` : '<div class="website muted small">no website found yet</div>'}
     <div class="muted small">${esc(p.address || "address unknown")} ${p.city ? "· " + esc(p.city) : ""} · ${esc(pk)}</div>
-    ${p.parking ? `<div class="small facts">${parkingFact(p.parking)}</div>` : ""}
+    ${p.parking || p.building_units ? `<div class="small facts">${buildingFact(p.building_units)}${parkingFact(p.parking)}</div>` : ""}
     <h3>Goals</h3>${goals}
     ${whoMayRent(d, p)}
     ${photos.length ? `<h3>Photos (${photos.length})</h3><div class="media">${photos.join("")}</div>` : '<p class="muted small">No photos from any source.</p>'}
