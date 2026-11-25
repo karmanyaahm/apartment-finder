@@ -609,13 +609,14 @@ MAX_READINGS = 64  # combinations of candidate values tried per listing; more th
 
 def _with_values(row: dict[str, Any], values: dict[str, Any]) -> dict[str, Any]:
     """`row` with some fields replaced, its derived prices recomputed as the listings view does: a monthly price is
-    both price and price_month, and price_per_bed is price_month / beds (None for a studio or unknown beds)."""
+    both price and price_month, and price_per_bed is price_month / beds, a studio counting as one bedroom (None for
+    unknown beds)."""
     alt = {**row, **values}
     if "price_month" in values and alt.get("price_basis") in ("month", None):
         alt["price"] = alt["price_month"]
     if "price_month" in values or "beds" in values:
         pm, beds = alt.get("price_month"), alt.get("beds")
-        alt["price_per_bed"] = pm / beds if pm is not None and beds else None
+        alt["price_per_bed"] = pm / max(beds, 1) if pm is not None and beds is not None else None
     return alt
 
 

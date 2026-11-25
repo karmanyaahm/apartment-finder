@@ -233,3 +233,21 @@ def test_address_city_beats_the_listing_city_field_and_unit_and_range_quirks():
     assert k("881-881 E El Camino Real, Mountain View, CA") == k("881 E El Camino Real, Mountain View, CA")
     assert k("4180-4190 Byron St, Palo Alto") != k("4180 Byron St, Palo Alto")  # a real range stays a range
     assert k("850 Calderon Ave", "mountain view") == k("850 Calderon Ave, Mountain View, CA")  # city field as fallback
+
+
+def test_a_studio_counts_as_one_bedroom_per_bed_and_unknown_beds_have_none(conn):
+    from aptfinder.plans import inherit_prices
+    from aptfinder.verify import _with_values
+
+    r = start_run(conn, "intake", "zillow")
+    _obs(conn, r, sid="s", price=2100, beds=0)
+    _obs(conn, r, sid="u", price=3000, beds=None)
+    _link(conn, sid="s", pk="p_a", uk="p_a/s")
+    ppb = dict(conn.execute("SELECT source_id, price_per_bed FROM listings").fetchall())
+    assert ppb == {"s": 2100, "u": None}
+    assert conn.execute("SELECT min_price_per_bed FROM places WHERE place_key = 'p_a'").fetchone()[0] == 2100
+    rows = [{"place_key": "p", "source": "a", "price_month": 1900, "beds": 0, "baths": 1},
+            {"place_key": "p", "source": "b", "price_month": None, "beds": 0, "baths": 1}]
+    inherit_prices(rows)
+    assert rows[1]["price_per_bed"] == 1900
+    assert _with_values({"price_month": 2000, "beds": 2}, {"beds": 0})["price_per_bed"] == 2000

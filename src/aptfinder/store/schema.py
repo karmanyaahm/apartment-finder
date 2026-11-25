@@ -332,14 +332,15 @@ SELECT b.*,
            WHEN 'stay'  THEN b.price * 30.4375 /
                 NULLIF(julianday(b.query_checkout) - julianday(b.query_checkin), 0)
        END AS price_month,
-       CASE WHEN b.beds > 0 THEN
+       -- per bedroom, a studio (beds 0) counting as one bedroom, as Verify's too-cheap check does; unknown beds: NULL
+       CASE WHEN b.beds >= 0 THEN
            (CASE b.price_basis
                WHEN 'month' THEN b.price
                WHEN 'night' THEN b.price * 30.4375
                WHEN 'week'  THEN b.price * 30.4375 / 7
                WHEN 'stay'  THEN b.price * 30.4375 /
                     NULLIF(julianday(b.query_checkout) - julianday(b.query_checkin), 0)
-           END) / b.beds
+           END) / MAX(b.beds, 1)
        END AS price_per_bed
 FROM listings_base b;
 

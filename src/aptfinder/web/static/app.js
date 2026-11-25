@@ -695,7 +695,7 @@ function priceFacts(p, fails = []) {
   if (showLease) {
     const [lm, lmv] = mark("price_month", p.min_lease_month, (x) => !forStay(x));
     const [lb, lbv] = mark("price_per_bed", p.min_lease_per_bed, (x) => !forStay(x));
-    lease = `<span${lm}><b>${money(p.min_lease_month)}</b>/mo${lmv}</span><span${lb}><b>${money(p.min_lease_per_bed)}</b>/bed${lbv}</span>`;
+    lease = `<span${lm}><b>${money(p.min_lease_month)}</b>/mo${lmv}</span><span${lb || ' title="per bedroom; a studio counts as one"'}><b>${money(p.min_lease_per_bed)}</b>/bed${lbv}</span>`;
   }
   if (showStay) {
     const [sm, smv] = mark("price_month", p.min_stay_month, forStay);
@@ -928,7 +928,7 @@ async function openPlace(pk) {
       <td>${pl.beds === 0 ? "studio" : esc(pl.beds ?? "?")} / ${esc(pl.baths ?? "?")}</td>
       <td>${rng(pl.sqft, (v) => num(v))}</td>
       <td>${rng(pl.price_month, money)}</td>
-      <td>${pl.price_per_bed ? money(pl.price_per_bed) : ""}</td>
+      <td>${pl.price_per_bed != null ? money(pl.price_per_bed) : ""}</td>
       <td>${pl.plan_only ? '<span class="muted" title="Listed in the community\'s own plan data, with no price: no unit in this plan is known to be offered. Not counted for goals.">plan exists, no unit offered</span>'
         : pl.n_units ? `${pl.n_units} unit${pl.n_units > 1 ? "s" : ""}` : `${pl.n_active} listing${pl.n_active === 1 ? "" : "s"}`}</td>
       <td>${esc(pl.earliest || "")}</td>

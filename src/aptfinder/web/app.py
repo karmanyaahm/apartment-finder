@@ -94,7 +94,7 @@ def group_plans(listings: list[dict[str, Any]], files: dict[str, dict[str, Any]]
             "beds": f[0].get("beds"), "baths": next((x["baths"] for x in f if x.get("baths") is not None), None),
             "sqft": [min(sqft), max(sqft)] if sqft else None,
             "price_month": [min(prices), max(prices)] if prices else None,
-            "price_per_bed": (min(prices) / f[0]["beds"]) if prices and f[0].get("beds") else None,
+            "price_per_bed": (min(prices) / max(f[0]["beds"], 1)) if prices and f[0].get("beds") is not None else None,
             "n_listings": len(ls), "n_active": len(active),
             "n_units": len({x.get("unit") for x in fb if x.get("unit")}),
             "offer": {"stay": "furnished stay" + tag, "furnished": "furnished lease" + tag}.get(kind, "lease"),

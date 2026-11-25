@@ -39,8 +39,8 @@ def inherit_prices(rows: list[dict[str, Any]]) -> None:
             hit = best.get((r["place_key"], plan_key(r)))
             if hit:
                 r["price_month"], r["price_from"] = hit
-                if r.get("beds"):
-                    r["price_per_bed"] = hit[0] / r["beds"]
+                if r.get("beds") is not None:  # a studio counts as one bedroom, as in the listings view
+                    r["price_per_bed"] = hit[0] / max(r["beds"], 1)
 
 
 def is_own_priced(r: dict[str, Any]) -> bool:
