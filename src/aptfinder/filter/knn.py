@@ -141,13 +141,18 @@ def loo_samples(trips: dict[str, dict[tuple[str, str], dict[str, Any]]], located
     return errs
 
 
+P99_MIN_N = 100  # accuracy(): fewer scored places than this and p99 is not reported
+
+
 def accuracy(errs: list[float]) -> dict[str, Any]:
-    """n, median and 95th-percentile error (minutes outside the padded range; nearest rank) and % inside it."""
+    """n, median, 95th- and 99th-percentile error (minutes outside the padded range; nearest rank) and % inside it.
+    p99 is None below P99_MIN_N places (with fewer it is just the worst one)."""
     if not errs:
-        return {"n": 0, "median": None, "p95": None, "inside_pct": None}
+        return {"n": 0, "median": None, "p95": None, "p99": None, "inside_pct": None}
     from math import ceil
 
     s = sorted(errs)
     rank = lambda q: s[max(0, ceil(len(s) * q) - 1)]  # noqa: E731  (nearest-rank percentile)
     return {"n": len(s), "median": round(rank(0.5), 2), "p95": round(rank(0.95), 2),
+            "p99": round(rank(0.99), 2) if len(s) >= P99_MIN_N else None,
             "inside_pct": round(100 * sum(1 for e in s if e == 0) / len(s), 1)}

@@ -1696,12 +1696,13 @@ function accuracyHtml(cells, scope, pad = 0.5, R = KNN_META?.radius_m ?? 400) {
     <th title="a Google-routed place within ${R} m: shown as a range">KNN</th><th>estimate only</th>
     <th title="leave-one-out: each place with its own Google route predicted from its other routed neighbours within ${R} m">n</th>
     <th title="minutes outside the range padded by ${pad} min each side (0 inside)">median error</th>
-    <th title="95th percentile of that error: the worst 5% are off by more">p95 error</th><th>inside range</th></tr>
+    <th title="95th percentile of that error: the worst 5% are off by more">p95 error</th>
+    <th title="99th percentile of that error: the worst 1% are off by more (– below 100 places scored)">p99 error</th><th>inside range</th></tr>
     ${rows.map(([k, v]) => {
       const [p, md] = cellParts(k), l = v.loo || {};
       return `<tr><td>${esc(p.replace(/^commute_targets:/, "").replace(/^set:/, "nearest "))} × ${esc(MODE_LABEL[md] || md)}</td>
         <td>${v.google_pct}%</td><td>${v.knn_pct}%</td><td>${v.estimate_pct}%</td><td>${l.n ?? 0}</td>
-        <td>${l.n ? m(l.median) : "–"}</td><td>${l.n ? m(l.p95) : "–"}</td><td>${l.n ? `${l.inside_pct}%` : "–"}</td></tr>`;
+        <td>${l.n ? m(l.median) : "–"}</td><td>${l.n ? m(l.p95) : "–"}</td><td${l.n && l.p99 == null ? ' title="n small: under 100 places scored"' : ""}>${m(l.p99)}</td><td>${l.n ? `${l.inside_pct}%` : "–"}</td></tr>`;
     }).join("")}</table><p class="small">Shares are of the ${scope} places in the scope. Accuracy: leave-one-out over every place
     with its own Google route (n); error = minutes outside the neighbours' range padded by ${pad} min each side.</p>`;
 }
@@ -1749,7 +1750,7 @@ function knnHelpHtml(d = KNN_META) {
   <p><b>Accuracy table</b>: per ticked cell, how the scope's places get their time (own Google route, KNN range,
     estimate only), and how good KNN is: each place that has its own Google route is predicted from its other routed
     neighbours within ${R} m (leave-one-out); error is the minutes outside their range padded by 0.5 min each side
-    (median, and p95 = the worst 5% are off by more), n = places scored.</p>
+    (median, p95 = the worst 5% are off by more, p99 = the worst 1%; p99 shows – under 100 places scored), n = places scored.</p>
   <p><b>Sample</b> picks places to route with Google, for every ticked cell:</p>
   <ul><li><b>cover</b>: the fewest places so that every place has a routed place within R m (places already routed count).
       The best first step.</li>

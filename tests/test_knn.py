@@ -220,7 +220,7 @@ def test_knn_cells_and_sampling_endpoints(tmp_path, monkeypatch):
     assert r["plan"][f"{META}|drive"] and r["usage"]["matrix_elements"] == 0
     acc = r["accuracy"][f"{META}|drive"]
     assert acc["scope"] == len(keys) and acc["counts"]["google"] + acc["counts"]["knn"] + acc["counts"]["estimate"] == len(keys)
-    assert set(acc["loo"]) == {"n", "median", "p95", "inside_pct"}
+    assert set(acc["loo"]) == {"n", "median", "p95", "p99", "inside_pct"}
     a2 = c.post("/api/knn/accuracy", json={"scope": "list", "place_keys": keys}).json()
     assert a2["cells"][f"{META}|drive"] == acc and a2["pad_min"] == 0.5
     ref = c.post("/api/sample/dry_run", json={"method": "refine", "scope": "zone"}).json()
@@ -293,7 +293,9 @@ def test_leave_one_out_matches_add_knn_without_the_place_and_scores_against_the_
     lo, hi = k["min"] - 0.5, k["max"] + 0.5
     assert (0.0 if lo <= 18.0 <= hi else min(abs(18.0 - lo), abs(18.0 - hi))) in errs
     a = accuracy([0.0, 0.0, 0.0, 1.0, 12.5])
-    assert a == {"n": 5, "median": 0.0, "p95": 12.5, "inside_pct": 60.0}
+    assert a == {"n": 5, "median": 0.0, "p95": 12.5, "p99": None, "inside_pct": 60.0}  # n < 100: no p99
+    big = accuracy([0.0] * 97 + [3.0, 7.0, 20.0])  # 100 places: p99 is the 99th, p95 the 95th
+    assert big["n"] == 100 and big["p99"] == 7.0 and big["p95"] == 0.0
     assert accuracy([])["n"] == 0
 
 
