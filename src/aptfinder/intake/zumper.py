@@ -101,13 +101,22 @@ def zumper_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] | No
                                  beds=f.get("bedrooms"), baths=_baths(f.get("bathrooms"), f.get("half_bathrooms")),
                                  sqft=f.get("square_feet") or None, available_from=_date(f.get("date_available")),
                                  extra={**extra, "plan_listing_id": f.get("listing_id"),
+                                        "baths_full": f.get("bathrooms"), "baths_half": f.get("half_bathrooms"),
                                         "plan_price_max": f.get("max_price"), "units_offered": ud.get("active")})))
     if out:
         return out
     if item.get("detail_entity_data_floorplan_listings") is not None and item.get("floorplan_count", 0) > 1:
         return [_summary(lid, url, base, extra)]  # a building whose plans are all off the market
+    # `min_bathrooms` counts full baths only; `min_all_bathrooms` is [full, half] (1090 Mcgregor Way: [2, 1] = 2.5)
+    lo, hi = item.get("min_all_bathrooms"), item.get("max_all_bathrooms")
+    if lo and hi and len(lo) == len(hi) == 2:
+        if lo == hi:
+            extra = {**extra, "baths_full": lo[0], "baths_half": lo[1]}
+        lo, hi = _baths(*lo), _baths(*hi)
+    else:
+        lo, hi = item.get("min_bathrooms"), item.get("max_bathrooms")
     return [_single(lid, url, base, extra, item.get("min_bedrooms"), item.get("max_bedrooms"),
-                    item.get("min_bathrooms"), item.get("max_bathrooms"), item.get("min_square_feet"),
+                    lo, hi, item.get("min_square_feet"),
                     item.get("max_square_feet"), item.get("min_price"), item.get("date_available"), op, short,
                     item.get("property_type"))]
 

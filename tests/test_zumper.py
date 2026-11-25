@@ -63,6 +63,23 @@ def test_zumper_furnished_stay_and_summary():
     assert s.data.kind == "site_info" and s.price is None and s.source_id == "building:173"
 
 
+# a house with no floor plans: `min_bathrooms` is the full count only, `min_all_bathrooms` is [full, half]
+ZUMPER_HOUSE = {
+    "listing_id": 65668790, "address": "1090 Mcgregor Way", "city": "Palo Alto", "state": "CA", "zipcode": "94306",
+    "lat": 37.406938, "lng": -122.136922, "min_price": 10000, "max_price": 10000, "min_bedrooms": 4, "max_bedrooms": 4,
+    "min_bathrooms": 2, "max_bathrooms": 2, "min_all_bathrooms": [2, 1], "max_all_bathrooms": [2, 1],
+    "detail_entity_data_bathrooms": 2, "detail_entity_data_half_bathrooms": 1, "min_square_feet": 1942,
+    "max_square_feet": 1942, "floorplan_count": 1, "property_type": 13, "brokerage_name": "SRE Asset Management",
+    "lease_type": 1,
+    "url": "/listings/29961263p/4-bedroom-barron-park-palo-alto-ca", "detail_entity_data_floorplan_listings": None}
+
+
+def test_zumper_house_counts_half_baths():
+    p, = ADAPTERS["zumper"].parse(ZUMPER_HOUSE, {})
+    assert (p.source_id, p.price, p.data.beds, p.data.baths, p.data.sqft) == ("65668790", 10000, 4, 2.5, 1942)
+    assert (p.data.extra["baths_full"], p.data.extra["baths_half"]) == (2, 1)
+
+
 # --------------------------------------------------------------------------------------------- PadMapper
 PADMAPPER_UNIT = {
     "listing_id": 41703699, "address": "2065 California St", "city": "Mountain View", "state": "CA",
