@@ -342,3 +342,22 @@ def test_places_name_the_attribute_each_goal_fails_on(client):
     assert temp["price_month"] == {"s": "fail", "f": "price_month", "v": 4200.0, "lim": 4000}
     assert temp["furnished"]["v"] is False and temp["private_bath"]["s"] == "needs_check"
     assert temp["commute"]["pt"] == "commute_targets:Downtown Palo Alto" and "bike" in temp["commute"]["modes"]
+
+
+def test_places_carry_amenity_flags_for_the_require_checkboxes(client):
+    import json
+
+    from aptfinder.filter import amenity_flags
+
+    assert amenity_flags(None) == {"gym": None, "in_unit_laundry": None, "parking": None, "pets": None}
+    f = amenity_flags(["Fitness Center", "Dishwasher", "Washer/Dryer Hookup", "no parking", "Dogs allowed (read from text)"])
+    assert f == {"gym": True, "in_unit_laundry": False, "parking": False, "pets": True}
+    assert amenity_flags(["In-unit laundry (read from text)", "Parking: garage (read from text)"])["in_unit_laundry"]
+    c, db = client
+    places = c.get("/api/places").json()
+    assert all(set(p["amenities"]) == {"gym", "in_unit_laundry", "parking", "pets"} for p in places)
+    conn = connect(db)
+    for p in places:
+        listed = [a for (am,) in conn.execute("SELECT amenities FROM listings WHERE place_key = ?", (p["place_key"],))
+                  if am for a in json.loads(am)]
+        assert p["amenities"] == amenity_flags(listed)

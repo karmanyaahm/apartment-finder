@@ -19,7 +19,7 @@ from .. import pipeline, settings, verify
 from ..areas import in_walk_zone
 from ..areas import zones as area_zones
 from ..config import load_goals, load_point_sets, load_points
-from ..filter import best_trips, evaluate_all, nearest_by_set
+from ..filter import amenity_flags, best_trips, evaluate_all, nearest_by_set
 from ..plans import plan_image, site_drawings
 from ..plans import plan_key as _plan_key
 from ..store import append_annotation, append_check, append_link, connect, init_db
@@ -390,6 +390,9 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 "minutes": {f"{pt}|{m}": {"minutes": t["minutes"], "provider": t["provider"]}
                             for (pt, m), t in trips.get(pk, {}).items()},
                 "nearest": nearest_all.get(pk, {}),
+                # amenity flags (filter.amenity_flags over every listing's list here): true / false, null when nothing listed
+                "amenities": amenity_flags(sorted({a for x in rows if x.get("amenities")
+                                                   for a in json.loads(x["amenities"])})),
                 "rating": (a.get("overall") or {}).get("rating"),
                 "user_status": (a.get("status") or {}).get("comment"),
             })

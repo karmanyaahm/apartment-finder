@@ -119,6 +119,27 @@ def evaluate_all(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> di
     return out
 
 
+# The list's "require" checkboxes: an amenity holds when any entry of the place's pooled amenity lists contains one of
+# its words (the amenity rule's matching) and none of its exclusions ("Dishwasher" is not laundry, "no parking" is
+# not parking). Haiku's text reading adds entries such as "In-unit laundry (read from text)".
+AMENITY_FLAGS: dict[str, tuple[list[str], list[str]]] = {
+    "gym": (["gym", "fitness"], []),
+    "in_unit_laundry": (["in-unit laundry", "in unit laundry", "washer/dryer", "washer and dryer", "in unit",
+                         "in-home washer"], ["hookup", "no laundry"]),
+    "parking": (["parking", "garage", "carport"], ["no parking"]),
+    "pets": (["pets allowed", "pet friendly", "dogs allowed", "cats allowed"], []),
+}
+
+
+def amenity_flags(amenities: list[str] | None) -> dict[str, bool | None]:
+    """name -> True / False from a place's pooled amenity entries; None for every flag when nothing is listed."""
+    if not amenities:
+        return {k: None for k in AMENITY_FLAGS}
+    low = [a.lower() for a in amenities]
+    return {k: any(any(w in a for w in words) and not any(x in a for x in excl) for a in low)
+            for k, (words, excl) in AMENITY_FLAGS.items()}
+
+
 COMMUTE_RULES = {"commute_any", "near"}
 
 
@@ -139,4 +160,4 @@ def routing_candidates(conn: sqlite3.Connection, cfg: GoalsConfig | None = None,
     return out
 
 
-__all__ = ["evaluate_all", "routing_candidates", "best_trips", "nearest_by_set", "PASS", "FAIL", "CHECK"]
+__all__ = ["evaluate_all", "routing_candidates", "amenity_flags", "AMENITY_FLAGS", "best_trips", "nearest_by_set", "PASS", "FAIL", "CHECK"]
