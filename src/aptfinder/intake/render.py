@@ -134,7 +134,18 @@ PAGE_FUNCTION = r"""async function pageFunction(context) {
       followed.push(h);
     }
   }
-  const text = await page.evaluate(() => document.body ? document.body.innerText : '');
+  const main = await page.evaluate(() => document.body ? document.body.innerText : '');
+  // floor plan widgets often live in an iframe (G5/RealPage, SightMap), whose text body.innerText leaves out
+  // (The Colton's 'SEARCH BY FLOOR PLANS' panel, 2026-11-25): each frame's text, those showing prices first
+  const priced = [], other = [];
+  for (const f of page.frames()) {
+    if (f === page.mainFrame()) continue;
+    try {
+      const t = await f.evaluate(() => document.body ? document.body.innerText : '');
+      if (t && t.trim().length > 40) (/\$\s?\d[\d,]{2,}/.test(t) ? priced : other).push('[frame ' + f.url() + ']\n' + t.slice(0, 20000));
+    } catch (e) {}
+  }
+  const text = [...priced, main, ...other].join('\n\n');
   // images with their alt text and class, for floor plan drawings (render.page_drawings keeps only those whose
   // alt, class or URL says floor plan, and a plan gets one only when exactly one label names it)
   const images = await page.$$eval('img', (ims) => ims.map((i) => ({
@@ -182,8 +193,12 @@ def _norm(s: str) -> str:
 
 
 def _num_on_page(n: float, text: str) -> bool:
-    i = int(round(n))
-    return any(f in text for f in (f"{i:,}", str(i)))
+    """The number as the page writes it: '4,566', '4566', or with cents ('$4,611.85 /mo': Haiku answers 4611.85,
+    which rounds to 4612, a number the page never shows)."""
+    forms = {f"{int(round(n)):,}", str(int(round(n)))}
+    if n != int(n):
+        forms |= {f"{n:,.2f}", f"{n:.2f}"}
+    return any(f in text for f in forms)
 
 
 def check_plans(answer: list[dict[str, Any]], text: str) -> list[dict[str, Any]]:

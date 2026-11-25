@@ -328,7 +328,10 @@ def parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] | None:
     if not site:
         return None
     if site.get("verify_address") and address_on_page(item, site.get("address")) is False:
-        return None  # found by search but not this building's page: never attach it (discover records the check)
+        from .discover import vouched  # a page without the address may still be the building's (named, yours)
+
+        if not vouched(site, item):
+            return None  # found by search but not this building's page: never attach it (discover records the check)
     return PARSERS[site["platform"]](item, site) or None
 
 

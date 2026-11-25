@@ -40,7 +40,7 @@ SECRET_ENV = ("APIFY_TOKEN", "GOOGLE_MAPS_API_KEY")
 AGGREGATOR_HOSTS = {
     "apartments.com", "zillow.com", "trulia.com", "hotpads.com", "rent.com", "rentcafe.com", "apartmentlist.com",
     "apartmentguide.com", "zumper.com", "padmapper.com", "craigslist.org", "craigslist.com", "realtor.com",
-    "redfin.com", "forrent.com", "apartmentfinder.com", "apartmenthomeliving.com", "rentals.com", "rentable.co",
+    "redfin.com", "forrent.com", "corporatehousing.com", "forrentuniversity.com", "yellowpages.com", "apartmentfinder.com", "apartmenthomeliving.com", "rentals.com", "rentable.co",
     "homes.com", "move.com", "liveapartments.com", "apartmentratings.com", "niche.com", "airbnb.com", "vrbo.com",
     "furnishedfinder.com", "blueground.com", "vrent.com", "turbotenant.com", "hemlane.com",
     "matterport.com", "ricoh360.com",
@@ -128,6 +128,76 @@ def is_aggregator(url: str | None) -> bool:
     site. Craigslist and Zumper links to vrent.com or turbotenant.com single-listing pages are the usual case."""
     host = urlsplit(url or "").netloc.lower().split(":")[0]
     return any(host == h or host.endswith("." + h) for h in AGGREGATOR_HOSTS)
+
+
+# words that do not tell one building from another (a name made only of these never vouches for a site)
+GENERIC_NAME_WORDS = {
+    "the", "apartments", "apartment", "apts", "apt", "and", "homes", "home", "residences", "residence", "living",
+    "village", "park", "place", "plaza", "court", "courts", "gardens", "garden", "manor", "tower", "towers", "house",
+    "station", "square", "center", "north", "south", "east", "west", "studio", "bedroom", "bedrooms", "bath",
+    "baths", "townhome", "townhomes", "community", "communities", "luxury", "street", "avenue", "boulevard",
+    "affordable",
+    "senior", "family", "lofts", "flat", "suites", "terrace", "commons", "view", "vista", "oaks", "creek"}
+
+
+def name_tokens(name: str | None) -> list[str]:
+    """The building name's distinctive words (4+ letters, not GENERIC_NAME_WORDS): 'The Heltsley' -> ['heltsley']."""
+    words = re.findall(r"[a-z0-9]+", (name or "").split(",")[0].lower())
+    return [w for w in words if len(w) >= 4 and w not in GENERIC_NAME_WORDS and not w.isdigit()]
+
+
+ERROR_PAGE = re.compile(r"\b(404|not found|bad gateway|error|forbidden|access denied|just a moment)\b", re.I)
+
+
+def vouched(site: dict[str, Any], item: dict[str, Any], website_hosts: set[str] | frozenset = frozenset()
+            ) -> str | None:
+    """Why a page whose text lacks the street address is still the building's own (the address often sits only in
+    a footer image or on the contact page), or None. Never for an error page ('404 Not Found', 'Rentcafe Error')
+    or a page with almost no text. Then: you gave the URL in Verify; or its host is the website Google Places
+    gives for this place, on a host no other place's Places website uses (`place_website_hosts`: a shared
+    operator host such as midpen-housing.org or cbw-properties.com names no one building), and the site did not
+    come from Google Places itself (that would vouch for itself); or every distinctive word of the building's name
+    is in the page's host and path, or in its title ('The Heltsley' on theheltsley.com), and the page names the
+    building's city. A generic name ('Park Plaza Apartments') never vouches that way."""
+    title = item.get("title") or ""
+    if ERROR_PAGE.search(title) or len((item.get("text") or "").strip()) < 200 or is_aggregator(item.get("url")):
+        return None
+    if str(site.get("found_by", "")).startswith("you"):
+        return "you added this URL"
+    url = item.get("url") or site.get("url") or ""
+    host = urlsplit(url).netloc.lower().split(":")[0].removeprefix("www.")
+    if host and host in website_hosts and not str(site.get("found_by", "")).startswith("google_places"):
+        return f"Google Places gives this place's website on {host}"
+    toks = name_tokens(site.get("name"))
+    # the name rules also need the building's city on the page: rentvillaoaks.com (a 'Villa Oaks' in Santa Rosa)
+    # is not Sunnyvale's Villa Oaks
+    parts = [p.strip() for p in (site.get("address") or "").split(",")]
+    city = parts[1].lower() if len(parts) > 2 else None
+    if not toks or not city or city not in (title + " " + (item.get("text") or "")).lower():
+        return None
+    where = re.sub(r"[^a-z0-9]", "", host + urlsplit(url).path.lower())
+    if all(t in where for t in toks):
+        return f"the URL names the building ({', '.join(toks)})"
+    if all(re.search(rf"\b{t}\b", title.lower()) for t in toks):
+        return f"the page title names the building ({title.strip()[:80]})"
+    return None
+
+
+def place_website_hosts(conn) -> dict[str, set[str]]:
+    """place_key -> hosts of the websites Google Places gives for it (`extra.website` of google_places rows), only
+    hosts that no other place's Places website uses (an operator's shared host names no one building)."""
+    by_host: dict[str, set[str]] = {}
+    for r in conn.execute("SELECT DISTINCT place_key, json_extract(data, '$.extra.website') AS w FROM listings "
+                          "WHERE source = 'google_places' AND place_key IS NOT NULL "
+                          "AND json_extract(data, '$.extra.website') IS NOT NULL"):
+        h = urlsplit(r["w"]).netloc.lower().split(":")[0].removeprefix("www.")
+        if h and not is_aggregator(r["w"]):
+            by_host.setdefault(h, set()).add(r["place_key"])
+    out: dict[str, set[str]] = {}
+    for h, pks in by_host.items():
+        if len(pks) == 1:
+            out.setdefault(next(iter(pks)), set()).add(h)
+    return out
 
 
 def platform_of(url: str) -> str:
@@ -462,6 +532,7 @@ def fetch_and_check(conn, ids: list[str], *, browser: bool = False, residential:
             items += blob.get("items") or []
             apify_runs += [blob["apify_run"]] if blob.get("apify_run") else []
     sites = direct.sites()
+    hosts = place_website_hosts(conn) if conn is not None else {}
     checks, seen = [], set()
     for it in items:
         s = direct._site_for(it)
@@ -470,6 +541,9 @@ def fetch_and_check(conn, ids: list[str], *, browser: bool = False, residential:
         seen.add(s["id"])
         form = is_form(it.get("url"))  # the page it landed on, before `clean_url` cuts the form off
         ok = False if form else direct.address_on_page(it, s.get("address"))
+        why = None  # the address is not on the page, but the page is still the building's (`vouched`)
+        if ok is False and not form and (why := vouched(s, it, hosts.get(s.get("place_key"), set()))):
+            ok = True
         try:
             n = len(direct.PARSERS[s["platform"]](it, s)) if ok else 0
         except Exception:  # a browser-check item lacks fields some platform parsers read; the check stands
@@ -480,7 +554,7 @@ def fetch_and_check(conn, ids: list[str], *, browser: bool = False, residential:
         checks.append({"id": s["id"], "ok": bool(ok), "at": now, "run_id": res.run_id,
                        "outcome": "ok" if ok else "rejected" if ok is False else "empty",
                        "final_url": moved, "platform": platform_of(moved) if moved and ok else None,
-                       "reason": ("address shown; rows: %d" % n) if ok else
+                       "reason": (f"{why}; rows: {n}" if why else "address shown; rows: %d" % n) if ok else
                        f"landed on a contact or tour form: {it.get('url')}" if form else
                        ("page does not show the street address" if ok is False else "page has no text")})
     missing = [i for i in ids if i not in seen and i in sites]

@@ -8,6 +8,7 @@
   aptf-intake promote-sites [--limit 100] [--retry-failed] [--dry-run]
   aptf-intake render [--site ID] [--retry-failed] [--dry-run]   # every site in the list by default
   aptf-intake render-restriction [--site ID] [--parking] [--dry-run]   # who may rent (or parking), re-read from rendered pages (no Apify)
+  aptf-intake find-plans [--place KEY] [--name NAME] [--limit N]   # own-site list: search + click agent (pilot)
   aptf-intake prometheus [--site ID] [--dry-run]   # Prometheus sites: one availability-JSON request each, free
   aptf-intake precheck [--site ID] [--dry-run]   # free: DNS + one plain GET per site; records dead / challenge
   aptf-intake extract <text source>|all [--workers 8] [--dry-run]   # Haiku reads each listing's whole entry
@@ -165,6 +166,14 @@ def main(argv: list[str] | None = None) -> None:
     rr.add_argument("--workers", type=int, default=4, help="parallel Claude calls")
     rr.add_argument("--dry-run", action="store_true")
     rr.add_argument("--parking", action="store_true", help="read the community's parking instead (extra.page_parking)")
+    fp = sub.add_parser("find-plans", help="buildings on Verify's own-site list: web search + a click agent find "
+                                           "the floor-plans page, Haiku reads it (pilot: report only, stores nothing)")
+    fp.add_argument("--place", action="append", default=[], help="place key (repeatable)")
+    fp.add_argument("--name", action="append", default=[], help="building name as listed (repeatable)")
+    fp.add_argument("--limit", type=int, help="the first N items of the own-site list")
+    fp.add_argument("--max-apify-usd", type=float, default=0.6)
+    fp.add_argument("--max-claude-usd", type=float, default=2.0)
+    fp.add_argument("--dry-run", action="store_true", help="print the targets and start URLs only")
     pm = sub.add_parser("prometheus", help="Prometheus own sites: units and prices from Prometheus's availability "
                                            "JSON, one direct request per site (no Apify, no page scraping)")
     pm.add_argument("--site", action="append", default=[], help="site id (repeatable); default every Prometheus site")
@@ -209,6 +218,21 @@ def main(argv: list[str] | None = None) -> None:
         except Blocker as e:
             raise SystemExit(f"BLOCKED: {e}")
         print(json.dumps(res, indent=1, default=str))
+        return
+
+    if args.cmd == "find-plans":
+        from .discover import Blocker
+        from .findplans import pilot, targets
+
+        ts = targets(conn, places=args.place, names=args.name, limit=args.limit)
+        if args.dry_run:
+            print(json.dumps([{**t, "own_hosts": sorted(t["own_hosts"])} for t in ts], indent=1))
+            return
+        try:
+            res = pilot(ts, max_apify_usd=args.max_apify_usd, max_claude_usd=args.max_claude_usd)
+        except Blocker as e:
+            raise SystemExit(f"BLOCKED: {e}")
+        print(json.dumps({k: res[k] for k in ("raw", "apify_usd", "claude_usd", "pages", "found")}, indent=1))
         return
 
     if args.cmd == "render-restriction":
