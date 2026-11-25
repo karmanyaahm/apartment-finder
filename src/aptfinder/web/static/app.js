@@ -637,6 +637,7 @@ async function openPipeline() {
   body.innerHTML = '<p class="muted">Loading…</p>';
   let d;
   try { d = await api("api/pipeline"); } catch (e) { body.innerHTML = `<p class="reason fail">Failed: ${esc(e.message)}</p>`; return; }
+  await loadStatus().catch(() => {});
   const stages = `<div class="scroll-x"><table class="stages">
     <tr><th>stage</th><th>state</th><th>where it stands</th><th>last run</th><th>cost</th><th>to run the rest</th></tr>
     ${d.stages.map((s) => `<tr><td><b>${esc(s.label)}</b></td><td>${stChip(s.state)}</td><td>${esc(s.summary)}</td>
@@ -678,7 +679,7 @@ async function openPipeline() {
     <h2>Pipeline status</h2>
     <p class="muted small">Computed now from the logs (${esc(d.now.slice(0, 16).replace("T", " "))} UTC). Active chunks: ${esc(d.active.join(", ") || "none")}; headline states count only those. Stale = older than ${d.stale_days} days.
       ${["done", "partial", "stale", "todo", "blocked"].map((s) => stChip(s)).join(" ")}</p>
-    ${stuck}${stages}
+    ${stuck}${statusBlock(S.status)}<h3>Stages</h3>${stages}
     <h3>Intake coverage (aggregators)</h3>${matrix}
     <details><summary>Runs per source</summary>${runs}</details>
     <h3>Websites of named buildings</h3>${webTable}
@@ -715,24 +716,37 @@ function pipelineBlock(ps) {
 }
 
 /* ---------------------------------------------------------------- status strip */
+// The header shows only the counts; each source's last run, spend, Google usage, errors and hand-check accuracy
+// live at the top of the Pipeline panel (statusBlock).
 async function loadStatus() {
   const s = await api("api/status");
-  const intake = s.runs.filter((r) => r.component === "intake");
+  S.status = s;
   const parts = [`<span>${s.counts.places} places · ${s.counts.active}/${s.counts.listings} listings active</span>`];
-  for (const r of intake) {
-    const c = r.counts || {};
-    parts.push(`<span class="${r.status === "error" ? "err" : ""}" title="${esc(JSON.stringify(c))}">${esc(r.source)}: ${esc((r.finished_at || r.started_at || "").slice(0, 16).replace("T", " "))} ${esc(r.status)}${c.observations != null ? ` · ${c.observations} seen` : ""}${c.new != null ? ` · ${c.new} new` : ""}${c.changed != null ? ` · ${c.changed} changed` : ""}</span>`);
-  }
-  parts.push(`<span>est. spend $${(+s.spend).toFixed(2)}</span>`);
-  if (s.google) parts.push(`<span title="${esc(JSON.stringify(s.google.by_mode))}">Google ${esc(s.google.month)}: ${s.google.calls}/${s.google.cap} calls · est. $${s.google.est_cost_usd.toFixed(2)}</span>`);
-  if (s.errors.length) parts.push(`<span class="err" title="${esc(s.errors.map((e) => `${e.component}/${e.source}: ${e.error}`).join("\n"))}">${s.errors.length} recent errors</span>`);
-  const accBySource = {};
-  for (const a of s.accuracy) (accBySource[a.source] ||= []).push(`${a.field} ${a.correct}/${a.n}`);
-  for (const [src, list] of Object.entries(accBySource)) parts.push(`<span title="hand-checked accuracy">✓ ${esc(src)}: ${esc(list.join(", "))}</span>`);
-  if (!s.accuracy.length) parts.push(`<span>no hand checks yet</span>`);
+  if (s.errors.length) parts.push(`<a href="#" class="err" id="status-errors">${s.errors.length} recent errors</a>`);
   $("#status-strip").innerHTML = parts.join("");
+  const el = $("#status-errors");
+  if (el) el.addEventListener("click", (e) => { e.preventDefault(); openPipeline(); });
   const pend = s.queues.conflict_pending ? ` + ${s.queues.conflict_pending} pending render` : "";
   $("#queue-count").textContent = `(${s.queues.conflict} conflicts${pend} · ${s.queues.own_site ?? 0} own site · ${s.queues.sample})`;
+}
+
+function statusBlock(s) {
+  if (!s) return "";
+  const intake = s.runs.filter((r) => r.component === "intake");
+  const rows = intake.map((r) => {
+    const c = r.counts || {};
+    return `<tr class="${r.status === "error" ? "err" : ""}"><td>${esc(r.source)}</td>
+      <td class="nowrap">${esc((r.finished_at || r.started_at || "").slice(0, 16).replace("T", " "))}</td><td>${esc(r.status)}</td>
+      <td>${c.observations ?? ""}</td><td>${c.new ?? ""}</td><td>${c.changed ?? ""}</td></tr>`;
+  }).join("");
+  const acc = s.accuracy.length ? s.accuracy.map((a) => `${esc(a.source)} ${esc(a.field)} ${a.correct}/${a.n}`).join(" · ")
+    : "no hand checks yet";
+  const errs = s.errors.length ? `<p class="small"><b class="err">Recent errors</b></p><ul class="small">${s.errors.map((e) =>
+    `<li><code>${esc(e.component)}/${esc(e.source || "")}</code> run ${e.id}, ${esc((e.started_at || "").slice(0, 16).replace("T", " "))}: ${esc(e.error || "")}</li>`).join("")}</ul>` : "";
+  const g = s.google ? `Google ${esc(s.google.month)}: ${s.google.calls}/${s.google.cap} calls · est. $${s.google.est_cost_usd.toFixed(2)}` : "";
+  return `<h3>Latest runs</h3><div class="scroll-x"><table>
+    <tr><th>source</th><th>last run</th><th>status</th><th>seen</th><th>new</th><th>changed</th></tr>${rows}</table></div>
+    <p class="small">Apify est. spend $${(+s.spend).toFixed(2)}${g ? " · " + g : ""} · hand checks: ${acc}</p>${errs}`;
 }
 
 /* ---------------------------------------------------------------- boot */
