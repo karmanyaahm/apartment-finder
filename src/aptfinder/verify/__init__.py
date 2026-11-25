@@ -50,6 +50,7 @@ def accuracy(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
             LEFT JOIN observations o ON o.id = c.observation_id
             LEFT JOIN trips t ON t.id = c.trip_id
             WHERE c.field != 'active'  -- the 'no longer for rent' mark is not a field reading (view withdrawals)
+              AND c.author NOT LIKE 'reconcile:%'  -- a machine's reading is no hand-checked vote (verify.reconcile)
               -- a value the user filled where the source stated none (drawer 'set ba') is no error of the source
               AND (c.trip_id IS NOT NULL OR json_type(COALESCE(c.stored_value, 'null')) != 'null')
         ) WHERE rn = 1 AND verdict != 'cannot_tell'
@@ -104,7 +105,8 @@ def sample_queue(conn: sqlite3.Connection, seed: int = 0, include_trips: bool = 
     checked = current_checks(conn)
     ever: dict[tuple[str, str], set[str]] = defaultdict(set)
     for r in conn.execute("SELECT DISTINCT o.source, o.source_id, c.field FROM checks c "
-                          "JOIN observations o ON o.id = c.observation_id WHERE c.field != 'active'"):
+                          "JOIN observations o ON o.id = c.observation_id WHERE c.field != 'active' "
+                          "AND c.author NOT LIKE 'reconcile:%'"):
         ever[(r["source"], r["source_id"])].add(r["field"])
     groups: dict[str, list[Any]] = defaultdict(list)
     for r in conn.execute("SELECT source, source_id, obs_id, place_key FROM listings WHERE kind IS NOT 'site_info' "

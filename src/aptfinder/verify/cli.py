@@ -2,6 +2,7 @@
 
   aptf-verify                                         # queue sizes, accuracy, agreement
   aptf-verify samples --source zumper --n 5 --seed 7  # random rows of one source to check by hand on its page
+  aptf-verify reconcile --limit 10 --max-usd 0.5 --dry-run  # Sonnet decides open conflicts (verify/reconcile.py)
 """
 
 from __future__ import annotations
@@ -25,9 +26,30 @@ def main(argv: list[str] | None = None) -> None:
     sp.add_argument("--n", type=int, default=5)
     sp.add_argument("--seed", type=int, default=0)
     sp.add_argument("--all", action="store_true", help="include inactive (retired) listings")
+    rp = sub.add_parser("reconcile", help="Sonnet decides open conflicts from stored text and current pages")
+    rp.add_argument("--goal", help="this goal's relevant conflicts first")
+    rp.add_argument("--limit", type=int, default=10)
+    rp.add_argument("--skip", type=int, default=0)
+    rp.add_argument("--max-usd", type=float, default=0.0, help="Apify cap for current pages (0: stored text only)")
+    rp.add_argument("--datacenter", action="store_true", help="fetch through the datacenter proxy, not residential")
+    rp.add_argument("--workers", type=int, default=4)
+    rp.add_argument("--model", default="sonnet")
+    rp.add_argument("--dry-run", action="store_true", help="decide and report, write no checks")
+    rp.add_argument("--out", help="append one JSON line per conflict to this file")
     args = ap.parse_args(argv)
     conn = connect(args.db)
     init_db(conn)
+    if args.cmd == "reconcile":
+        from pathlib import Path
+
+        from .reconcile import reconcile
+
+        stats = reconcile(conn, goal=args.goal, limit=args.limit, skip=args.skip, max_usd=args.max_usd,
+                          dry_run=args.dry_run, model=args.model, workers=args.workers,
+                          residential=not args.datacenter, out_path=Path(args.out) if args.out else None,
+                          log=lambda m: print(m, flush=True))
+        print(json.dumps(stats, indent=1, default=str))
+        return
     if args.cmd == "samples":
         print_samples(conn, args.source, args.n, args.seed, args.all)
         return
