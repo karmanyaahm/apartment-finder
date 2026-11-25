@@ -61,6 +61,7 @@ main { flex: 1; display: flex; min-height: 0; }
 .card [data-ff="needs_check"], .card [data-ff="needs_check"] b { color: color-mix(in srgb, var(--check) 75%, var(--ink)); }
 .card .facts [data-ff] { text-decoration: underline dotted; text-underline-offset: 2px; }
 .chip.ff-chip { background: transparent; border: 1px solid currentColor; }
+.chip.rx-chip { background: transparent; border: 1px dashed currentColor; }
 .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .chip { font-size: 11px; padding: 1px 7px; border-radius: 10px; background: var(--chip-bg); white-space: nowrap; }
 .chip.pass { background: var(--pass); color: #fff; } .chip.needs_check { background: var(--check); color: #111; }

@@ -19,7 +19,7 @@ from .. import pipeline, settings, verify
 from ..areas import in_walk_zone
 from ..areas import zones as area_zones
 from ..config import Goal, load_goals, load_point_sets, load_points
-from ..filter import (AMENITY_FLAGS, amenity_flags, best_trips, evaluate_all, evaluate_goal, goal_inputs, nearest_by_set,
+from ..filter import (AMENITY_FLAGS, amenity_flags, place_restriction, best_trips, evaluate_all, evaluate_goal, goal_inputs, nearest_by_set,
                       place_commute_terms)
 from ..filter import goals as goalstore
 from ..filter.rules import AGGS, EQUALS_FIELDS, KNOWN_FIELDS, NUMERIC_FIELDS, RULE_TYPES
@@ -390,7 +390,8 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 if r:
                     goals[gid] = goal_view(r, place_commute_terms(goal_defs[gid], trips, pk) if gid in goal_defs else None)
             title = next((x["title"] for x in rows if x.get("title")), None)
-            cover = gather_photos([{**x, "data": json.loads(x["data"])} for x in rows], limit=1, files=files)
+            parsed = [{**x, "data": json.loads(x["data"])} for x in rows]
+            cover = gather_photos(parsed, limit=1, files=files)
             a = anns.get(pk, {})
             out.append({
                 **p,
@@ -407,6 +408,8 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 # amenity flags (filter.amenity_flags over every listing's list here): true / false, null when nothing listed
                 "amenities": amenity_flags(sorted({a for x in rows if x.get("amenities")
                                                    for a in json.loads(x["amenities"])})),
+                # a limit on who may rent that any listing here states (income, senior, ...): the card's badge
+                "restriction": place_restriction(parsed),
                 "rating": (a.get("overall") or {}).get("rating"),
                 "user_status": (a.get("status") or {}).get("comment"),
             })
@@ -438,6 +441,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         place["label"] = place_label(place)
         by_place = cached("listings_by_place", lambda: _group_listings(conn))
         listings = by_place.get(place_key, [])
+        place["restriction"] = place_restriction([{**x, "data": json.loads(x["data"])} for x in listings])
         res = cached("evaluate_all", lambda: evaluate_all(conn))
         trips = cached("best_trips", lambda: best_trips(conn)).get(place_key, {})
         out_listings = []

@@ -3,7 +3,8 @@ tools), several calls in parallel.
 
   aptf-intake extract craigslist|zumper|...|all [--workers 8] [--limit N] [--max-usd 1] [--dry-run]
 
-Every source whose rows carry text (`TEXT_SOURCES`). The entry sent is the listing's title, name, description and
+Every source (`TEXT_SOURCES`); a row counts as having text when it has a name or title (a RentCafe building or an
+own-site plan with no description is still read for its restriction, below). The entry sent is the listing's title, name, description and
 amenity list as stored, plus, for sources that keep more in their raw item than the parser stores (Apartments.com's
 'about' text, fees, utilities and parking; Zumper's full description, pet policy and fees; Zillow's detail page by zpid),
 those raw fields, found by re-parsing the listing's raw file (`raw_path`). Unit-specific values (price, unit) are
@@ -13,7 +14,11 @@ left out, so a building's units send the same text and are read once. Answers ar
 - building and unit facts (gym, pool, laundry, parking, EV charging, air conditioning, dishwasher, cats, dogs,
   furnished, private bath, utilities included, minimum stay, lease term, application / admin / monthly fees), each
   with a short evidence quote that must appear verbatim in the text (a fee's number must also be in its quote),
-  else the fact is dropped. Unknown stays null; absence is never inferred.
+  else the fact is dropped. Unknown stays null; absence is never inferred;
+- who may rent (`restriction`): income | senior | veterans | student | employer | other, kept only with a verbatim
+  quote, or 'none' when the entry sets no such limit ('Section 8 welcome' is none). A claimed limit whose quote is
+  not in the text is dropped (unknown). A RentCafe building under rentcafe.com/housing/ read as 'none' stays unknown:
+  that section holds income-restricted and market-rate buildings alike (Alta Torre $880, 6tenEast $3,841).
 
 The result is a new observation of the same listing (append-only; run component `extract`): facts the source left
 empty are filled (address, name, furnished, private bath; website, minimum stay and utilities in `extra`), positive
@@ -45,17 +50,20 @@ from ..store import COMMIT_EVERY, append_observation, finish_run, start_run
 from ..store.models import ObservationData
 from .discover import SECRET_ENV, Blocker, clean_url
 
-TEXT_SOURCES = ("craigslist", "furnishedfinder", "airbnb", "apartments_com", "zillow", "zumper", "padmapper")
+TEXT_SOURCES = ("craigslist", "furnishedfinder", "airbnb", "apartments_com", "zillow", "zumper", "padmapper",
+                "rentcafe", "direct", "google_places", "portfolio")  # every source: a name alone can state a limit
 RAW_SOURCES = ("apartments_com", "zumper")  # raw item holds text the parser does not store
-VERSION = 2  # schema version: answers and 'read' marks of an older schema are read again
-# a listing has text to read: a description or an amenity list as stored (shared with the Pipeline panel)
+VERSION = 3  # schema version: answers and 'read' marks of an older schema are read again
+# a listing has text to read: a description, an amenity list, or a name or title as stored (shared with the Pipeline
+# panel); a name alone is read for who may rent ('The Laurel at Mountain View (55+)')
 HAS_TEXT_SQL = ("(length(trim(COALESCE(json_extract(data, '$.description'), ''))) >= 40 "
+                "OR length(trim(COALESCE(json_extract(data, '$.property_name'), json_extract(data, '$.title'), ''))) > 0 "
                 "OR json_array_length(COALESCE(json_extract(data, '$.amenities'), '[]')) > 0 "
                 "OR json_extract(data, '$.extra.required_monthly_fees') IS NOT NULL)")
 READ_SQL = f"COALESCE(json_extract(data, '$.extra.extracted.v'), 1) >= {VERSION}"
 UNREAD_SQL = f"(json_extract(data, '$.extra.extracted') IS NULL OR NOT {READ_SQL})"
 MAX_TEXT = 5000
-TEXT_EXTRAS = ("pets", "laundry", "housing_type", "required_monthly_fees")  # source extras sent as text
+TEXT_EXTRAS = ("pets", "laundry", "housing_type", "required_monthly_fees", "rent_special")  # source extras sent as text
 CACHE = "extract_cache.json"
 SYSTEM = ("You extract facts from rental listing text. Use only what the text states; never guess or infer from "
           "typical listings, and never infer that something is absent because it is not mentioned. Answer null for "
@@ -91,9 +99,22 @@ FACTS: dict[str, dict[str, Any]] = {
     "admin_fee": _fact({"type": "number"}, "administration fee in dollars"),
     "monthly_fees": _fact({"type": "number"}, "mandatory monthly fees beyond rent, in dollars, total"),
 }
+RESTRICTIONS = ("income", "senior", "veterans", "student", "employer", "other", "none")
+RESTRICTION = {
+    "type": "object", "required": ["value", "evidence"],
+    "description": "who may rent this home, if the entry limits it: income (income-restricted, affordable housing, BMR, "
+                   "below market rate, income limits apply, tax credit / LIHTC, Section 8 or voucher holders only, "
+                   "project-based vouchers / PBV), "
+                   "senior (55+, 62+, seniors only), veterans (veterans only, VASH), student (students only), employer "
+                   "(only employees of a company or institution), other (any other eligibility rule: disability, "
+                   "supportive or transitional housing, members only). none when the entry sets no such limit, the "
+                   "usual rental. Accepting Section 8 or vouchers ('Section 8 welcome', 'vouchers accepted') is none, "
+                   "not a limit; so is being near a campus or an employer. evidence: the exact words that state the "
+                   "limit, copied character for character; empty for none.",
+    "properties": {"value": {"type": "string", "enum": list(RESTRICTIONS)}, "evidence": {"type": "string"}}}
 _STR = {"type": ["string", "null"]}
 SCHEMA = {"type": "object", "required": ["results"], "properties": {"results": {"type": "array", "items": {
-    "type": "object", "required": ["key"],
+    "type": "object", "required": ["key", "restriction"],
     "properties": {
         "key": {"type": "string"},
         "address": {**_STR, "description": "street address of the rental as written, e.g. '231 Grant Ave, "
@@ -101,6 +122,7 @@ SCHEMA = {"type": "object", "required": ["results"], "properties": {"results": {
         "property_name": {**_STR, "description": "name of the apartment community or building, if named"},
         "website": {**_STR, "description": "a URL in the text for the property or its manager"},
         "facts": {"type": "object", "properties": FACTS},
+        "restriction": RESTRICTION,
     }}}}}
 MONEY = ("application_fee", "admin_fee", "monthly_fees")
 AMENITY = {"gym": "Gym / fitness center", "pool": "Pool", "in_unit_laundry": "In-unit laundry",
@@ -156,6 +178,13 @@ def check_answer(ans: dict[str, Any], text: str) -> dict[str, Any]:
              for k, f in (ans.get("facts") or {}).items() if k in FACTS and _fact_ok(k, f, t)}
     if facts:
         out["facts"] = facts
+    rx = ans.get("restriction")
+    if isinstance(rx, dict) and rx.get("value") == "none":
+        out["restriction"] = {"value": "none"}
+    elif isinstance(rx, dict) and rx.get("value") in RESTRICTIONS:  # a limit needs its quote ('55+' -> '55')
+        q = _norm(rx.get("evidence") or "")
+        if len(q) >= 2 and f" {q} " in f" {t} ":
+            out["restriction"] = {"value": rx["value"], "evidence": rx["evidence"]}
     return out
 
 
@@ -445,13 +474,19 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
                            workers, max_usd, on_answer)
         filled: dict[str, int] = {}
         facts_n: dict[str, int] = {}
+        restr: dict[str, int] = {}
         for t in todo:
             if t["hash"] not in cache:
                 continue  # budget ran out, or a blocker stopped the calls, before this one
             got_ = check_answer(cache[t["hash"]], t["text"])
             facts = got_.pop("facts", {})
+            rx = got_.pop("restriction", None)
             d = dict(t["data"])
             extra = dict(d.get("extra") or {})
+            if rx == {"value": "none"} and source == "rentcafe" and extra.get("vertical") == "housing":
+                rx = None  # rentcafe.com/housing/ mixes income-restricted and market-rate buildings: unknown
+            if rx:
+                restr[rx["value"]] = restr.get(rx["value"], 0) + 1
             flat = {**got_, **{k: facts[k]["value"] for k in ("furnished", "private_bath", "min_stay_days",
                                                               "utilities_included") if k in facts}}
             got, conflicts = [], {}
@@ -474,6 +509,7 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
                 d["amenities"] = list(d.get("amenities") or []) + add
                 got.append("amenities")
             extra["extracted"] = {"v": VERSION, "fields": got, "model": model, "run_id": run, "facts": facts,
+                                  **({"restriction": rx} if rx else {}),
                                   **({"conflicts": conflicts} if conflicts else {})}
             d["extra"] = extra
             r = t["row"]
@@ -493,6 +529,7 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
         raise
     err = res["error"]
     counts = {**plan, "calls": res["calls"], "observations": n_obs, "filled": filled, "facts": facts_n,
+              "restriction": restr,
               "not_asked": sum(1 for t in todo if t["hash"] not in cache)}
     finish_run(conn, run, "error" if err else "ok", counts, est_cost=round(res["spent"], 4),
                error=str(err)[:500] if err else None)

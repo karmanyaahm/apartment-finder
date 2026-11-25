@@ -9,6 +9,8 @@
 #   near          set, mode, max               nearest point of a set within max minutes
 #   amenity       name                         amenities list contains name (or user annotation)
 #   known         field                        field is present
+#   (restriction: who may rent, read by `aptf-intake extract`: none | income | senior | veterans | student |
+#    employer | other; a limit stated anywhere at the place holds for all its listings; unread = needs_check)
 # Missing input never rejects: the rule returns needs_check and names the field.
 
 [verify]
@@ -55,6 +57,13 @@ type = "max"
 field = "price_month"
 value = 4000
 
+# No income, senior, veterans, student or employer limit on who may rent. Off in the example: a listing not read
+# yet by `aptf-intake extract` is needs_check under it. Uncomment (or add it in the dashboard) once readings exist.
+# [[goals.temp.rules]]
+# type = "equals"
+# field = "restriction"
+# value = "none"
+
 [goals.lease]
 label = "Group lease"
 
@@ -74,6 +83,11 @@ type = "max"
 field = "price_per_bed"
 value = 2500
 strict = true
+
+# [[goals.lease.rules]]
+# type = "equals"
+# field = "restriction"
+# value = "none"
 
 [[goals.lease.nice]]
 type = "max"

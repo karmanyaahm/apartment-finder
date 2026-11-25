@@ -132,7 +132,7 @@ def test_parallel_reading_writes_amenities_facts_and_caches(conn, tmp_path, monk
     row = conn.execute("SELECT data FROM latest_obs WHERE source_id = 'cl3'").fetchone()
     d = json.loads(row["data"])
     assert d["amenities"] == ["Gym / fitness center (read from text)"]
-    assert d["extra"]["extracted"]["v"] == 2
+    assert d["extra"]["extracted"]["v"] == ex.VERSION
     assert d["extra"]["extracted"]["facts"]["cats_allowed"] == {"value": False, "evidence": "No cats"}
     assert len(json.loads((tmp_path / "extract_cache.json").read_text())) == 25
     # read now: nothing pending, and the goal rule sees the gym
@@ -192,7 +192,7 @@ def test_after_intake_hook_reads_text_sources_only(conn, tmp_path, monkeypatch):
     monkeypatch.setattr(ex, "after_steps", lambda *a, **k: "after intake: stub")
     _listings(conn, "zumper", [("plan:1", {"title": "The Laurel", "amenities": ["Fitness Center"]})])
     stub = lambda b, m, c: ([{"key": x["key"]} for x in b], 0.0)  # noqa: E731
-    assert ex.after_intake(conn, "google_places", 5, ask_fn=stub) is None
+    assert ex.after_intake(conn, "no_such_source", 5, ask_fn=stub) is None
     assert ex.after_intake(conn, "zumper", 5, skip=True, ask_fn=stub) is None
     assert ex.after_intake(conn, "zumper", 0, ask_fn=stub) is None
     assert ex.after_intake(conn, "zumper", 1, ask_fn=stub)["observations"] == 1
@@ -215,15 +215,15 @@ def _stub_steps(monkeypatch, ex):
 def test_after_intake_runs_free_steps_in_order(conn, capsys, monkeypatch):
     from aptfinder.intake import extract as ex
     calls = _stub_steps(monkeypatch, ex)
-    assert ex.after_intake(conn, "google_places", 5) is None  # not a text source: no reading, the steps still run
+    assert ex.after_intake(conn, "no_such_source", 5) is None  # not a text source: no reading, the steps still run
     assert calls == ["geocode", "identity", "estimates"]
     assert capsys.readouterr().out.strip() == ("after intake: geocoded 2 (cached 5), identity rebuilt (3 links), "
                                                "estimates for 1 new places")
     calls.clear()
-    ex.after_intake(conn, "google_places", 5, followup=False)
-    ex.after_intake(conn, "google_places", 0)  # nothing written
+    ex.after_intake(conn, "no_such_source", 5, followup=False)
+    ex.after_intake(conn, "no_such_source", 0)  # nothing written
     assert calls == []
-    ex.after_intake(conn, "google_places", 5, geocode=False)  # a reparse: no Google calls
+    ex.after_intake(conn, "no_such_source", 5, geocode=False)  # a reparse: no Google calls
     assert calls == ["identity", "estimates"]
 
 

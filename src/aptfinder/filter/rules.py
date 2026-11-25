@@ -123,7 +123,8 @@ def evaluate(rule: dict[str, Any], row: dict[str, Any], ctx: Ctx) -> tuple[str, 
         if isinstance(rule["value"], bool):
             v = bool(v)  # SQLite returns JSON booleans as 0/1
         ok = v == rule["value"]
-        return (PASS, label) if ok else (FAIL, f"{label}: is {v}")
+        ev = row.get(f"{f}_evidence")  # restriction: the quote that states the limit
+        return (PASS, label) if ok else (FAIL, f"{label}: is {v}" + (f", {ev}" if ev else ""))
 
     if t in ("max", "min"):
         f = rule["field"]
@@ -229,6 +230,8 @@ def fact(rule: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
         if t == "equals" and isinstance(rule["value"], bool) and v is not None:
             v = bool(v)  # SQLite returns JSON booleans as 0/1
         out = {"f": rule["field"], "v": v}
+        if row.get(f"{rule['field']}_evidence"):
+            out["ev"] = row[f"{rule['field']}_evidence"]
         if t == "min":  # a floor: the card says "< lim"
             return {**out, "lim": rule["value"], "min": True}
         return {**out, "lim": rule["value"]} if t == "max" else out
@@ -258,9 +261,12 @@ def combine(statuses: list[str]) -> str:
 NUMERIC_FIELDS = ["price", "price_month", "price_per_bed", "beds", "baths", "sqft"]
 EQUALS_FIELDS: dict[str, list[Any]] = {"term": ["short", "long"], "furnished": [True, False],
                                        "private_bath": [True, False],
-                                       "kind": ["apartment", "house", "townhome", "entire_place", "room"]}
+                                       "kind": ["apartment", "house", "townhome", "entire_place", "room"],
+                                       # who may rent (extract's reading, pooled per place); 'none' = no limit
+                                       "restriction": ["none", "income", "senior", "veterans", "student", "employer",
+                                                       "other"]}
 KNOWN_FIELDS = [*NUMERIC_FIELDS, "furnished", "private_bath", "term", "kind", "available_from", "address",
-                "property_name"]
+                "property_name", "restriction"]
 # type -> (label, required keys, optional keys): what the editor offers and validate_rule checks
 RULE_TYPES: dict[str, tuple[str, list[str], list[str]]] = {
     "max": ("field at most", ["field", "value"], ["strict"]),

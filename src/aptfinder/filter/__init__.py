@@ -82,15 +82,48 @@ def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> dic
     own = {r["place_key"] for r in listings if r["place_key"] and is_own_priced(r)}
     # amenities belong to the building: every listing at a place is judged on all its sources' amenity lists
     # (an own-site plan row has none; Apartments.com lists the building's "Fitness Center")
+    # so is a limit on who may rent ('restriction', read by `aptf-intake extract`): a limit any listing or site_info
+    # row states ('PBV - Belovida (VASH)') holds for every listing at the place; otherwise each listing's own reading
+    # ('none'), or None when it has not been read (unknown: an `equals restriction none` rule says needs_check)
     pooled: dict[str, set[str]] = {}
-    for pk, am in conn.execute("SELECT place_key, amenities FROM listings WHERE place_key IS NOT NULL "
-                               "AND amenities IS NOT NULL AND amenities != '[]'"):
-        pooled.setdefault(pk, set()).update(json.loads(am) if isinstance(am, str) else am)
+    rx_of: dict[tuple[str, str], dict[str, Any]] = {}
+    limits: dict[str, list[dict[str, Any]]] = {}
+    for r in conn.execute("SELECT source, source_id, place_key, amenities, "
+                          "json_extract(data, '$.extra.extracted.restriction') AS rx FROM listings"):
+        pk, am = r["place_key"], r["amenities"]
+        if pk and am and am != "[]":
+            pooled.setdefault(pk, set()).update(json.loads(am) if isinstance(am, str) else am)
+        if r["rx"]:
+            rx = {**json.loads(r["rx"]), "source": r["source"]}
+            rx_of[(r["source"], r["source_id"])] = rx
+            if pk and rx.get("value") not in (None, "none"):
+                limits.setdefault(pk, []).append(rx)
     for r in listings:
         if r["place_key"] in pooled:
             own_am = json.loads(r["amenities"]) if isinstance(r.get("amenities"), str) else (r.get("amenities") or [])
             r["amenities"] = sorted(pooled[r["place_key"]] | set(own_am))
+        mine = rx_of.get((r["source"], r["source_id"])) or {}
+        rx = mine if mine.get("value") not in (None, "none") else (limits.get(r["place_key"]) or [mine])[0]
+        r["restriction"] = rx.get("value")
+        r["restriction_evidence"] = restriction_note(rx)
     return {"listings": listings, "trips": trips, "anns": anns, "low": low, "own": own}
+
+
+def restriction_note(rx: dict[str, Any] | None) -> str | None:
+    """'"Income restricted" (zillow)': the quote that states a limit and its source, for reasons and hovers."""
+    if not rx or rx.get("value") in (None, "none"):
+        return None
+    return f'"{rx.get("evidence") or ""}" ({rx.get("source")})'
+
+
+def place_restriction(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The limit on who may rent that any of a place's listings states ({value, evidence, source}), else None.
+    `rows`: listings with `data` parsed."""
+    for x in rows:
+        rx = (((x.get("data") or {}).get("extra") or {}).get("extracted") or {}).get("restriction") or {}
+        if rx.get("value") not in (None, "none"):
+            return {**rx, "source": x["source"]}
+    return None
 
 
 def evaluate_goal(inp: dict[str, Any], goal: Goal) -> tuple[dict[tuple[str, str], Any], dict[str, Any]]:
@@ -186,4 +219,4 @@ def routing_candidates(conn: sqlite3.Connection, cfg: GoalsConfig | None = None,
     return out
 
 
-__all__ = ["evaluate_all", "evaluate_goal", "goal_inputs", "routing_candidates", "amenity_flags", "AMENITY_FLAGS", "best_trips", "nearest_by_set", "PASS", "FAIL", "CHECK"]
+__all__ = ["evaluate_all", "evaluate_goal", "goal_inputs", "place_restriction", "routing_candidates", "amenity_flags", "AMENITY_FLAGS", "best_trips", "nearest_by_set", "PASS", "FAIL", "CHECK"]

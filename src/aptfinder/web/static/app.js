@@ -662,6 +662,16 @@ function priceFacts(p, fails = []) {
   return `<span${am}><b>${money(p.min_price_month)}</b>/mo${amv}</span>`;
 }
 
+// A limit on who may rent that a listing here states (extract's reading, filter.place_restriction): a badge with the
+// quote on hover; red / amber when the selected goal's restriction rule fails on it (`fails`, like other facts)
+const RESTRICTION_LABEL = { income: "income-restricted", senior: "seniors only", veterans: "veterans only",
+  student: "students only", employer: "employees only", other: "restricted" };
+function restrictionBadge(rx, fails = []) {
+  if (!rx) return "";
+  const mk = markFor(fails, (x) => x.f === "restriction");
+  return `<span class="chip rx-chip"${mk || ` title="${esc(`"${rx.evidence || ""}" (${rx.source})`)}"`}>${esc(RESTRICTION_LABEL[rx.value] || rx.value)}</span>`;
+}
+
 function stars(n) { return n ? `<span class="stars" title="${n}/5">${"★".repeat(n)}${"☆".repeat(5 - n)}</span>` : ""; }
 
 function renderList() {
@@ -683,7 +693,8 @@ function renderList() {
     const facts = `${priceFacts(p, fails)}
         <span>${bb}</span>
         ${limitFacts(p, fails)}${netFact(p, fails)}`;
-    const extra = fails.filter((x) => !x.used).map(failChip).join("");
+    const rxb = restrictionBadge(p.restriction, fails);
+    const extra = rxb + fails.filter((x) => !x.used).map(failChip).join("");
     return `<div class="card ${st === "fail" ? "dim" : ""} ${S.selected === p.place_key ? "sel" : ""}" data-pk="${esc(p.place_key)}">
       <h4>${esc(p.label)} ${stars(p.rating)}</h4>
       <div class="facts">
@@ -869,7 +880,7 @@ async function openPlace(pk) {
     ${unitRows}</table></div>
     <p class="muted small">✓ checked correct · ✗ checked wrong · ✎ corrected value shown · · not hand-checked. <b>raw</b> opens a listing's parsed and source data.</p></details>`;
   $("#drawer-body").innerHTML = `
-    <h2>${esc(label)} ${stars(d.annotations.filter((a) => a.attribute === "overall" && a.rating).slice(-1)[0]?.rating)}</h2>
+    <h2>${esc(label)} ${restrictionBadge(p.restriction)} ${stars(d.annotations.filter((a) => a.attribute === "overall" && a.rating).slice(-1)[0]?.rating)}</h2>
     ${(d.websites || []).length ? `<div class="website">${d.websites.map((w) => `<a href="${esc(w.url)}" target="_blank" rel="noopener noreferrer">🌐 ${esc(w.site)} ↗</a>`).join(" ")}</div>` : '<div class="website muted small">no website found yet</div>'}
     <div class="muted small">${esc(p.address || "address unknown")} ${p.city ? "· " + esc(p.city) : ""} · ${esc(pk)}</div>
     <h3>Goals</h3>${goals}
