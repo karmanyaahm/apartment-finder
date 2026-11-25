@@ -191,3 +191,14 @@ def test_residential_hosts_go_through_the_proxy_smaller_variant_first(conn, monk
     assert seen == [media.smaller_variant(full)]  # the -full original was never fetched
     assert "http://user:s3cret@proxy.example:8000" in made
     assert conn.execute("SELECT url, status FROM media").fetchall()[0][:] == (full, 200)
+
+
+def test_blocked_host_drawing_shows_from_the_store_and_site_drawings_are_fetched():
+    from aptfinder.plans import plan_image
+
+    u = "https://images1.apartments.com/i2/x/plan.jpg"
+    ls = [{"source": "apartments_com", "data": {"extra": {"floorplan_image": u}}, "fields": {}}]
+    assert plan_image(ls, {}, skip=("images1.apartments.com",)) is None
+    assert plan_image(ls, {}, skip=("images1.apartments.com",), local={u: {"file": "f"}}) == u
+    data = {"extra": {"plan_drawings": {"Plan A": "https://site/a.svg", "Plan B": "https://site/b.png"}}}
+    assert media.listing_images(data) == [("https://site/a.svg", "plan"), ("https://site/b.png", "plan")]

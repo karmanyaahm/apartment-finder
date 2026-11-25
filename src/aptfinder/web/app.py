@@ -43,7 +43,7 @@ def _group_listings(conn) -> dict[str, list[dict[str, Any]]]:
     return out
 
 
-def group_plans(listings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def group_plans(listings: list[dict[str, Any]], files: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """Floor plans of a place: listings grouped by beds, baths and plan name across all sources. When the
     building's own site prices an offer, other sources' prices are only 'also listed' (own website wins)."""
     drawings = site_drawings([l for l in listings if l["fields"].get("kind") == "site_info"])  # own-site drawings
@@ -98,8 +98,8 @@ def group_plans(listings: list[dict[str, Any]]) -> list[dict[str, Any]]:
                             for src, pr in sorted(_by_source(ls).items())],
             # at a place whose own site prices offers, a plan only other sources list does not count for goals
             "not_on_own_site": own_site and not direct,
-            # one drawing: the community's own site first, then any source; hotlink-blocked hosts never
-            "image": plan_image(ls, drawings, skip=HOTLINK_BLOCKED),
+            # one drawing: the community's own site first, then any source; hotlink-blocked hosts only from our stored copy
+            "image": plan_image(ls, drawings, skip=HOTLINK_BLOCKED, local=files or {}),
             "listing_ids": [f"{l['source']}|{l['source_id']}" for l in ls],
             # only the community's own plan list, no price: the plan exists, no unit in it is known to be offered
             "plan_only": all(l["source"] == "direct" and not l["fields"].get("price") for l in ls),
@@ -468,7 +468,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             "pipeline": pstatus,
             "place": place,
             "goals": {gid: res["places"][gid].get(place_key) for gid in res["places"]},
-            "plans": local_plan_images(group_plans(out_listings), media_files()),
+            "plans": local_plan_images(group_plans(out_listings, media_files()), media_files()),
             "photos": gather_photos(out_listings, files=media_files()),
             "websites": websites(out_listings),
             "listings": out_listings,

@@ -64,6 +64,8 @@ def listing_images(data: dict[str, Any]) -> list[tuple[str, str]]:
     """(url, kind) of one observation's photos and floor-plan drawings, in source order."""
     extra = data.get("extra") or {}
     out = [(u, "plan") for k in ("floorplan_image", "plan_image") for u in _urls(extra.get(k))]
+    if isinstance(pd := extra.get("plan_drawings"), dict):  # own-site drawings by label
+        out += [(u, "plan") for u in _urls(list(pd.values()))]
     out += [(u, "photo") for u in _urls(data.get("media")) + _urls(extra.get("images"))]
     seen: set[str] = set()
     return [x for x in out if not (x[0] in seen or seen.add(x[0]))]

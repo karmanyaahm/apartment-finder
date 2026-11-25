@@ -74,12 +74,14 @@ def match_drawing(name: str | None, drawings: dict[str, str]) -> str | None:
     return hits.pop() if len(hits) == 1 else None
 
 
-def plan_image(ls: list[dict[str, Any]], drawings: dict[str, str], skip: tuple[str, ...] = ()) -> str | None:
+def plan_image(ls: list[dict[str, Any]], drawings: dict[str, str], skip: tuple[str, ...] = (),
+               local: Any = ()) -> str | None:
     """One drawing for a plan (its listings `ls`, as dicts with `source` and `data`): the own website's first
     (a row's `extra.floorplan_image`, else a drawing of the site's pages whose label names the plan), then any
-    other source's `extra.floorplan_image`. URLs on hosts in `skip` (they refuse hotlinking) are never shown."""
+    other source's `extra.floorplan_image`. URLs on hosts in `skip` (they refuse hotlinking) are shown only when
+    we hold our own copy (`local`: URLs in the photo store, aptfinder.media)."""
     def ok(u: Any) -> bool:
-        return isinstance(u, str) and u.startswith("http") and not any(h in u for h in skip)
+        return isinstance(u, str) and u.startswith("http") and (u in local or not any(h in u for h in skip))
 
     own = [l for l in ls if l["source"] == "direct"]
     for l in own:
