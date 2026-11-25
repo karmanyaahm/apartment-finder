@@ -14,7 +14,7 @@ from .. import identity, settings
 from ..config import Area, load_areas
 from ..store import COMMIT_EVERY, append_observation, finish_run, start_run
 from ..store.models import ObservationData
-from .apify import ActorRun, account_remaining_usd, run_actor
+from .apify import ActorRun, account_remaining_usd, run_actor, run_record
 
 API_PRICE_CACHE: dict[str, dict[str, float]] = {}
 
@@ -97,8 +97,8 @@ def money(text: Any) -> float | None:
 
 
 def event_cost(actor: str, events: dict[str, int] | None) -> float:
-    """Real spend from charged events x the actor's FREE-tier event prices (usageTotalUsd omits
-    pay-per-event charges)."""
+    """Estimated spend from charged events x the actor's FREE-tier event prices: kept as `runs.est_cost` for
+    comparison; the real charge is Apify's usageTotalUsd (`counts.apify_usd`, decision log 2026-11-25)."""
     if not events:
         return 0.0
     if actor not in API_PRICE_CACHE:
@@ -147,11 +147,14 @@ def _area_states(per_area: dict[str, int], cap_each: int, exhausted: bool, ok: b
 
 
 def spend_room(sources: dict[str, Any], run_left: float, apify: bool = True) -> tuple[float, str | None]:
-    """The budget guard, checked before every actor run: what may still be spent (the run's cap left, and the Apify
-    credit left minus `spend.reserve_usd`), and why nothing may (None while more than $0.02 is left)."""
+    """The budget guard of a multi-run loop, checked before each actor run: what may still be spent (the run's cap
+    left, and the Apify credit left minus `spend.reserve_usd`), and why nothing may (None while more than $0.02 is
+    left; an unknown credit stops it). `apify.run_actor` checks the credit again itself (`apify.guard`)."""
     remaining = run_left
     account = account_remaining_usd() if apify else None
     reserve = sources["spend"].get("reserve_usd", 0.0)
+    if apify and account is None:
+        return 0.0, "Apify did not report the credit left (GET /v2/users/me/limits)"
     if account is not None:
         remaining = min(remaining, account - reserve)
     if remaining > 0.02:
@@ -178,7 +181,7 @@ def run_source(conn: sqlite3.Connection, adapter: Adapter, areas: list[Area], *,
                                                      "max_items_per_area": cap_each})
     counts: dict[str, Any] = {"items": 0, "observations": 0, "new": 0, "changed": 0, "unparsed": 0, "areas": {}}
     warnings: list[str] = []
-    spent, console = 0.0, ""
+    spent, est, console = 0.0, 0.0, ""
     raw_dir = settings.RAW_DIR / adapter.name
     raw_dir.mkdir(parents=True, exist_ok=True)
     seen: set[str] = set()
@@ -202,7 +205,14 @@ def run_source(conn: sqlite3.Connection, adapter: Adapter, areas: list[Area], *,
                                 max_items=cap_each * len(group), max_charge_usd=remaining,
                                 memory_mb=cfg.get("memory_mb"))
             cost = (event_cost(cfg["actor"], run.charged_events) if cfg.get("actor") else 0.0) or (run.cost_usd or 0.0)
-            spent += cost
+            est += cost
+            if adapter.apify:  # Apify's real charge; the cap counts whichever of real and estimate is larger
+                real = run.usage_usd or 0.0
+                counts["apify_usd"] = round(counts.get("apify_usd", 0.0) + real, 4)
+                counts.setdefault("apify_runs", []).append(run_record(run))
+                spent += max(cost, real)
+            else:
+                spent += cost
             console = run.console_url
             raw_path = raw_dir / f"run{run_id}_{re.sub(r'[^A-Za-z0-9]+', '_', '-'.join(gids))[:60]}.json"
             raw_path.write_text(json.dumps({"actor": cfg.get("actor"), "areas": gids, "apify_run": run.run_id,
@@ -274,14 +284,14 @@ def run_source(conn: sqlite3.Connection, adapter: Adapter, areas: list[Area], *,
             warnings.append("actor returned no items for any area")
         counts["warnings"] = warnings
         status = "error" if nothing else "ok"
-        finish_run(conn, run_id, status, counts, est_cost=round(spent, 4),
+        finish_run(conn, run_id, status, counts, est_cost=round(est, 4),
                    error="; ".join(warnings) if status == "error" else None)
     except Exception as e:  # record the failure, then re-raise
-        finish_run(conn, run_id, "error", counts, est_cost=round(spent, 4), error=repr(e)[:500])
+        finish_run(conn, run_id, "error", counts, est_cost=round(est, 4), error=repr(e)[:500])
         raise
     if rebuild_identity:
         identity.run(conn)
-    return IntakeResult(run_id, status, counts, warnings, round(spent, 4), console)
+    return IntakeResult(run_id, status, counts, warnings, round(spent, 4), console)  # spent: max(real, est) per run
 
 
 # Runs made before areas existed (2026-11-24 morning) queried whole cities or one Airbnb box.

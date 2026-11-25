@@ -1267,7 +1267,7 @@ async function openPipeline() {
   let d;
   try { d = await api("api/pipeline"); } catch (e) { body.innerHTML = `<p class="reason fail">Failed: ${esc(e.message)}</p>`; return; }
   await loadStatus().catch(() => {});
-  const stages = `<div class="scroll-x"><table class="stages">
+  const stages = `<p class="small">${apifyCredit(d.apify)}</p><div class="scroll-x"><table class="stages">
     <tr><th>stage</th><th>state</th><th>where it stands</th><th>last run</th><th>cost</th><th>to run the rest</th></tr>
     ${d.stages.map((s) => `<tr><td><b>${esc(s.label)}</b></td><td>${stChip(s.state)}</td><td>${esc(s.summary)}</td>
       <td class="nowrap">${s.last_run !== undefined ? day(s.last_run) : ""}</td>
@@ -1289,7 +1289,7 @@ async function openPipeline() {
   const runs = `<div class="scroll-x"><table><tr><th>source</th><th>area kind</th><th>runs</th><th>last ok run</th><th>last status</th><th>cost</th></tr>
     ${d.intake.runs.map((r) => `<tr><td>${esc(r.source)}</td><td>${esc(r.area_kind)}</td><td>${r.runs}</td><td>${day(r.last_run)}</td>
       <td>${r.last_status ? `<span class="${r.last_status === "error" ? "reason fail" : ""}" title="${esc(r.last_error || "")}">${esc(r.last_status)}</span>` : ""}</td>
-      <td>$${(+r.cost).toFixed(2)}</td></tr>`).join("")}</table></div>`;
+      <td>$${(+r.cost).toFixed(2)}${r.apify_usd != null ? ` <span class="muted small" title="Apify's usageTotalUsd as read when each run ended (runs since 2026-11-25)">real $${(+r.apify_usd).toFixed(2)}</span>` : ""}</td></tr>`).join("")}</table></div>`;
   const web = d.stages.find((s) => s.id === "websites");
   const models = Object.entries(web.no_site_models).map(([m, n]) => `${m}: ${n}`).join(", ");
   const webTable = `<div class="scroll-x"><table><tr><th>website state</th><th>in walk zones</th><th>all</th></tr>
@@ -1669,7 +1669,14 @@ function statusBlock(s) {
   const g = s.google ? `Google ${esc(s.google.month)}: ${s.google.calls}/${s.google.cap} calls · est. $${s.google.est_cost_usd.toFixed(2)}` : "";
   return `<h3>Latest runs</h3><div class="scroll-x"><table>
     <tr><th>source</th><th>last run</th><th>status</th><th>seen</th><th>new</th><th>changed</th></tr>${rows}</table></div>
-    <p class="small">Apify est. spend $${(+s.spend).toFixed(2)}${g ? " · " + g : ""} · hand checks: ${acc}</p>${errs}`;
+    <p class="small">${apifyCredit(s.apify)} · recorded Apify charges $${(+s.apify_real).toFixed(2)} (runs since 2026-11-25; older runs carry only estimates) · est. spend, all runs $${(+s.spend).toFixed(2)}${g ? " · " + g : ""} · hand checks: ${acc}</p>${errs}`;
+}
+
+// "Apify credit: $X left (reserve $Y)", from the live API (cached 60 s by the server)
+function apifyCredit(a) {
+  if (!a || a.error || a.left == null) return `<span class="reason fail">Apify credit: unknown${a && a.error ? ` (${esc(a.error)})` : ""}</span>`;
+  const low = a.left - a.reserve < 0.02;
+  return `<span class="${low ? "reason fail" : ""}" title="monthly limit $${(+a.limit).toFixed(2)}, used $${(+a.used).toFixed(2)}; every Apify run is refused below the reserve">Apify credit: $${(+a.left).toFixed(2)} left (reserve $${(+a.reserve).toFixed(2)})</span>`;
 }
 
 /* ---------------------------------------------------------------- boot */

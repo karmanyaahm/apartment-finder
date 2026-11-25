@@ -163,6 +163,9 @@ def fetch(cfg: dict[str, Any], areas: list, cap_each: int, max_usd: float, conn)
         else:
             run.items += part.items
             run.cost_usd = round((run.cost_usd or 0.0) + (part.cost_usd or 0.0), 4)
+            run.usage_usd = round((run.usage_usd or 0.0) + (part.usage_usd or 0.0), 4)
+            run.usage = {k: round((run.usage or {}).get(k, 0.0) + (part.usage or {}).get(k, 0.0), 4)
+                         for k in {*(run.usage or {}), *(part.usage or {})}}
             run.run_id = f"{run.run_id},{part.run_id}"
             if part.status != "SUCCEEDED":
                 run.status = part.status

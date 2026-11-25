@@ -293,3 +293,56 @@ def test_airbnb_search_ended_needs_a_short_last_page():
     assert not search_ended("Search: found 18 listings", 128, 270)  # stopped on a full page: capped
     assert not search_ended("", 10, 270)  # no log: unknown, never complete
     assert not search_ended("Search: found 3 listings", 270, 270)  # item cap reached
+
+
+def test_real_apify_charge_is_recorded_next_to_the_estimate(conn, fake, monkeypatch):
+    calls, plan = fake
+    plan["items"] = lambda inp: [{"id": f"{inp['areas'][0]}-0"}]
+    real = iter([0.05, 0.07, 0.0])
+    monkeypatch.setattr(base, "run_actor", lambda *a, **k: (calls.append(k) or ActorRun(
+        "a/b", f"r{len(calls)}", "SUCCEEDED", plan["items"](a[1]), 0.0, {"x": 1}, "u", usage_usd=next(real),
+        usage={"PROXY_RESIDENTIAL_TRANSFER_GBYTES": 0.04})))
+    adapter = per_area_adapter()
+    register(monkeypatch, adapter)
+    res = run_source(conn, adapter, ZIPS)
+    row = conn.execute("SELECT est_cost, counts FROM runs WHERE id = ?", (res.run_id,)).fetchone()
+    import json
+
+    counts = json.loads(row["counts"])
+    assert row["est_cost"] == pytest.approx(0.003)  # 3 events x the fake $0.001: the estimate stays in est_cost
+    assert counts["apify_usd"] == pytest.approx(0.12)
+    assert [r["usd"] for r in counts["apify_runs"]] == [0.05, 0.07, 0.0]
+    assert res.cost_usd == pytest.approx(0.05 + 0.07 + 0.001)  # the run cap counts max(real, estimate) per run
+
+
+def test_unknown_apify_credit_stops_the_run(conn, fake, monkeypatch):
+    calls, plan = fake
+    plan["items"] = lambda inp: [{"id": "x"}]
+    monkeypatch.setattr(base, "account_remaining_usd", lambda: None)
+    adapter = per_area_adapter()
+    register(monkeypatch, adapter)
+    res = run_source(conn, adapter, ZIPS[:1])
+    assert calls == [] and "did not report the credit" in res.warnings[0]
+
+
+def test_guard_cuts_the_cap_to_credit_minus_reserve_and_refuses_below(monkeypatch):
+    from aptfinder.intake import apify
+
+    monkeypatch.setattr(apify, "credit", lambda: {"limit": 22.0, "used": 19.2, "left": 2.8, "reserve": 2.0})
+    assert apify.guard(5.0) == pytest.approx(0.8)
+    assert apify.guard(0.3) == pytest.approx(0.3)
+    monkeypatch.setattr(apify, "credit", lambda: {"limit": 22.0, "used": 20.0, "left": 2.01, "reserve": 2.0})
+    with pytest.raises(apify.SpendRefused, match="minus reserve"):
+        apify.guard(1.0)
+    monkeypatch.setattr(apify, "credit", lambda: {"limit": None, "used": None, "left": None, "reserve": 2.0})
+    with pytest.raises(apify.SpendRefused, match="did not report"):
+        apify.guard(1.0)
+
+
+def test_run_actor_never_starts_when_the_guard_refuses(monkeypatch):
+    from aptfinder.intake import apify
+
+    monkeypatch.setattr(apify, "credit", lambda: {"limit": 22.0, "used": 21.0, "left": 1.0, "reserve": 2.0})
+    monkeypatch.setattr(apify, "_client", lambda: pytest.fail("a refused run must not reach Apify"))
+    with pytest.raises(apify.SpendRefused):
+        apify.run_actor("a/b", {}, max_items=1, max_charge_usd=0.5)

@@ -405,7 +405,18 @@ def fetch(conn: sqlite3.Connection, *, retry_failed: bool = False, limit: int | 
     meter: dict[str, Any] = {"bytes": 0, "cap": float(load_media().get("residential_max_mb", 300)) * 1e6,
                              "lock": threading.Lock()}
     proxied, secret = None, None
+    refused = None
     if any(host(j["url"]) in res_hosts for j in todo):
+        from .intake.apify import SpendRefused, guard
+
+        try:  # the Apify credit guard: proxy traffic is Apify money; the byte cap is cut to credit - reserve
+            room = guard(meter["cap"] / 1e9 * PROXY_USD_PER_GB)
+            meter["cap"] = room / PROXY_USD_PER_GB * 1e9
+        except SpendRefused as e:
+            refused = str(e)
+            log(f"media: residential proxy not used: {e}; skipping {sorted(res_hosts)}")
+            todo = [j for j in todo if host(j["url"]) not in res_hosts]
+    if not refused and any(host(j["url"]) in res_hosts for j in todo):
         proxy_url, secret = residential_proxy()
         proxied = httpx.Client(headers=hdrs, timeout=60, follow_redirects=True, proxy=proxy_url)
         log(f"media: {sum(host(j['url']) in res_hosts for j in todo)} URLs on {sorted(res_hosts)} go through "
@@ -477,8 +488,8 @@ def fetch(conn: sqlite3.Connection, *, retry_failed: bool = False, limit: int | 
         log(f"media: residential proxy {meter['bytes'] / 1e6:.1f} MB, about "
             f"${meter['bytes'] / 1e9 * PROXY_USD_PER_GB:.2f}" + (" (cap reached)" if meter["bytes"] >= meter["cap"] else ""))
     counts = {**n, "full": full, "disk_bytes": disk, "hosts": {k: dict(v) for k, v in per_host.items()},
-              "given_up": sorted(given_up)}
-    finish_run(conn, run, "ok", counts, est_cost=0.0)
+              "given_up": sorted(given_up), **({"proxy_refused": refused} if refused else {})}
+    finish_run(conn, run, "ok", counts, est_cost=round(meter["bytes"] / 1e9 * PROXY_USD_PER_GB, 4))
     log(f"media: done {dict(n)}; store {disk / 1e9:.2f} GB" + (f"; media store full ({cap / 1e9:.1f} GB)" if full else ""))
     return counts
 

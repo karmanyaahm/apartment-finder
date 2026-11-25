@@ -68,7 +68,8 @@ def _runs(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
     out: dict[tuple[str, str], dict[str, Any]] = {}
     for r in conn.execute(
             "SELECT component, COALESCE(source, '') AS source, COUNT(*) AS n, ROUND(COALESCE(SUM(est_cost), 0), 4) "
-            "AS cost, MAX(CASE WHEN status = 'ok' THEN id END) AS last_ok, "
+            "AS cost, ROUND(SUM(json_extract(counts, '$.apify_usd')), 4) AS apify_usd, "
+            "MAX(CASE WHEN status = 'ok' THEN id END) AS last_ok, "
             "MAX(CASE WHEN status = 'ok' THEN started_at END) AS last_ok_at, MAX(id) AS last_id "
             "FROM runs GROUP BY component, COALESCE(source, '')"):
         out[(r["component"], r["source"])] = dict(r)
@@ -83,7 +84,7 @@ def _run_info(runs: dict, component: str, source: str = "") -> dict[str, Any]:
     if not r:
         return {"last_run": None, "runs": 0, "cost": 0.0}
     return {"last_run": r["last_ok_at"], "last_run_id": r["last_ok"], "runs": r["n"], "cost": r["cost"],
-            "last_status": r["last_status"], "last_error": r["last_error"]}
+            "apify_usd": r["apify_usd"], "last_status": r["last_status"], "last_error": r["last_error"]}
 
 
 def website_status(conn: sqlite3.Connection, place_key: str | None = None) -> dict[str, dict[str, Any]]:

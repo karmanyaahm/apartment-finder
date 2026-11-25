@@ -79,8 +79,12 @@ def fetch(cfg: dict[str, Any], areas: list, cap_each: int, max_usd: float, conn=
         if left <= 0.02:
             state["status"], state["complete"] = f"BUDGET_REACHED: ${left:.2f} left of ${max_usd:.2f}", False
             return
-        run = apify.run_actor(cfg["actor"], search_input(cfg, bbox), max_items=cap_each, max_charge_usd=left,
-                              memory_mb=cfg.get("memory_mb"), with_log=True)
+        try:
+            run = apify.run_actor(cfg["actor"], search_input(cfg, bbox), max_items=cap_each, max_charge_usd=left,
+                                  memory_mb=cfg.get("memory_mb"), with_log=True)
+        except apify.SpendRefused as e:  # the credit guard: keep what the earlier searches found
+            state["status"], state["complete"] = f"BUDGET_REACHED: {e}", False
+            return
         runs.append(run)
         state["spent"] += event_cost(cfg["actor"], run.charged_events) or (run.cost_usd or 0.0)
         for k, v in (run.charged_events or {}).items():
@@ -99,7 +103,8 @@ def fetch(cfg: dict[str, Any], areas: list, cap_each: int, max_usd: float, conn=
     search(areas[0].bbox, 0)
     return ActorRun(actor=cfg["actor"], run_id=",".join(r.run_id for r in runs), status=state["status"],
                     items=list(items.values()), cost_usd=round(state["spent"], 4), charged_events=events,
-                    console_url=runs[0].console_url if runs else "", complete=state["complete"])
+                    console_url=runs[0].console_url if runs else "", complete=state["complete"],
+                    usage_usd=round(sum(r.usage_usd or 0.0 for r in runs), 4))
 
 
 def _num(pattern: str, text: str) -> float | None:

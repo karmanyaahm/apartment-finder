@@ -95,7 +95,7 @@ def test_a_failed_page_makes_only_its_city_partial(monkeypatch, tmp_path):
     from aptfinder.store import connect, init_db
 
     assert portfolio.failed_cities(_pages()) == ["Stanford"]
-    monkeypatch.setattr(base, "account_remaining_usd", lambda: None)
+    monkeypatch.setattr(base, "account_remaining_usd", lambda: 5.0)
     monkeypatch.setattr(base.settings, "RAW_DIR", tmp_path / "raw")
     fake = lambda *a, **kw: ActorRun(actor="x", run_id="r", status="SUCCEEDED", items=_pages(),  # noqa: E731
                                      cost_usd=0.01, charged_events=None, console_url="")

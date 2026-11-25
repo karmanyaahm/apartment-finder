@@ -1,7 +1,9 @@
 """Minimal Apify REST client: start an actor run with hard caps, wait, fetch items and the real cost.
 
-Spend is capped by Apify itself (maxTotalChargeUsd for pay-per-event actors, maxItems otherwise), so a
-misbehaving actor cannot overspend even if our own accounting is wrong.
+Every actor run passes the credit guard first (`guard`: the account's real credit left, from /users/me/limits,
+minus `spend.reserve_usd`), and its charge cap is cut to what the guard allows. Apify enforces
+`maxTotalChargeUsd` only for pay-per-event actors, so `run_actor` also aborts a run whose `usageTotalUsd`
+reaches the cap while it polls (platform-billed actors such as apify/playwright-scraper).
 """
 
 from __future__ import annotations
@@ -29,6 +31,9 @@ class ActorRun:
     console_url: str
     truncated: bool = False  # the source said there was more than it returned: every area of the run is partial
     truncated_areas: list[str] | None = None  # ... or only these areas (Places: a box whose query hit 60 results)
+    usage_usd: float | None = None  # Apify's real charge (usageTotalUsd) as read when the run ended; summed by
+    # composite fetches. Residential proxy traffic is billed later, so this can still be short (decision log)
+    usage: dict[str, float] | None = None  # usageUsd breakdown (non-zero items), when Apify gives one
     log: str | None = None  # the run's log, when asked for (`with_log`): why requests failed
     # set by a fetch that judges its own completeness (Airbnb's split box search): True when the search ended on its
     # own everywhere, replacing the item-cap test (a split search returns more items than one search's cap)
@@ -74,6 +79,41 @@ def _get_json(c, path: str, tries: int = 6, **kw) -> Any:
     raise RuntimeError(f"Apify API kept failing for {path}")
 
 
+class SpendRefused(RuntimeError):
+    """The credit guard refused an Apify run (credit left minus reserve is too small, or unknown)."""
+
+
+def credit() -> dict[str, float | None]:
+    """The account's real Apify credit now: the monthly limit, the usage this cycle, what is left, and our
+    `spend.reserve_usd`. `left` is None when the API does not say."""
+    from .base import load_sources
+
+    reserve = float(load_sources().get("spend", {}).get("reserve_usd", 0.0))
+    with _client() as c:
+        d = _get_json(c, "/users/me/limits").get("data", {})
+    limit = (d.get("limits") or {}).get("maxMonthlyUsageUsd")
+    used = (d.get("current") or {}).get("monthlyUsageUsd")
+    left = None if limit is None or used is None else round(limit - used, 4)
+    return {"limit": limit, "used": None if used is None else round(used, 4), "left": left, "reserve": reserve}
+
+
+def guard(max_charge_usd: float) -> float:
+    """The charge cap a run may have: `max_charge_usd`, cut to (credit left - reserve). Raises SpendRefused when
+    that is under $0.02 or the credit is unknown, so (credit left - cap) >= reserve for every run started."""
+    cr = credit()
+    if cr["left"] is None:
+        raise SpendRefused("Apify did not report the credit left (GET /v2/users/me/limits); no run started")
+    room = cr["left"] - cr["reserve"]
+    if room < 0.02:
+        raise SpendRefused(f"Apify credit left ${cr['left']:.2f} minus reserve ${cr['reserve']:.2f} leaves "
+                           f"${room:.2f}; no run started")
+    return round(min(max_charge_usd, room), 4)
+
+
+def _usage(run: dict[str, Any]) -> dict[str, float]:
+    return {k: round(v, 4) for k, v in (run.get("usageUsd") or {}).items() if v and round(v, 4)}
+
+
 def run_actor(actor: str, run_input: dict[str, Any], *, max_items: int, max_charge_usd: float,
               timeout_s: int = 900, poll_s: int = 10, memory_mb: int | None = None, clean: bool = True,
               with_log: bool = False) -> ActorRun:
@@ -81,6 +121,7 @@ def run_actor(actor: str, run_input: dict[str, Any], *, max_items: int, max_char
     request as an item with only `#error` and `#debug` (url, statusCode, errorMessages), which `clean` drops.
     `with_log` also fetches the run's log."""
     actor_path = actor.replace("/", "~")
+    max_charge_usd = guard(max_charge_usd)
     with _client() as c:
         params: dict[str, Any] = {"maxItems": max_items, "maxTotalChargeUsd": max_charge_usd}
         if memory_mb:
@@ -95,6 +136,8 @@ def run_actor(actor: str, run_input: dict[str, Any], *, max_items: int, max_char
         while run["status"] in ("READY", "RUNNING") and time.time() < deadline:
             time.sleep(poll_s)
             run = _get_json(c, f"/actor-runs/{run['id']}")["data"]
+            if (run.get("usageTotalUsd") or 0) >= max_charge_usd and run["status"] in ("READY", "RUNNING"):
+                break  # over its cap: Apify does not stop a platform-billed actor itself
         if run["status"] in ("READY", "RUNNING"):
             c.post(f"/actor-runs/{run['id']}/abort")
             run = _get_json(c, f"/actor-runs/{run['id']}")["data"]
@@ -105,16 +148,18 @@ def run_actor(actor: str, run_input: dict[str, Any], *, max_items: int, max_char
         actor=actor, run_id=run["id"], status=run["status"], items=items,
         cost_usd=run.get("usageTotalUsd"), charged_events=run.get("chargedEventCounts"),
         console_url=f"https://console.apify.com/actors/runs/{run['id']}", log=log,
+        usage_usd=run.get("usageTotalUsd"), usage=_usage(run),
     )
 
 
 def account_remaining_usd() -> float | None:
     """Monthly Apify credit left (limit minus usage this cycle); None if the API doesn't say."""
-    with _client() as c:
-        d = c.get("/users/me/limits").json().get("data", {})
-    limit = (d.get("limits") or {}).get("maxMonthlyUsageUsd")
-    used = (d.get("current") or {}).get("monthlyUsageUsd")
-    return None if limit is None or used is None else round(limit - used, 4)
+    return credit()["left"]
+
+
+def run_record(run: ActorRun) -> dict[str, Any]:
+    """One Apify run as stored in a run's counts (`apify_runs`): id, status, real charge, its breakdown."""
+    return {"run": run.run_id, "status": run.status, "usd": run.usage_usd, **({"usage": run.usage} if run.usage else {})}
 
 
 def run_log(run_id: str) -> str:

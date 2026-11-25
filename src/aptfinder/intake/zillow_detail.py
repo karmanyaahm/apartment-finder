@@ -133,7 +133,7 @@ def fetch(conn: sqlite3.Connection, *, max_usd: float, batch: int = BATCH, limit
     """Fetch the detail page of every active Zillow listing without one yet (`refetch`: all of them), `batch` zpids
     per actor run, under the budget guard before each run. One `runs` row (component intake, source zillow_detail,
     scope targeted)."""
-    from .apify import run_actor
+    from .apify import run_actor, run_record
     from .base import event_cost
 
     zpids = active_zpids(conn)
@@ -149,9 +149,10 @@ def fetch(conn: sqlite3.Connection, *, max_usd: float, batch: int = BATCH, limit
                                                  "batch": batch, "max_usd": max_usd})
     raw_dir = settings.RAW_DIR / SOURCE
     raw_dir.mkdir(parents=True, exist_ok=True)
-    counts: dict[str, Any] = {**plan, "fetched": 0, "failed": 0, "events": {}, "apify_runs": [], "home_status": {}}
+    counts: dict[str, Any] = {**plan, "fetched": 0, "failed": 0, "events": {}, "apify_runs": [], "home_status": {},
+                              "apify_usd": 0.0}
     warnings: list[str] = []
-    spent = 0.0
+    spent, est = 0.0, 0.0
     try:
         for k in range(0, len(todo), batch):
             chunk = todo[k:k + batch]
@@ -161,15 +162,17 @@ def fetch(conn: sqlite3.Connection, *, max_usd: float, batch: int = BATCH, limit
                 break
             run = run_actor(actor, {"zpids": chunk}, max_items=len(chunk), max_charge_usd=room, timeout_s=TIMEOUT_S)
             cost = event_cost(actor, run.charged_events) or (run.cost_usd or 0.0)
-            spent += cost
+            est += cost
+            spent += max(cost, run.usage_usd or 0.0)  # the cap counts the larger of real and estimate
+            counts["apify_usd"] = round(counts["apify_usd"] + (run.usage_usd or 0.0), 4)
             path = raw_dir / f"run{run_id}_{k // batch + 1:02d}.json"
             path.write_text(json.dumps({"actor": actor, "zpids": chunk, "apify_run": run.run_id, "status": run.status,
                                         "cost_usd": cost, "items": run.items}))
             got = {zpid_of(i): i for i in run.items if isinstance(i, dict) and zpid_of(i)}
             counts["fetched"] += sum(1 for z in chunk if z in got)
             counts["failed"] += sum(1 for z in chunk if z not in got)
-            counts["apify_runs"].append({"run": run.run_id, "status": run.status, "zpids": len(chunk),
-                                         "items": len(run.items), "cost_usd": cost})
+            counts["apify_runs"].append({**run_record(run), "zpids": len(chunk), "items": len(run.items),
+                                         "cost_usd": cost})
             for ev, n in (run.charged_events or {}).items():
                 counts["events"][ev] = counts["events"].get(ev, 0) + n
             for z, it in got.items():
@@ -187,10 +190,10 @@ def fetch(conn: sqlite3.Connection, *, max_usd: float, batch: int = BATCH, limit
         counts["not_for_rent"] = len(stale)
         counts["warnings"] = warnings
         status = "error" if counts["fetched"] == 0 else "ok"
-        finish_run(conn, run_id, status, counts, est_cost=round(spent, 4),
+        finish_run(conn, run_id, status, counts, est_cost=round(est, 4),
                    error=("; ".join(warnings) or "no page fetched") if status == "error" else None)
     except Exception as e:
-        finish_run(conn, run_id, "error", counts, est_cost=round(spent, 4), error=repr(e)[:500])
+        finish_run(conn, run_id, "error", counts, est_cost=round(est, 4), error=repr(e)[:500])
         raise
     return {"run_id": run_id, "status": status, "cost_usd": round(spent, 4),
             **{k: v for k, v in counts.items() if k != "home_status"}, "stale": stale}

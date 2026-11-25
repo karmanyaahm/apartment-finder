@@ -534,6 +534,21 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 (place_key.split("~", 1)[0], place_key.split("~", 1)[0] + "~%", place_key))],
         }
 
+    credit_memo: dict[str, Any] = {}
+
+    def apify_credit() -> dict[str, Any]:
+        """The live Apify credit (intake.apify.credit), reused for 60 s; {"error": ...} when it cannot be read."""
+        from ..intake import apify
+
+        if credit_memo and time.monotonic() - credit_memo["t"] < 60:
+            return credit_memo["v"]
+        try:
+            v = apify.credit()
+        except (Exception, SystemExit) as e:  # a missing token raises SystemExit: never kill the request
+            v = {"error": str(e)[:200]}
+        credit_memo.update(t=time.monotonic(), v=v)
+        return v
+
     @app.get("/api/status")
     def status() -> dict[str, Any]:
         runs = q("""SELECT r.* FROM runs r JOIN (SELECT component, source, MAX(id) AS id FROM runs
@@ -541,6 +556,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         for r in runs:
             r["counts"] = json.loads(r["counts"]) if r["counts"] else {}
         spend = q("SELECT COALESCE(SUM(est_cost), 0) AS total FROM runs")[0]["total"]
+        apify_real = q("SELECT COALESCE(SUM(json_extract(counts, '$.apify_usd')), 0) AS t FROM runs")[0]["t"]
         errors = q("SELECT id, started_at, component, source, error FROM runs WHERE status = 'error' "
                    "ORDER BY id DESC LIMIT 5")
         with lock:
@@ -556,7 +572,8 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         with lock:
             google = google_usage(conn)
         return {
-            "runs": runs, "spend": spend, "errors": errors, "google": google,
+            "runs": runs, "spend": spend, "apify_real": apify_real, "apify": apify_credit(), "errors": errors,
+            "google": google,
             "accuracy": [{"source": s, "field": f, **a} for (s, f), a in sorted(acc.items())],
             "agreement": agree, "queues": {"conflict": len(conflicts) - n_pending, "conflict_pending": n_pending,
                                            "sample": n_sample,
@@ -570,7 +587,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
     def pipeline_overview() -> dict[str, Any]:
         """Each pipeline stage's state from the logs: done / partial / todo / stale / blocked, and the commands
         that would run the rest (aptfinder.pipeline)."""
-        return cached("pipeline", lambda: pipeline.overview(conn))
+        return {**cached("pipeline", lambda: pipeline.overview(conn)), "apify": apify_credit()}
 
     @app.get("/api/areas")
     def areas_map() -> dict[str, Any]:

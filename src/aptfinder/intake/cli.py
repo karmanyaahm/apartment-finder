@@ -68,6 +68,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--db", default=str(settings.DB_PATH))
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("coverage", help="done / left per source and area")
+    sub.add_parser("credit", help="the Apify credit guard's numbers now (live, no actor run): credit left, reserve, "
+                                  "room for the next run")
     r = sub.add_parser("run")
     r.add_argument("source", choices=sorted(ADAPTERS))
     r.add_argument("--area", action="append", default=[],
@@ -150,6 +152,13 @@ def main(argv: list[str] | None = None) -> None:
     init_db(conn)
     if args.cmd == "coverage":
         print_coverage(conn)
+        return
+    if args.cmd == "credit":
+        from .apify import credit
+
+        c = credit()
+        room = None if c["left"] is None else round(c["left"] - c["reserve"], 4)
+        print(json.dumps({**c, "room": room, "guard": "refuses" if room is None or room < 0.02 else "allows"}))
         return
     if args.cmd == "reparse":
         res = reparse(conn, ADAPTERS[args.source], args.raw_file, args.covers, rebuild_identity=False)

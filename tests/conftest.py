@@ -14,6 +14,13 @@ def example_config(monkeypatch):
     monkeypatch.setattr("aptfinder.identity.addresses.load_geocodes", lambda: {})
 
 
+@pytest.fixture(autouse=True)
+def no_network_credit(monkeypatch):
+    """The Apify credit guard (`apify.guard`) never reads the live account in tests: $100 left, reserve $0.30."""
+    monkeypatch.setattr("aptfinder.intake.apify.credit",
+                        lambda: {"limit": 100.0, "used": 0.0, "left": 100.0, "reserve": 0.30})
+
+
 def pytest_configure(config):
     config.addinivalue_line("markers", "real_precheck: run intake.precheck.precheck itself (stubs passed in)")
 

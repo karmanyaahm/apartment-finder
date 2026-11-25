@@ -37,7 +37,7 @@ from .. import identity, settings
 from ..config import PRECHECK_SKIP, load_sites
 from ..store import append_observation, finish_run, start_run
 from ..store.models import ObservationData
-from .apify import browser_proxy, classify_failure, failed_requests, log_errors, run_actor, same_url
+from .apify import browser_proxy, classify_failure, failed_requests, log_errors, run_actor, run_record, same_url
 from ..plans import match_drawing
 from .direct import plan_drawings
 from .discover import SECRET_ENV, Blocker
@@ -410,6 +410,7 @@ def render(conn, *, sites: list[str] | None = None, model: str = "haiku",
     except Exception as e:  # close the run, then re-raise
         finish_run(conn, run, "error", {}, error=repr(e)[:500])
         raise
+    paid = {"apify_usd": res.usage_usd, "apify_runs": [run_record(res)]}  # Apify's real charge, in counts
     raw_dir = settings.RAW_DIR / "render"
     raw_dir.mkdir(parents=True, exist_ok=True)
     raw_path = raw_dir / f"run{run}.json"
@@ -467,15 +468,15 @@ def render(conn, *, sites: list[str] | None = None, model: str = "haiku",
             report[sid] = [_line(p) for p in plans] if plans else "no plans on the page"
     except (Blocker, subprocess.TimeoutExpired) as e:
         conn.commit()
-        finish_run(conn, run, "error", {"areas": per_area, "observations": n_obs},
+        finish_run(conn, run, "error", {"areas": per_area, "observations": n_obs, **paid},
                    est_cost=round((res.cost_usd or 0) + spent, 4), error=str(e))
         raise Blocker(str(e)) from e
     except Exception as e:  # close the run (its commit keeps the sites read so far), then re-raise
-        finish_run(conn, run, "error", {"areas": per_area, "observations": n_obs},
+        finish_run(conn, run, "error", {"areas": per_area, "observations": n_obs, **paid},
                    est_cost=round((res.cost_usd or 0) + spent, 4), error=repr(e)[:500])
         raise
     conn.commit()
-    finish_run(conn, run, "ok", {"areas": per_area, "observations": n_obs, "items": len(res.items)},
+    finish_run(conn, run, "ok", {"areas": per_area, "observations": n_obs, "items": len(res.items), **paid},
                est_cost=round((res.cost_usd or 0) + spent, 4))
     identity.run(conn)
     return {"run_id": run, "apify_usd": res.cost_usd, "claude_usd": round(spent, 4), "observations": n_obs,
