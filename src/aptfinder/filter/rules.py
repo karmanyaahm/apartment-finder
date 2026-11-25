@@ -159,5 +159,32 @@ def evaluate(rule: dict[str, Any], row: dict[str, Any], ctx: Ctx) -> tuple[str, 
     raise ValueError(f"unknown rule type {t!r}")
 
 
+def fact(rule: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+    """The attribute a rule judges, for showing a failure on that attribute (the dashboard's cards):
+    `f` names it (a listing field, or beds / baths / available / commute / near / amenity), `v` is this listing's
+    value, and commute rules carry their point (`pt` or `set`) and modes."""
+    t = rule["type"]
+    if t in ("equals", "max", "known"):
+        v = row.get(rule["field"])
+        if t == "equals" and isinstance(rule["value"], bool) and v is not None:
+            v = bool(v)  # SQLite returns JSON booleans as 0/1
+        out = {"f": rule["field"], "v": v}
+        return {**out, "lim": rule["value"]} if t == "max" else out
+    if t == "size_options":
+        beds = row.get("beds")
+        if beds is None or not any(o["beds"] == beds for o in rule["options"]):
+            return {"f": "beds", "v": beds}
+        return {"f": "baths", "v": row.get("baths")}
+    if t == "dates_cover":
+        return {"f": "available", "v": row.get("available_from")}
+    if t == "commute_any":
+        return {"f": "commute", "pt": rule["target"], "modes": [o["mode"] for o in rule["options"]]}
+    if t == "near":
+        return {"f": "near", "set": rule["set"], "modes": [rule["mode"]]}
+    if t == "amenity":
+        return {"f": "amenity", "v": rule["name"]}
+    return {"f": t}
+
+
 def combine(statuses: list[str]) -> str:
     return max(statuses, key=lambda s: RANK[s]) if statuses else PASS

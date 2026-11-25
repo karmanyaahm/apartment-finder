@@ -11,7 +11,7 @@ from typing import Any
 from ..config import GoalsConfig, load_goals
 from ..plans import inherit_prices, is_own_priced
 from ..verify import accuracy, low_accuracy
-from .rules import CHECK, FAIL, PASS, RANK, Ctx, combine, evaluate
+from .rules import CHECK, FAIL, PASS, RANK, Ctx, combine, evaluate, fact
 
 PROVIDER_PREF = {"google": 0, "estimate": 9}
 
@@ -65,7 +65,8 @@ def place_annotations(conn: sqlite3.Connection) -> dict[str, dict[str, dict[str,
 
 def evaluate_all(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> dict[str, Any]:
     """{'listings': {goal: {(source, source_id): result}}, 'places': {goal: {place_key: result}}}.
-    A result is {status, reasons: [(status, text)], nice: [(status, text)], nice_score}."""
+    A result is {status, reasons: [(status, text, type)], fails: [{s, f, v, ...}] (rules.fact of each non-pass
+    rule, in reasons order), nice: [(status, text, type)], nice_score}."""
     cfg = cfg or load_goals()
     trips = best_trips(conn)
     anns = place_annotations(conn)
@@ -101,7 +102,9 @@ def evaluate_all(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> di
             reasons = [(*evaluate(r, row, ctx), r["type"]) for r in goal.rules]
             nice = [(*evaluate(r, row, ctx), r["type"]) for r in goal.nice]
             decides = pk not in own or is_own_priced(row)
-            res = {"status": combine([s for s, _, _ in reasons]), "reasons": reasons, "nice": nice,
+            # the attribute each non-pass rule judges (rules.fact), in reasons order: cards mark it red or amber
+            fails = [{"s": s, **fact(r, row)} for r, (s, _, _) in zip(goal.rules, reasons) if s != PASS]
+            res = {"status": combine([s for s, _, _ in reasons]), "reasons": reasons, "fails": fails, "nice": nice,
                    "nice_score": sum(s == PASS for s, _, _ in nice), "source": row["source"],
                    "source_id": row["source_id"], "unit_key": row["unit_key"], "place_key": pk,
                    "decides": decides, "own_site": pk in own}

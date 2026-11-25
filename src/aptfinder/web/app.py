@@ -372,6 +372,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 if r:
                     goals[gid] = {"status": r["status"], "nice_score": r["nice_score"],
                                   "reasons": [t for s, t, *_ in r["reasons"] if s != "pass"],
+                                  "fails": r["fails"],  # the attribute of each reason, for red/amber facts
                                   "unit_key": r["unit_key"], "source": r["source"],
                                   "source_id": r["source_id"]}
             title = next((x["title"] for x in rows if x.get("title")), None)

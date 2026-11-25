@@ -327,3 +327,18 @@ def test_compute_over_20_google_calls_needs_the_counts_typed(client, monkeypatch
     _wait_for_job(c)
     log = c.get("/api/compute/log").json()
     assert log and log[0]["source"] == "estimate" and log[0]["params"]["only"] == ["commute_targets:Meta HQ", "drive"]
+
+
+def test_places_name_the_attribute_each_goal_fails_on(client):
+    """Each non-pass reason comes with the attribute it judges, so a card can mark that fact red or amber."""
+    c, _ = client
+    places = c.get("/api/places").json()
+    for p in places:
+        for r in p["goals"].values():
+            assert len(r["fails"]) == len(r["reasons"])
+    rwc = next(p for p in places if "Brewster" in (p["address"] or ""))
+    assert rwc["goals"]["lease"]["fails"] == [{"s": "fail", "f": "beds", "v": 2.0}]
+    temp = {x["f"]: x for x in rwc["goals"]["temp"]["fails"]}
+    assert temp["price_month"] == {"s": "fail", "f": "price_month", "v": 4200.0, "lim": 4000}
+    assert temp["furnished"]["v"] is False and temp["private_bath"]["s"] == "needs_check"
+    assert temp["commute"]["pt"] == "commute_targets:Downtown Palo Alto" and "bike" in temp["commute"]["modes"]

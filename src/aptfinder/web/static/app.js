@@ -278,14 +278,47 @@ function addLimit() {
   renderList();
 }
 // each requirement's time on a card, so the filter is visible: "walk to nearest Google bus 6 min (stop name, est.)"
-function limitFacts(p) {
+function limitFacts(p, fails = []) {
   return S.limits.filter((l) => l.max > 0).map((l) => {
     const v = limitValue(p, l);
     const name = limitName(l);
     const pt = v && v.point ? ` (${v.point})` : "";
-    return v && v.minutes != null ? `<span>${esc(name)} <b>${num(v.minutes)}</b> min${esc(pt)}${v.provider === "estimate" ? " (est.)" : ""}</span>`
-      : `<span class="muted">${esc(name)}: no time</span>`;
+    const lp = limitPoint(l);
+    const mk = markFor(fails, (x) => x.modes?.includes(l.mode) && (lp.startsWith("set:") ? x.f === "near" && x.set === lp.slice(4) : x.f === "commute" && x.pt === lp));
+    // a requirement row with no time is kept only under "keep places without a time": unknown, so amber
+    return v && v.minutes != null ? `<span${mk}>${esc(name)} <b>${num(v.minutes)}</b> min${esc(pt)}${v.provider === "estimate" ? " (est.)" : ""}</span>`
+      : `<span${mk || ` data-ff="needs_check" title="no time for this requirement yet"`}>${esc(name)}: no time</span>`;
   }).join("");
+}
+
+// Which attribute a place fails on: each non-pass goal rule arrives as {s, f, v, lim?, pt?/set?, modes?}
+// (filter.rules.fact, parallel to reasons). The card marks that attribute red (fail) or amber (needs_check);
+// one the card does not show becomes a small chip. Only the selected goal, or every goal under All.
+function cardFails(p) {
+  const out = [];
+  for (const [g, r] of Object.entries(p.goals)) {
+    if (S.goal !== "all" && g !== S.goal) continue;
+    (r.fails || []).forEach((x, i) => out.push({ ...x, goal: g, text: r.reasons[i] || "", used: false }));
+  }
+  return out;
+}
+// ` data-ff="fail|needs_check" title=...` for a fact some failure is about ("" when none), marking those used
+function markFor(fails, pred) {
+  const hit = fails.filter(pred);
+  if (!hit.length) return "";
+  hit.forEach((x) => (x.used = true));
+  const st = hit.some((x) => x.s === "fail") ? "fail" : "needs_check";
+  return ` data-ff="${st}" title="${esc(hit.map((x) => `${x.goal}: ${x.text}`).join("\n"))}"`;
+}
+const FACT_LABEL = { price_month: "price", price_per_bed: "$/bed", private_bath: "private bath", available: "available from" };
+function failChip(x) {
+  const fmtv = (v) => (v == null ? "?" : typeof v === "number" ? num(v) : v === true ? "yes" : v === false ? "no" : String(v));
+  let t;
+  if (x.f === "commute") t = `${x.modes.map((m) => MODE_LABEL[m] || m).join("/")} to ${x.pt.split(":").slice(1).join(":")}`;
+  else if (x.f === "near") t = `${x.modes.map((m) => MODE_LABEL[m] || m).join("/")} to nearest ${S.meta.point_sets?.[x.set]?.label || x.set}`;
+  else if (x.f === "amenity") t = `no ${x.v}`;
+  else t = `${FACT_LABEL[x.f] || x.f.replace(/_/g, " ")} ${fmtv(x.v)}${x.lim != null && x.s === "fail" && x.v != null ? ` > ${num(x.lim)}` : ""}`;
+  return `<span class="chip ff-chip" data-ff="${x.s}" title="${esc(`${x.goal}: ${x.text}`)}">${esc(t)}</span>`;
 }
 
 /* ---------------------------------------------------------------- list */
@@ -335,12 +368,32 @@ function sorted(list) {
 }
 
 // Lease rent and furnished-stay prices are different offers: temp shows stays, lease shows leases, All both.
-function priceFacts(p) {
-  const lease = p.min_lease_month != null ? `<span><b>${money(p.min_lease_month)}</b>/mo</span><span><b>${money(p.min_lease_per_bed)}</b>/bed</span>` : "";
-  const stay = p.min_stay_month != null ? `<span title="furnished short stay">stay <b>${money(p.min_stay_month)}</b>/mo</span>` : "";
+// A price failure marks the price shown for its goal's offer (temp: the stay, otherwise the lease); when the
+// deciding listing's price differs from the minimum on the card, its own price follows in brackets.
+function priceFacts(p, fails = []) {
+  const showLease = p.min_lease_month != null && S.goal !== "temp";
+  const showStay = p.min_stay_month != null && S.goal !== "lease";
+  const forStay = (x) => (x.goal === "temp" || !showLease) && showStay;
+  const mark = (field, shown, pick) => {
+    const mk = markFor(fails, (x) => x.f === field && pick(x));
+    const own = fails.find((x) => x.f === field && pick(x) && x.v != null && Math.round(x.v) !== Math.round(shown));
+    return [mk, own ? ` <small>(${money(own.v)})</small>` : ""];
+  };
+  let lease = "", stay = "";
+  if (showLease) {
+    const [lm, lmv] = mark("price_month", p.min_lease_month, (x) => !forStay(x));
+    const [lb, lbv] = mark("price_per_bed", p.min_lease_per_bed, (x) => !forStay(x));
+    lease = `<span${lm}><b>${money(p.min_lease_month)}</b>/mo${lmv}</span><span${lb}><b>${money(p.min_lease_per_bed)}</b>/bed${lbv}</span>`;
+  }
+  if (showStay) {
+    const [sm, smv] = mark("price_month", p.min_stay_month, forStay);
+    stay = `<span${sm || ' title="furnished short stay"'}>stay <b>${money(p.min_stay_month)}</b>/mo${smv}</span>`;
+  }
   if (S.goal === "temp") return stay || `<span class="muted">no furnished stay</span>`;
   if (S.goal === "lease") return lease || `<span class="muted">no lease price</span>`;
-  return (lease + stay) || `<span><b>${money(p.min_price_month)}</b>/mo</span>`;
+  if (lease + stay) return lease + stay;
+  const [am, amv] = mark("price_month", p.min_price_month, () => true);
+  return `<span${am}><b>${money(p.min_price_month)}</b>/mo${amv}</span>`;
 }
 
 function stars(n) { return n ? `<span class="stars" title="${n}/5">${"★".repeat(n)}${"☆".repeat(5 - n)}</span>` : ""; }
@@ -355,18 +408,24 @@ function renderList() {
     const st = placeStatus(p);
     const mins = minutesFor(p);
     const chips = Object.entries(p.goals).filter(([g]) => S.goal === "all" || g === S.goal).map(([g, r]) => `<span class="chip ${r.status}" title="${esc(r.reasons.join("\n"))}">${esc(g)}: ${esc(STATUS_LABEL[r.status])}</span>`).join("");
-    const bb = p.beds.length ? `${p.beds.map((b) => (b === 0 ? "studio" : b + "bd")).join("/")} · ${p.baths.join("/")}ba` : "beds ?";
+    const fails = cardFails(p);
+    const bm = markFor(fails, (x) => x.f === "beds"), am = markFor(fails, (x) => x.f === "baths");
+    const bb = p.beds.length ? `<span${bm}>${esc(p.beds.map((b) => (b === 0 ? "studio" : b + "bd")).join("/"))}</span> · <span${am}>${esc(p.baths.join("/"))}ba</span>`
+      : `<span${bm || am}>beds ?</span>`;
+    const cm = markFor(fails, (x) => x.f === "commute" && x.pt === $("#target").value && x.modes.includes($("#mode").value));
+    const facts = `${priceFacts(p, fails)}
+        <span>${bb}</span>
+        <span${cm}>${mins ? `<b>${num(mins.minutes)}</b> min ${esc(mode)} to ${esc(tgt)}${mins.provider === "estimate" ? " (est.)" : ""}` : `${esc(mode)} to ${esc(tgt)}: not computed`}</span>
+        ${limitFacts(p, fails)}`;
+    const extra = fails.filter((x) => !x.used).map(failChip).join("");
     return `<div class="card ${st === "fail" ? "dim" : ""} ${S.selected === p.place_key ? "sel" : ""}" data-pk="${esc(p.place_key)}">
       <h4>${esc(p.label)} ${stars(p.rating)}</h4>
       <div class="facts">
-        ${priceFacts(p)}
-        <span>${esc(bb)}</span>
-        <span>${mins ? `<b>${num(mins.minutes)}</b> min ${esc(mode)} to ${esc(tgt)}${mins.provider === "estimate" ? " (est.)" : ""}` : `${esc(mode)} to ${esc(tgt)}: not computed`}</span>
-        ${limitFacts(p)}
+        ${facts}
         <span>${esc(p.sources)}</span>${p.n_active ? "" : '<span style="color:var(--bad)">inactive</span>'}
         ${p.user_status ? `<span>status: ${esc(p.user_status)}</span>` : ""}
       </div>
-      <div class="chips">${chips}</div>
+      <div class="chips">${chips}${extra}</div>
     </div>`;
   }).join("");
   $$(".card").forEach((el) => el.addEventListener("click", () => openPlace(el.dataset.pk)));
