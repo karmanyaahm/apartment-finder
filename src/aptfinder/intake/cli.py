@@ -123,6 +123,10 @@ def main(argv: list[str] | None = None) -> None:
     ex.add_argument("--recheck-none", action="store_true", help="only listings read as restriction 'none' from a "
                                                                 "name or title alone: apply cached answers again "
                                                                 "(free), so they become unknown")
+    ex.add_argument("--units-missing", action="store_true", help="only rows whose source left beds or baths empty "
+                                                               "(not rooms, building info or Zillow building rows): "
+                                                               "read again; a Zillow single unit gets its page's "
+                                                               "beds, baths, sqft and price")
     ex.add_argument("--id-like", help="only listings whose source_id matches this SQL LIKE pattern "
                                       "(e.g. '%%:%%': Zillow buildings' bedroom rows)")
     zd = sub.add_parser("zillow-detail", help="fetch the detail page of every active Zillow listing without one "
@@ -237,7 +241,8 @@ def main(argv: list[str] | None = None) -> None:
             try:
                 res = extract(conn, src, limit=args.limit, batch=args.batch, model=args.model, max_usd=left,
                               workers=args.workers, dry_run=args.dry_run, reread=args.reread,
-                              id_like=args.id_like, recheck_none=args.recheck_none)
+                              id_like=args.id_like, recheck_none=args.recheck_none,
+                              units_missing=args.units_missing)
             except Blocker as e:
                 raise SystemExit(f"BLOCKED: extract {e}")
             print(json.dumps(res, indent=1, default=str), flush=True)

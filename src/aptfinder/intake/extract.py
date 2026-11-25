@@ -139,6 +139,13 @@ PARKING = {
                    "cost": {"type": ["string", "null"], "enum": ["included", "paid", None]},
                    "usd_month": {"type": ["number", "null"]},
                    "evidence": {"type": "array", "items": {"type": "string"}}}}
+_UNIT_DESC = ("of this one home for rent, only when the text states it for this home: its title, floor plan or "
+              "unit name, or a description of this one home ('1 Bed / 1 Bath: Type D', '2 br/1 bath', '4BR'). "
+              "null when the text gives none, gives a range or the units of a whole building, or the listing is a "
+              "room in a shared home. evidence: the exact words holding the number, copied character for character.")
+UNITS = {k: {"type": ["object", "null"], "description": f"number of {w} {_UNIT_DESC}", "required": ["value", "evidence"],
+             "properties": {"value": {"type": "number"}, "evidence": {"type": "string"}}}
+         for k, w in (("beds", "bedrooms (0 for a studio)"), ("baths", "bathrooms (a half bath is 0.5)"))}
 _STR = {"type": ["string", "null"]}
 SCHEMA = {"type": "object", "required": ["results"], "properties": {"results": {"type": "array", "items": {
     "type": "object", "required": ["key", "restriction", "parking"],
@@ -149,6 +156,7 @@ SCHEMA = {"type": "object", "required": ["results"], "properties": {"results": {
         "property_name": {**_STR, "description": "name of the apartment community or building, if named"},
         "website": {**_STR, "description": "a URL in the text for the property or its manager"},
         "facts": {"type": "object", "properties": FACTS},
+        **UNITS,
         "restriction": RESTRICTION,
         "parking": PARKING,
     }}}}}
@@ -262,7 +270,7 @@ def check_parking(p: Any, text: str) -> dict[str, Any] | None:
 
 # labels of entry lines that are no description: a name, a title, an amenity list or a source extra says nothing about
 # who may rent, so 'none' read from them alone is unknown (Villa Montgomery's plans '1 Bedroom/1 bath', $1,012)
-_THIN = ("Title: ", "Name: ", "Amenities: ", *(f"{k.replace('_', ' ').capitalize()}: " for k in TEXT_EXTRAS))
+_THIN = ("Title: ", "Name: ", "Floor plan: ", "Unit: ", "Amenities: ", *(f"{k.replace('_', ' ').capitalize()}: " for k in TEXT_EXTRAS))
 MIN_DESCRIBED = 40  # normalized characters of other text before a 'none' counts
 
 
@@ -286,6 +294,50 @@ def check_restriction(rx: Any, text: str) -> dict[str, Any] | None:
     if len(q) >= 2 and (f" {q} " in f" {t} " or (len(q) >= 20 and q in t)):
         return {"value": rx["value"], "evidence": rx["evidence"]}
     return None
+
+
+# beds / baths read from text (`check_units`): only for a row whose own source left them empty (`units_wanted`)
+WHOLE_ENTRY = ("craigslist", "airbnb", "furnishedfinder", "zillow")  # one listing = one home: its description is its own
+ROW_LINES = ("Title: ", "Floor plan: ", "Unit: ")  # elsewhere (a building's plan rows) only the row's own lines count
+_NUM = r"(\d+(?:\.\d+)?|one|two|three|four|five|six)"
+_NUM_W = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6}
+UNIT_WORDS = {"beds": r"(?:bedrooms?|beds?|bdrms?|bds?|brs?)(?![a-z])",
+              "baths": r"(?:bathrooms?|baths?|bths?|ba)(?![a-z])"}
+
+
+def units_wanted(source: str, source_id: str, data: dict[str, Any]) -> bool:
+    """A row whose beds or baths the source left empty, that is one home or one plan: not a room in a shared home,
+    not a building's site_info row, not a Zillow building's bedroom row (`<zpid>:Nbd`, whose page and text are the
+    building's or one representative unit's, so a value read there would mix units across rows)."""
+    return ((data.get("beds") is None or data.get("baths") is None) and data.get("kind") not in ("room", "site_info")
+            and not (source == "zillow" and ":" in source_id))
+
+
+def check_units(ans: dict[str, Any], text: str, whole: bool) -> dict[str, Any]:
+    """{beds|baths: {value, evidence}} whose quote is verbatim in the text and holds the value next to a bed / bath
+    word ('1 Bed / 1 Bath', '4BR', 'two bedroom'; 'Studio' for 0 beds). `whole`: the entry is one home's own (a
+    Craigslist post, a Zillow single unit), so any line counts; else only the row's Title / Floor plan / Unit lines
+    ('1S (Standard) Floor Plan' and '1B.8' hold no bed word: unknown). Baths below 0.5 ('0BA', shared) stay unknown."""
+    hay = text if whole else "\n".join(line for line in text.splitlines() if line.startswith(ROW_LINES))
+    t = f" {_norm(hay)} "
+    out: dict[str, Any] = {}
+    for k in ("beds", "baths"):
+        f = (ans or {}).get(k)
+        if not isinstance(f, dict):
+            continue
+        v, q = f.get("value"), str(f.get("evidence") or "")
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= 10 or v * 2 != int(v * 2):
+            continue
+        if (k == "beds" and v != int(v)) or (k == "baths" and v < 0.5):
+            continue
+        qn = _norm(q)
+        if len(qn) < 2 or f" {qn} " not in t:
+            continue
+        said = [float(x) if x[0].isdigit() else _NUM_W[x]
+                for x in re.findall(_NUM + r"\s*-?\s*" + UNIT_WORDS[k], q.lower())]
+        if v in said or (k == "beds" and v == 0 and "studio" in qn):
+            out[k] = {"value": int(v) if k == "beds" else v, "evidence": q}
+    return out
 
 
 def amenities_from(facts: dict[str, Any]) -> list[str]:
@@ -357,12 +409,16 @@ def raw_lines(source: str, item: dict[str, Any], building: bool = False) -> list
     return [f"{k}: {s}" for k, v in out if (s := _flat(v))]
 
 
-def entry_text(data: dict[str, Any], raw: list[str] | None = None) -> str:
-    """Title, name, description, amenities and source extras, then raw lines; capped at MAX_TEXT."""
+def entry_text(data: dict[str, Any], raw: list[str] | None = None, own: bool = False) -> str:
+    """Title, name, description, amenities and source extras, then raw lines; capped at MAX_TEXT. `own`: the row
+    is read for its beds / baths (`units_wanted`), so its floor plan and unit name are sent too (only then, so
+    every other row's text, and its cached answer, stays the same)."""
     extra = data.get("extra") or {}
     am = [a for a in data.get("amenities") or [] if not str(a).endswith(FROM_TEXT)]
     lines = [f"Title: {data['title']}" if data.get("title") else "",
              f"Name: {data['property_name']}" if data.get("property_name") else "",
+             f"Floor plan: {data['floor_plan']}" if own and data.get("floor_plan") else "",
+             f"Unit: {data['unit']}" if own and data.get("unit") else "",
              (data.get("description") or "").strip()[:3000],
              f"Amenities: {'; '.join(am)}" if am else "",
              *(f"{k.replace('_', ' ').capitalize()}: {_flat(extra[k])}" for k in TEXT_EXTRAS
@@ -530,11 +586,15 @@ def _pending(conn, source: str, reread: bool = False, pages: set[str] | None = N
 def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: str = "haiku", max_usd: float = 1.0,
             workers: int = 8, dry_run: bool = False, reread: bool = False, cached_only: bool = False,
             ask_fn: Callable | None = None, rebuild_identity: bool = True,
-            id_like: str | None = None, recheck_none: bool = False) -> dict[str, Any]:
+            id_like: str | None = None, recheck_none: bool = False, units_missing: bool = False) -> dict[str, Any]:
     """Read the whole entry of every unread active listing of `source`. `cached_only`: apply cached answers, ask
     nothing (after a reparse). `ask_fn` replaces `ask` (tests). `rebuild_identity=False`: the caller rebuilds it.
     `id_like`: only source_ids matching this SQL LIKE pattern. `recheck_none`: only listings whose current reading
-    says restriction 'none' from a text that is not `described` (cached answers applied again, free)."""
+    says restriction 'none' from a text that is not `described` (cached answers applied again, free).
+    `units_missing`: only rows whose source left beds or baths empty (`units_wanted`), read again (their own plan
+    and unit lines make a new text, so only they are asked; a Zillow single unit gets its page's values)."""
+    if units_missing:
+        reread = True
     if recheck_none:
         reread = cached_only = True
     if source not in TEXT_SOURCES:
@@ -544,20 +604,25 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
         from .zillow_detail import load_pages
 
         pages = load_pages()
-    todo = _pending(conn, source, reread, set(pages or ()), id_like)[:limit]
+    todo = [t for t in _pending(conn, source, reread, set(pages or ()), id_like)
+            if not units_missing or units_wanted(source, t["row"]["source_id"], t["data"])][:limit]
     raws = RawIndex(source) if source in RAW_SOURCES else None
     raw_missing = 0
     for t in todo:
         lines = None
         if pages is not None:
             page = pages.get(str((t["data"].get("extra") or {}).get("zpid")))
+            t["page"] = page if ":" not in t["row"]["source_id"] else None  # a single unit's own page
             lines = raw_lines(source, page, ":" in t["row"]["source_id"]) if page else None  # <zpid>:Nbd
         elif raws is not None:
             item = raws.item(t["row"]["raw_path"], t["row"]["source_id"])
             raw_missing += item is None
             lines = raw_lines(source, item) if item else None
-        t["text"] = entry_text(t["data"], lines)
-        t["hash"] = hashlib.sha1(f"v{VERSION}\n{model}\n{t['text']}".encode()).hexdigest()
+        t["own"] = units_wanted(source, t["row"]["source_id"], t["data"])
+        t["text"] = entry_text(t["data"], lines, own=t["own"])
+        # a row read for its beds / baths is asked for them even when its text is unchanged (a Craigslist post)
+        tag = " units" if t["own"] else ""
+        t["hash"] = hashlib.sha1(f"v{VERSION}{tag}\n{model}\n{t['text']}".encode()).hexdigest()
     if recheck_none:
         said_none = {r[0] for r in conn.execute(
             "SELECT source_id FROM listings WHERE source = ? "
@@ -594,6 +659,7 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
         filled: dict[str, int] = {}
         facts_n: dict[str, int] = {}
         restr: dict[str, int] = {}
+        units_n: dict[str, int] = {}
         parking: dict[str, int] = {}
         for t in todo:
             if t["hash"] not in cache:
@@ -627,18 +693,39 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
                         v = f"{v}, {str(d['city']).title()}"  # "850 Calderon Ave" -> "..., Mountain View"
                     d[k] = v
                     got.append(k)
+            # beds, baths, sqft, price the source left empty: a Zillow single unit's own page (structured) first,
+            # then the row's own text (`check_units`, quoted); a building's rows are never filled (`units_wanted`)
+            price, units = t["row"]["price"], {}
+            if t.get("page"):
+                from .zillow_detail import unit_facts
+
+                for k, v in unit_facts(t["page"]).items():
+                    if (price if k == "price" else d.get(k)) is None:
+                        units[k] = {"value": v, "from": "zillow page"}
+            if t["own"]:
+                for k, f in check_units(cache[t["hash"]], t["text"], source in WHOLE_ENTRY).items():
+                    if d.get(k) is None and k not in units:
+                        units[k] = {**f, "from": "text"}
+            for k, f in units.items():
+                if k == "price":
+                    price = f["value"]
+                else:
+                    d[k] = f["value"]
+                got.append(k)
+                units_n[f"{k} ({f['from']})"] = units_n.get(f"{k} ({f['from']})", 0) + 1
             add = [a for a in amenities_from(facts) + parking_amenity(pk) if a not in (d.get("amenities") or [])]
             if add:  # only positives; a listing with no list keeps none (unknown, never 'not listed')
                 d["amenities"] = list(d.get("amenities") or []) + add
                 got.append("amenities")
             extra["extracted"] = {"v": VERSION, "fields": got, "model": model, "run_id": run, "facts": facts,
+                                  **({"units": units} if units else {}),
                                   **({"restriction": rx} if rx else {}),
                                   **({"parking": pk} if pk else {}),
                                   **({"conflicts": conflicts} if conflicts else {})}
             d["extra"] = extra
             r = t["row"]
             append_observation(conn, run, source, r["source_id"], ObservationData(**d), url=r["url"],
-                               price=r["price"], price_basis=r["price_basis"], query_checkin=r["query_checkin"],
+                               price=price, price_basis=r["price_basis"], query_checkin=r["query_checkin"],
                                query_checkout=r["query_checkout"], raw_path=r["raw_path"], commit=False)
             n_obs += 1
             if n_obs % COMMIT_EVERY == 0:
@@ -654,7 +741,7 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
     err = res["error"]
     counts = {**plan, "calls": res["calls"], "observations": n_obs, "filled": filled, "facts": facts_n,
               "restriction": restr, "parking": parking,
-              "not_asked": sum(1 for t in todo if t["hash"] not in cache)}
+              "units": units_n, "not_asked": sum(1 for t in todo if t["hash"] not in cache)}
     finish_run(conn, run, "error" if err else "ok", counts, est_cost=round(res["spent"], 4),
                error=str(err)[:500] if err else None)
     if n_obs and rebuild_identity:

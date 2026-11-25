@@ -172,3 +172,93 @@ def test_for_sale_page_is_a_verify_item_until_checked(conn, fake):
     append_check(conn, "user", "conflict", "price", "cannot_tell", observation_id=items[0]["listings"][0]["obs_id"],
                  stored_value=5200, note="sold")
     assert verify.stale_queue(conn) == []
+
+
+# 411 Forest Ave, Palo Alto (zpid 453786796): an `apartmentComplex` search card with no unitsGroup, beds, baths or
+# price ('Price on Request'); its own page (run 367) holds the unit's beds, baths and area, and listing_price 0
+FOREST = {"zillow_id": 453786796, "home_status": "FOR_RENT", "home_type": "APARTMENT", "bedrooms": 1, "bathrooms": 1,
+          "living_area": 515, "listing_price": 0, "rent_zestimate": 3436,
+          "description": "Located on one of the best streets in downtown Palo Alto, this Victorian, with four "
+                         "apartment homes in it, and the cottage behind it are ideally located.",
+          "reso_facts": {"bathroomsFull": 1, "bedrooms": 1, "allowedPets": ["No Pets"]}}
+
+
+def test_unit_facts_of_a_single_units_page():
+    assert zd.unit_facts(FOREST) == {"beds": 1, "baths": 1, "sqft": 515}  # price on request: unknown, never 0
+    kiely = {**FOREST, "bathrooms": 2, "reso_facts": {"bathroomsFull": 1, "bathroomsHalf": 1}, "living_area": ""}
+    assert zd.unit_facts(kiely) == {"beds": 1, "baths": 1.5}  # full + half / 2, as the search parser; '' area
+    assert zd.unit_facts({**FOREST, "listing_price": 3450})["price"] == 3450
+    assert "price" not in zd.unit_facts({**FOR_SALE})  # a sale price is no rent
+    assert "sqft" not in zd.unit_facts({**FOREST, "living_area": 110})  # 892 Gallatin Dr, 2 bd: a typo
+
+
+def test_units_missing_fills_a_single_unit_from_its_page_never_a_buildings_rows(conn, fake):
+    _zillow(conn)
+    run = start_run(conn, "intake", "zillow", {"scope": "targeted"})
+    append_observation(conn, run, "zillow", "453786796", {"address": "411 Forest Ave, Palo Alto, CA 94301",
+                                                          "lat": 37.44, "lon": -122.16, "kind": "apartment",
+                                                          "property_name": "411 - 419 Forest Ave",
+                                                          "extra": {"zpid": 453786796}},
+                       url="https://x", price=None, price_basis="month")
+    finish_run(conn, run, "ok", {})
+    raw = zd.settings.RAW_DIR / "zillow_detail"
+    raw.mkdir(parents=True)
+    (raw / "run1_01.json").write_text(json.dumps({"items": [BUILDING, UNIT, FOREST]}))
+    stub = lambda batch, model, cap: ([{"key": b["key"], "facts": {}} for b in batch], 0.0)  # noqa: E731
+    res = ex.extract(conn, "zillow", units_missing=True, ask_fn=stub)
+    # Forest and the house (no baths; its page gives none); never Harken's bedroom rows (a representative unit's)
+    assert res["listings"] == 2 and res["units"] == {"beds (zillow page)": 1, "baths (zillow page)": 1,
+                                                     "sqft (zillow page)": 1}
+    r = conn.execute("SELECT data, price FROM latest_obs WHERE source_id = '453786796'").fetchone()
+    d = json.loads(r["data"])
+    assert (d["beds"], d["baths"], d["sqft"], r["price"]) == (1, 1, 515, None)
+    assert d["extra"]["extracted"]["units"]["beds"] == {"value": 1, "from": "zillow page"}
+    for sid in ("466640639:1bd", "466640639:2bd"):
+        assert json.loads(conn.execute("SELECT data FROM latest_obs WHERE source_id = ?",
+                                       (sid,)).fetchone()["data"]).get("baths") is None
+
+
+def test_beds_and_baths_from_text_need_the_number_next_to_the_word():
+    row = "Name: Park Plaza Apartments\nFloor plan: 1S (Standard) Floor Plan\nThe building has 2 bedroom homes."
+    assert ex.check_units({"beds": {"value": 1, "evidence": "1S (Standard)"}}, row, whole=False) == {}
+    assert ex.check_units({"beds": {"value": 2, "evidence": "2 bedroom"}}, row, whole=False) == {}  # building text
+    assert ex.check_units({"beds": {"value": 2, "evidence": "2 bedroom"}}, row, whole=True)["beds"]["value"] == 2
+    cl = "Title: Bright/quiet/massive Mission 2 br/1 bath overlooking garden"
+    got = ex.check_units({"beds": {"value": 2, "evidence": "2 br/1 bath"},
+                          "baths": {"value": 2, "evidence": "2 br/1 bath"}}, cl, whole=True)
+    assert got == {"beds": {"value": 2, "evidence": "2 br/1 bath"}}  # the 2 is the bedrooms', not the baths'
+    assert ex.check_units({"baths": {"value": 1, "evidence": "1 bath"}}, cl, whole=True)["baths"]["value"] == 1
+    sro = "Title: Clay Street SRO\nSRO/0BA Room/Share"
+    assert ex.check_units({"baths": {"value": 0, "evidence": "SRO/0BA"}}, sro, whole=True) == {}
+    zl = "Title: 1 Bed / 1 Bath: Type D\nFloor plan: Studio"
+    assert ex.check_units({"beds": {"value": 0, "evidence": "Studio"}, "baths": {"value": 1, "evidence": "1 Bath"}},
+                          zl, whole=False) == {"beds": {"value": 0, "evidence": "Studio"},
+                                               "baths": {"value": 1, "evidence": "1 Bath"}}
+
+
+def test_a_plan_row_without_beds_sends_its_plan_name_others_keep_their_text(conn, monkeypatch, tmp_path):
+    monkeypatch.setattr(ex.settings, "DATA_DIR", tmp_path)
+    run = start_run(conn, "intake", "direct", {"scope": "full"})
+    for sid, plan, beds in (("verve:r:2-bed", "2 Bed / 2 Bath", None), ("verve:r:1-bed", "1 Bedroom", 1)):
+        append_observation(conn, run, "direct", sid, {"property_name": "Verve", "floor_plan": plan, "beds": beds,
+                                                      "baths": 1 if beds else None, "kind": "apartment",
+                                                      "description": "Verve offers 1 and 2 bedroom homes near "
+                                                                     "Caltrain with a gym."},
+                           url="https://x", price=None, price_basis="month")
+    finish_run(conn, run, "ok", {})
+    seen = {}
+
+    def stub(batch, model, cap):
+        seen.update({b["key"]: b["text"] for b in batch})
+        return [{"key": b["key"], "beds": {"value": 2, "evidence": "2 Bed"},
+                 "baths": {"value": 2, "evidence": "2 Bath"}} for b in batch], 0.0
+
+    res = ex.extract(conn, "direct", ask_fn=stub)
+    assert sum("Floor plan: 2 Bed / 2 Bath" in t for t in seen.values()) == 1
+    assert not any("Floor plan: 1 Bedroom" in t for t in seen.values())  # its beds are known: text unchanged
+    assert res["units"] == {"beds (text)": 1, "baths (text)": 1}
+    d = json.loads(conn.execute("SELECT data FROM latest_obs WHERE source_id = 'verve:r:2-bed'").fetchone()["data"])
+    assert (d["beds"], d["baths"]) == (2, 2)
+    assert d["extra"]["extracted"]["units"]["baths"] == {"value": 2, "evidence": "2 Bath", "from": "text"}
+    d1 = json.loads(conn.execute("SELECT data FROM latest_obs WHERE source_id = 'verve:r:1-bed'").fetchone()["data"])
+    assert d1["beds"] == 1 and "units" not in d1["extra"]["extracted"]

@@ -8,7 +8,8 @@ An enrichment of listings we already hold, not a source of listings: a run store
 (`data/raw/zillow_detail/run<id>_<k>.json`) and writes no observations, so it creates no listing or place, is never
 coverage of an area and never retires anything (`scope = targeted`; `zillow_detail` is not in `ADAPTERS`). The text
 reading (`extract zillow`) finds a listing's newest page by its `extra.zpid`; a building's bedroom rows (`<zpid>:Nbd`)
-share one page, whose beds, baths and price belong to one representative unit and are never read.
+share one page, whose beds, baths and price belong to one representative unit and are never read. A single unit's
+row (no ':') is that page's own unit: its empty beds, baths, sqft and price are filled from it (`unit_facts`).
 
 A page whose `home_status` is an explicit non-rental status (FOR_SALE, SOLD, OFF_MARKET, ...) is recorded in the run's
 `counts.home_status`; Verify lists active listings whose newest page says so (`verify.stale_queue`).
@@ -105,6 +106,34 @@ def detail_lines(item: dict[str, Any], building: bool = False) -> list[tuple[str
             if not (building and key in UNIT_LINES) and (v := _vals(rf.get(key)))]
     if rf.get("furnished") is True and not building:  # `false` is on almost every page, a default, not a statement
         out.append(("Furnished", "yes"))
+    return out
+
+
+def _num(v: Any) -> float | None:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def unit_facts(item: dict[str, Any]) -> dict[str, float]:
+    """beds, baths, sqft and price of a single unit's own page (a row whose source_id has no ':'), for the fields
+    its search card left empty (an `apartmentComplex` card without `unitsGroup` gives none: 411 Forest Ave, 734
+    Cowper St). Never for a building's bedroom rows: their page is one representative unit's. Baths = full + half / 2
+    (as `lease.zillow_parse`), else the page's total. Price only on a FOR_RENT page and above 0 ('Price on Request'
+    pages say 0: unknown); never the rent Zestimate."""
+    rf = item.get("reso_facts") or {}
+    out: dict[str, float] = {}
+    beds = _num(item.get("bedrooms"))
+    if beds is not None and 0 <= beds <= 10:
+        out["beds"] = beds
+    full, half = _num(rf.get("bathroomsFull")), _num(rf.get("bathroomsHalf"))
+    baths = full + (half or 0) / 2 if full else _num(item.get("bathrooms"))
+    if baths is not None and 0 < baths <= 10:
+        out["baths"] = baths
+    sqft = _num(item.get("living_area"))
+    if sqft is not None and 200 <= sqft <= 20000:  # 892 Gallatin Dr, 2 bd / 2 ba: '110' (a typo): unknown
+        out["sqft"] = sqft
+    price = _num(item.get("listing_price"))
+    if item.get("home_status") in RENTAL and price is not None and price > 0:
+        out["price"] = price
     return out
 
 
