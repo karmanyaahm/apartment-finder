@@ -424,7 +424,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             conflicts = verify.all_conflicts(conn)
             n_pending = sum(c["pending_render"] for c in conflicts)
             n_sample = len(verify.sample_queue(conn))
-            n_nosite = len(verify.no_website_queue(conn))
+            n_own = len(verify.own_site_queue(conn))
         from ..trips import google_usage
 
         with lock:
@@ -434,7 +434,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             "accuracy": [{"source": s, "field": f, **a} for (s, f), a in sorted(acc.items())],
             "agreement": agree, "queues": {"conflict": len(conflicts) - n_pending, "conflict_pending": n_pending,
                                            "sample": n_sample,
-                                           "no_website": n_nosite},
+                                           "own_site": n_own},
             "counts": q("SELECT (SELECT COUNT(*) FROM places) AS places, "
                         "(SELECT COUNT(*) FROM listings) AS listings, "
                         "(SELECT COUNT(*) FROM listings WHERE active = 1) AS active")[0],
@@ -489,19 +489,27 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         return {"kind": kind, "skip": skip, "n": n, "total": len(items), "actionable": len(items) - pending,
                 "pending": pending, "items": page}
 
+    @app.get("/api/verify/own_sites")
+    def verify_own_sites(skip: int = 0, n: int = 20) -> dict[str, Any]:
+        """Named buildings whose own site gave no usable offer, n at a time, each with its reason and every URL
+        tried (verify.own_site_queue), plus the count per reason."""
+        with lock:
+            items = verify.own_site_queue(conn)
+        from collections import Counter
+
+        return {"total": len(items), "skip": skip, "n": n, "items": items[skip:skip + n],
+                "by_reason": dict(Counter(i["reason"] for i in items)), "labels": verify.OWN_SITE_REASONS}
+
     @app.get("/api/verify/next")
     def verify_next(seed: int = 0, skip: int = 0, conflicts: bool = True) -> dict[str, Any]:
-        """One item at a time: conflicts (unless conflicts=false: the dashboard pages them with /batch), buildings
-        without a website, then the sample."""
+        """One item at a time: conflicts (unless conflicts=false: the dashboard pages them with /batch), then the
+        sample. Buildings whose own site gave nothing usable are a list of their own (/api/verify/own_sites)."""
         with lock:
-            items = ((verify.all_conflicts(conn) if conflicts else []) + verify.no_website_queue(conn)
-                     + verify.sample_queue(conn, seed))
+            items = (verify.all_conflicts(conn) if conflicts else []) + verify.sample_queue(conn, seed)
         if skip >= len(items):
             return {"done": True, "remaining": 0}
         item = items[skip]
         out: dict[str, Any] = {"done": False, "remaining": len(items), "item": item}
-        if item["kind"] == "no_website":
-            return out
         if item["kind"] in ("conflict", "listing"):
             out.update(_listing_detail(item))
         else:

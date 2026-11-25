@@ -287,7 +287,7 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
           [f"{INTAKE} extract {r['source']}" for r in ex_rows if r["state"] != "done"],
           rows=ex_rows, cost=round(sum(r["cost"] for r in ex_rows), 2))
 
-    # 5. website finding, over named buildings (the no-website queue's definition)
+    # 5. website finding, over named buildings (verify.is_named_building)
     ws = website_status(conn)
     named = [p for p in places if is_named_building(p["property_name"], p["address"])]
     for p in named:
@@ -427,15 +427,15 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
     open_conflicts = verify.all_conflicts(conn)
     conflicts = len(open_conflicts)
     pending = sum(c["pending_render"] for c in open_conflicts)  # an own-site render will likely settle these
-    # the no-website queue: named buildings with no site known and no answer from you
-    no_web = sum(1 for p in named if p["web"] in ("not_searched", "no_site", "blocked", "rejected"))
+    # the own-site queue: named buildings in active chunks whose own site gave no usable offer
+    no_web = len(verify.own_site_queue(conn))  # named buildings whose own site gave nothing usable
     stage("verify", "Verify (hand checks)",
           "done" if not conflicts and not no_web else "todo" if not n_checks else "partial",
           f"{n_checks} checks made; {conflicts} open conflicts ({pending} waiting for an own-site render); "
-          f"{no_web} named buildings without a website",
+          f"{no_web} named buildings whose own site gave no usable offer",
           ["Verify button in this dashboard"] if conflicts or no_web else [],
           counts={"checks": n_checks, "conflicts": conflicts, "conflicts_pending_render": pending,
-                  "no_website": no_web})
+                  "own_site": no_web})
 
     # 11. filter (computed on every read)
     per_goal = {g: dict(Counter(r["status"] for r in pres.values())) for g, pres in res["places"].items()}

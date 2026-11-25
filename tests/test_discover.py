@@ -84,12 +84,53 @@ def test_named_building_without_website_is_queued_and_your_url_is_promoted(conn,
     append_observation(conn, run, "zillow", "z1", {  # a house: an address as its name, not queued
         "property_name": "12 Elm St", "address": "12 Elm St, Mountain View, CA 94041", "lat": 37.395, "lon": -122.077})
     identity.run(conn)
-    (item,) = verify.no_website_queue(conn)
-    assert item["name"] == "Harken" and item["status"] == "not searched yet"
+    (item,) = verify.own_site_queue(conn)
+    assert item["name"] == "Harken" and item["reason"] == "no_website" and item["urls"] == []
     append_annotation(conn, "user", "place", item["place_key"], "website", comment="https://harken.example/?utm=x")
-    assert verify.no_website_queue(conn) == []
+    (item,) = verify.own_site_queue(conn)  # your URL shows at once, pending its check
+    assert item["reason"] == "not_checked" and item["urls"][0]["status"] == "pending"
+    assert "pending check" in item["urls"][0]["label"]
     (site,) = promote(conn, ["mountain_view"], limit=10, dry_run=True)["sites"]
     assert site == ("Harken", "https://harken.example/?utm=x")
+    # dismissed ("no plans online, fine"): gone until you add another URL
+    append_annotation(conn, "user", "place", item["place_key"], "own_site", comment="dismissed: no plans online")
+    assert verify.own_site_queue(conn) == []
+
+
+def test_every_url_you_add_is_a_site_of_its_own(conn, tmp_path, monkeypatch):
+    """A place can have several sources: a second URL never replaces the first."""
+    import shutil
+
+    from aptfinder import identity, settings, verify
+    from aptfinder.config import load_sites
+    from aptfinder.intake.discover import append, promote
+    from aptfinder.store import append_annotation, append_observation, start_run
+
+    shutil.copytree(settings.ROOT / "config.example", tmp_path / "cfg")
+    monkeypatch.setattr(settings, "CONFIG_DIR", tmp_path / "cfg")
+    run = start_run(conn, "intake", "apartments_com", {})
+    append_observation(conn, run, "apartments_com", "h1", {
+        "property_name": "Harken", "address": "100 View St, Mountain View, CA 94041", "lat": 37.3947, "lon": -122.0763})
+    identity.run(conn)
+    pk = conn.execute("SELECT place_key FROM places").fetchone()[0]
+    append("found", [{"id": "harken", "place_key": pk, "name": "Harken", "url": "https://harken.example/",
+                      "chunk": "mountain_view", "found_by": "claude-sonnet"}])
+    append("check", [{"id": "harken", "ok": False, "outcome": "blocked", "http_status": 403,
+                      "reason": "page not fetched: blocked (HTTP 403)", "at": "2026-11-24T10:00:00+00:00"}])
+    (item,) = verify.own_site_queue(conn)
+    assert item["reason"] == "all_failed" and "HTTP 403" in item["urls"][0]["label"]
+    for u in ("https://harken.example/", "https://op.example/harken/floorplans", "https://op.example/harken/units"):
+        append_annotation(conn, "user", "place", pk, "website", comment=u)
+    got = promote(conn, ["mountain_view"], limit=10, dry_run=True)["sites"]
+    assert got == [("Harken", "https://op.example/harken/floorplans"), ("Harken", "https://op.example/harken/units")]
+    promote(conn, ["mountain_view"], limit=10, fetch=False)
+    assert sorted(s["url"] for s in load_sites().values() if s.get("place_key") == pk) == [
+        "https://harken.example/", "https://op.example/harken/floorplans", "https://op.example/harken/units"]
+    # a form is named as the reason, even beside a site that failed
+    append("check", [{"id": "harken-2", "ok": False, "outcome": "rejected",
+                      "reason": "landed on a contact or tour form: https://op.example/harken/guest-card/"}])
+    (item,) = verify.own_site_queue(conn)
+    assert item["reason"] == "form" and len(item["urls"]) == 3
 
 
 FORMS = ('[[found]]\nid = "station-245"\nplace_key = "p_s"\nurl = "http://station245.prospectportal.com/su/6ks5m6"\n'

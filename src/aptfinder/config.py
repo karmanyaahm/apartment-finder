@@ -148,7 +148,7 @@ def load_sites(config_dir: Path | None = None) -> dict[str, dict[str, Any]]:
     discover-sites` (config/discovered_sites.toml, machine-appended). A discovered site is left out once a
     `[[check]]` rejected it (its latest check: the page was fetched and lacks the address, or is a contact/tour
     form; a page not fetched is retried), when it is or landed on a contact/tour form, or when a hand entry has
-    the same id, URL or place; it carries `verify_address`."""
+    the same id or URL, or the same place (unless you added it in Verify); it carries `verify_address`."""
     from .intake.discover import is_form
 
     d = config_dir or settings.CONFIG_DIR
@@ -164,7 +164,9 @@ def load_sites(config_dir: Path | None = None) -> dict[str, dict[str, Any]]:
         urls = {s["url"].rstrip("/") for s in out.values()}
         places = {s.get("place_key") for s in out.values()} - {None}
         for s in raw.get("found", []):
-            if s["id"] in failed or s["id"] in out or s["url"].rstrip("/") in urls or s.get("place_key") in places:
+            # a URL you added in Verify is kept beside the place's other sites (a place can have several)
+            same_place = s.get("place_key") in places and not str(s.get("found_by", "")).startswith("you")
+            if s["id"] in failed or s["id"] in out or s["url"].rstrip("/") in urls or same_place:
                 continue
             m = moved.get(s["id"])  # a redirect link that landed on the building's page: use where it landed
             if is_form(m["final_url"] if m else s["url"]):

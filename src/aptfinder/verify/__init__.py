@@ -6,6 +6,7 @@ import json
 import math
 import random
 import sqlite3
+from urllib.parse import urlsplit
 from collections import defaultdict
 from typing import Any
 
@@ -216,37 +217,135 @@ def text_conflict_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return out
 
 
-def no_website_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    """Named apartment communities with no website known yet: unusual for a real property (a house or a single
-    unit is not expected to have one), so worth a look. Each item says how far the search got. Answering
-    (a URL, or "none") is an annotation `website` on the place; the item then drops out, and
-    `promote-sites` turns a URL you typed into a site like any other lead."""
+OWN_SITE_REASONS = {  # reason -> label, in the order an item takes the first that applies
+    "no_website": "no website known",
+    "form": "a site is a contact, tour or lead form",
+    "address_failed": "a site's page does not show the building's address",
+    "no_plans": "own site read, but no floor plans or prices found",
+    "all_failed": "every site failed to load (blocked, timed out, empty or not returned)",
+    "not_checked": "website known, not checked yet",
+}
+
+
+def own_site_urls(conn: sqlite3.Connection, place_key: str, *, sites: dict | None = None, rec: dict | None = None,
+                  renders: dict | None = None) -> list[dict[str, Any]]:
+    """Every URL tried or known for a building's own site, each with its last outcome: `status` is form, rejected,
+    no_plans, priced, failed or pending, `label` says what happened and when. Several URLs per place are normal:
+    the hand list, sites found by search or named by listings, and any you added in Verify."""
+    from ..config import CHECK_RETRY, check_outcome, last_checks, load_sites
+    from ..intake.discover import _records, clean_url, is_form
+    from ..intake.render import TRANSIENT, describe, last_outcomes
+
+    sites = load_sites() if sites is None else sites
+    rec = _records() if rec is None else rec
+    renders = last_outcomes(conn) if renders is None else renders
+    checks = last_checks(rec)
+    scraped = {r["site"]: dict(r) for r in conn.execute(
+        "SELECT substr(source_id, 1, instr(source_id, ':') - 1) AS site, MAX(last_seen) AS seen, MIN(url) AS url, "
+        "SUM(active AND price IS NOT NULL AND kind IS NOT 'site_info') AS priced FROM listings "
+        "WHERE source = 'direct' AND place_key = ? GROUP BY 1", (place_key,))}
+    out: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    listing_hosts: dict[str, dict[str, Any]] = {}
+
+    def add(url: str, via: str, sid: str | None = None, check: dict | None = None) -> None:
+        key = (clean_url(url)[0] or url).rstrip("/").lower().replace("://www.", "://").replace("http://", "https://")
+        if key in seen_urls:
+            return
+        seen_urls.add(key)
+        e: dict[str, Any] = {"url": url, "via": via, "site": sid}
+        final = (check or {}).get("final_url")
+        rd, sc = renders.get(sid or ""), scraped.get(sid or "")
+        if is_form(url) or is_form(final) or str((check or {}).get("reason", "")).startswith("landed on a contact"):
+            e.update(status="form", label=f"contact/tour form{f' (landed on {final})' if final else ''}, dropped")
+        elif check and check_outcome(check) == "rejected":
+            e.update(status="rejected", label=f"address check failed on {str(check.get('at'))[5:10]}: "
+                                              f"{check.get('reason')}")
+        elif sc and sc["priced"]:
+            e.update(status="priced", label="priced offers")
+        elif rd and rd["outcome"] in TRANSIENT:
+            e.update(status="failed", label=f"render {describe(rd)}")
+        elif rd or sc:
+            e.update(status="no_plans", label=(f"render {describe(rd)}".replace("plans found", "plans found, none priced")
+                                               if rd else "")
+                     + (f"{'; ' if rd else ''}page scraped {str(sc['seen'])[5:10]}: photos/link only" if sc else ""))
+        elif check and check_outcome(check) in CHECK_RETRY:
+            e.update(status="failed", label=f"address check: page not fetched ({check_outcome(check)}"
+                                            f"{', HTTP %s' % check['http_status'] if check.get('http_status') else ''}) "
+                                            f"on {str(check.get('at'))[5:10]}, will retry")
+        elif via.startswith("you"):
+            e.update(status="pending", label="pending check (the next promote-sites fetches it, then render)")
+        elif sid:
+            e.update(status="pending", label="not fetched yet (the next promote-sites / render fetches it)")
+        else:
+            host = urlsplit(url).netloc.lower().removeprefix("www.")
+            if host in listing_hosts:  # listings' short links to one host: one row, counted
+                listing_hosts[host]["n"] += 1
+                listing_hosts[host]["label"] = f"named by {listing_hosts[host]['n']} listings' links to {host}, not fetched"
+                return
+            e.update(status="pending", label="named by a listing, not fetched", n=1)
+            listing_hosts[host] = e
+        out.append(e)
+
+    for sid, s in sites.items():
+        if s.get("place_key") == place_key or sid in scraped:
+            add(s["url"], "site list" if not s.get("verify_address") else s.get("found_by") or "found", sid,
+                checks.get(sid))
+    for sid in scraped:
+        if sid not in sites:
+            add(scraped[sid]["url"] or sid, "earlier scrape", sid)
+    for f in rec.get("found", []):
+        if f.get("place_key") == place_key:
+            add(f["url"], f.get("found_by") or "found", f["id"], checks.get(f["id"]))
+    for r in conn.execute("SELECT comment, ts FROM annotations WHERE entity_type = 'place' AND attribute = 'website' "
+                          "AND entity_key = ? AND comment LIKE 'http%' ORDER BY id", (place_key,)):
+        add(r["comment"], f"you, {r['ts'][5:10]}")
+    for r in conn.execute("SELECT DISTINCT json_extract(data, '$.extra.website') AS w, source FROM listings "
+                          "WHERE place_key = ? AND source <> 'direct' AND json_extract(data, '$.extra.website') "
+                          "IS NOT NULL", (place_key,)):
+        add(r["w"], f"{r['source']} listing")
+    return out
+
+
+def own_site_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Named buildings in active chunks whose own site gives no usable offer (no active priced `direct` row), each
+    with one reason (OWN_SITE_REASONS) and every URL tried with its last outcome. An item leaves the list by itself
+    once a site yields priced offers, or when you dismiss it (annotation `own_site`, newer than any URL you added)
+    or say it has no website (annotation `website` = none)."""
+    from ..areas import chunk_of, is_active
     from ..config import load_sites
     from ..intake.discover import _records
+    from ..intake.render import last_outcomes
 
-    have = {r[0] for r in conn.execute(
-        "SELECT DISTINCT place_key FROM listings WHERE place_key IS NOT NULL AND "
-        "(source = 'direct' OR json_extract(data, '$.extra.website') IS NOT NULL)")}
-    have |= {s.get("place_key") for s in load_sites().values()}
-    answered = {r[0] for r in conn.execute(
-        "SELECT DISTINCT entity_key FROM annotations WHERE entity_type = 'place' AND attribute = 'website'")}
-    rec = _records()
-    checks = {c["id"]: c for c in rec.get("check", [])}
-    status: dict[str, str] = {}
-    for m in rec.get("miss", []):
-        status[m.get("place_key")] = f"searched ({m.get('model') or 'model?'}): no site. {m.get('note') or ''}".strip()
-    for f in rec.get("found", []):
-        c = checks.get(f["id"])
-        why = c.get("reason") if c else "not fetched yet"
-        status[f.get("place_key")] = f"found {f['url']} ({f.get('found_by')}), but {why}"
+    priced = {r[0] for r in conn.execute(
+        "SELECT DISTINCT place_key FROM listings WHERE source = 'direct' AND active = 1 AND price IS NOT NULL "
+        "AND kind IS NOT 'site_info' AND place_key IS NOT NULL")}
+    last_ann: dict[tuple[str, str], dict[str, Any]] = {}
+    for r in conn.execute("SELECT entity_key, attribute, comment, id FROM annotations WHERE entity_type = 'place' "
+                          "AND attribute IN ('website', 'own_site') ORDER BY id"):
+        last_ann[(r["entity_key"], r["attribute"])] = dict(r)
+    sites, rec, renders = load_sites(), _records(), last_outcomes(conn)
     out = []
-    for r in conn.execute("SELECT place_key, property_name, address, n_listings FROM places "
+    for r in conn.execute("SELECT place_key, property_name, address, lat, lon, n_listings FROM places "
                           "WHERE property_name IS NOT NULL AND address IS NOT NULL ORDER BY n_listings DESC"):
-        name = r["property_name"].strip()
-        if r["place_key"] in have or r["place_key"] in answered or not is_named_building(name, r["address"]):
-            continue  # a site known, already answered, or an address used as a name (a house or a unit)
-        out.append({"kind": "no_website", "place_key": r["place_key"], "name": name, "address": r["address"],
-                    "listings": r["n_listings"], "status": status.get(r["place_key"], "not searched yet")})
+        pk, name = r["place_key"], r["property_name"].strip()
+        if pk in priced or not is_named_building(name, r["address"]) or not is_active(chunk_of(r["lat"], r["lon"])):
+            continue
+        web, dis = last_ann.get((pk, "website")), last_ann.get((pk, "own_site"))
+        if dis and (not web or dis["id"] > web["id"]):
+            continue  # you dismissed it, and added no URL since
+        urls = own_site_urls(conn, pk, sites=sites, rec=rec, renders=renders)
+        st = {u["status"] for u in urls}
+        if not urls:
+            if web and (web["comment"] or "").strip().lower() == "none":
+                continue  # you said: no website
+            reason = "no_website"
+        else:
+            reason = next(k for k, s in (("form", "form"), ("address_failed", "rejected"), ("no_plans", "no_plans"),
+                                         ("all_failed", "failed"), ("not_checked", "pending")) if s in st)
+        out.append({"kind": "own_site", "place_key": pk, "name": name, "address": r["address"],
+                    "listings": r["n_listings"], "reason": reason, "reason_label": OWN_SITE_REASONS[reason],
+                    "urls": urls})
     return out
 
 

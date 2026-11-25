@@ -4,7 +4,7 @@
 
 const S = {
   meta: null, places: [], points: {}, goal: "all", base: "sat", markers: {}, layers: {},
-  selected: null, verifySkip: 0, verifySeed: 0, verifyMode: "conflict", conflictSkip: 0,
+  selected: null, verifySkip: 0, verifySeed: 0, verifyMode: "conflict", conflictSkip: 0, ownSkip: 0,
 };
 const $ = (sel, el = document) => el.querySelector(sel);
 const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
@@ -485,7 +485,7 @@ async function renderConflicts() {
   body.innerHTML = '<p class="muted">Loading…</p>';
   const d = await api(`api/verify/batch?kind=conflict&skip=${S.conflictSkip}&n=${CONFLICT_PAGE}`);
   if (!d.items.length && S.conflictSkip > 0 && d.total > 0) { S.conflictSkip = Math.max(0, d.total - CONFLICT_PAGE); return renderConflicts(); }
-  if (!d.items.length) { S.verifyMode = "rest"; S.verifySkip = 0; return renderVerify(); }
+  if (!d.items.length) { S.verifyMode = "own"; S.ownSkip = 0; return renderVerify(); }
   const from = S.conflictSkip + 1, to = S.conflictSkip + d.items.length;
   const more = to < d.total;
   body.innerHTML = `<h2>${d.total} conflicts: ${d.actionable} to check, ${d.pending} waiting for an own-site render</h2>
@@ -494,7 +494,7 @@ async function renderConflicts() {
     ${d.items.map(conflictBlock).join("")}
     <p style="margin-top:14px"><button id="v-prev" ${S.conflictSkip ? "" : "disabled"}>Previous ${CONFLICT_PAGE}</button>
       ${more ? `<button id="v-more" class="accent">Next ${CONFLICT_PAGE}</button>` : ""}
-      <button id="v-rest" class="${more ? "" : "accent"}">${more ? "Skip to" : "Continue:"} buildings without a website and the sample</button></p>`;
+      <button id="v-rest" class="${more ? "" : "accent"}">${more ? "Skip to" : "Continue:"} buildings whose own site gave nothing usable, then the sample</button></p>`;
   $$(".vbtns", body).forEach(wireVbtns);
   $$("[data-goto]", body).forEach((a) => a.addEventListener("click", (ev) => { ev.preventDefault(); gotoPlace(a.dataset.goto); }));
   $("#v-prev").addEventListener("click", () => { S.conflictSkip = Math.max(0, S.conflictSkip - CONFLICT_PAGE); renderConflicts(); loadStatus(); });
@@ -503,42 +503,19 @@ async function renderConflicts() {
     const done = $$(".vconf", body).filter((b) => $$(".vbtns", b).every((v) => $("button.on", v))).length;
     S.conflictSkip += d.items.length - done; renderConflicts(); loadStatus();
   });
-  $("#v-rest").addEventListener("click", () => { S.verifyMode = "rest"; S.verifySkip = 0; renderVerify(); loadStatus(); });
+  $("#v-rest").addEventListener("click", () => { S.verifyMode = "own"; S.ownSkip = 0; renderVerify(); loadStatus(); });
 }
 
 async function renderVerify() {
   if (S.verifyMode === "conflict") return renderConflicts();
+  if (S.verifyMode === "own") return renderOwnSites();
   const body = $("#verify-body");
   body.innerHTML = '<p class="muted">Loading…</p>';
   const d = await api(`api/verify/next?seed=${S.verifySeed}&skip=${S.verifySkip}&conflicts=false`);
   if (d.done) { body.innerHTML = "<h2>Queue empty</h2><p>Nothing left to check. 🎉</p>"; return; }
   const it = d.item;
-  const head = `<p class="muted small">${d.remaining} items in queue (buildings without a website, then an even sample across sources) · item ${S.verifySkip + 1} · <a href="#" id="v-back">back to the conflicts</a></p>`;
+  const head = `<p class="muted small">${d.remaining} items in queue (an even sample across sources) · item ${S.verifySkip + 1} · <a href="#" id="v-back">back to the conflicts</a></p>`;
   const nav = `<p style="margin-top:14px"><button id="v-skip">Skip</button> <button id="v-next" class="accent">Next</button></p>`;
-  if (it.kind === "no_website") {
-    // a named apartment community with no website known: unusual, so you look it up
-    const gs = `https://www.google.com/search?q=${encodeURIComponent(`${it.name} ${it.address}`)}`;
-    body.innerHTML = `${head}<h2>No website found for ${esc(it.name)}</h2>
-      <p>${esc(it.address)} · ${it.listings} listing(s) · <a href="#" data-goto="${esc(it.place_key)}">open the building</a></p>
-      <p class="small">Search so far: ${esc(it.status)}</p>
-      <p><a href="${esc(gs)}" target="_blank" rel="noopener noreferrer">Search Google ↗</a></p>
-      <p><input id="nw-url" type="url" placeholder="https://… the community's own site" style="width:min(100%,420px)">
-         <button id="nw-save" class="accent">Save website</button> <button id="nw-none">No website</button></p>${nav}`;
-    const save = async (comment) => {
-      try {
-        await post("api/annotations", { entity_key: it.place_key, attribute: "website", comment });
-        toast(comment === "none" ? "Marked: no website" : "Website saved; promote-sites will check and scrape it");
-        renderVerify(); loadStatus();
-      } catch (e) { toast("Not saved: " + e.message, 5000); }
-    };
-    $("#nw-save").addEventListener("click", () => { const u = $("#nw-url").value.trim(); if (u) save(u); });
-    $("#nw-none").addEventListener("click", () => save("none"));
-    $("[data-goto]", body).addEventListener("click", (e) => { e.preventDefault(); gotoPlace(it.place_key); });
-    $("#v-back").addEventListener("click", backToConflicts);
-    $("#v-skip").addEventListener("click", () => { S.verifySkip++; renderVerify(); });
-    $("#v-next").addEventListener("click", () => { renderVerify(); loadStatus(); });
-    return;
-  }
   if (it.kind === "trip") {
     const t = d.trip;
     const tm = { walk: "walking", bike: "bicycling", transit: "transit", drive: "driving", bike_train_bike: "transit", bike_bus_bike: "transit" }[t.mode];
@@ -566,6 +543,55 @@ async function renderVerify() {
   $("#v-back").addEventListener("click", backToConflicts);
   $("#v-skip").addEventListener("click", () => { S.verifySkip++; renderVerify(); });
   $("#v-next").addEventListener("click", () => { renderVerify(); loadStatus(); });
+}
+
+/* buildings whose own site gave no usable offer: one list, a reason and every URL tried; add a URL or dismiss */
+const OWN_PAGE = 20;
+const URL_STATUS = { form: "fail", rejected: "fail", failed: "fail", no_plans: "needs_check", pending: "", priced: "pass" };
+async function renderOwnSites() {
+  const body = $("#verify-body");
+  body.innerHTML = '<p class="muted">Loading…</p>';
+  const d = await api(`api/verify/own_sites?skip=${S.ownSkip}&n=${OWN_PAGE}`);
+  if (!d.items.length && S.ownSkip > 0 && d.total > 0) { S.ownSkip = Math.max(0, d.total - OWN_PAGE); return renderOwnSites(); }
+  const counts = Object.entries(d.by_reason).map(([k, n]) => `${n} ${esc(d.labels[k])}`).join(" · ");
+  const block = (it) => `<div class="vconf" data-pk="${esc(it.place_key)}">
+    <div class="vconf-head"><a href="#" data-goto="${esc(it.place_key)}">${esc(it.name)}</a> <span class="muted small">${esc(it.address)} · ${it.listings} listing(s)</span>
+      <span class="chip">${esc(it.reason_label)}</span></div>
+    ${it.urls.length ? `<div class="scroll-x"><table class="vconf-t"><tr><th>URL</th><th>from</th><th>last outcome</th></tr>
+      ${it.urls.map((u) => `<tr><td style="word-break:break-all">${u.url.startsWith("http") ? `<a href="${esc(u.url)}" target="_blank" rel="noopener noreferrer">${esc(u.url)}</a>` : esc(u.url)}</td>
+        <td class="small">${esc(u.via)}</td><td class="small reason ${URL_STATUS[u.status] || ""}" style="white-space:normal;min-width:240px">${esc(u.label)}</td></tr>`).join("")}</table></div>`
+      : `<p class="small"><a href="https://www.google.com/search?q=${encodeURIComponent(`${it.name} ${it.address}`)}" target="_blank" rel="noopener noreferrer">Search Google ↗</a></p>`}
+    <p class="small"><input class="own-url" type="url" placeholder="https://… another page with this building's plans" style="width:min(100%,380px)">
+      <button class="own-add">Add URL</button>
+      <button class="own-dismiss" title="Leave it: no floor plans online is fine">Dismiss: no plans online</button>
+      ${it.reason === "no_website" ? '<button class="own-none">No website</button>' : ""}</p></div>`;
+  const more = S.ownSkip + d.items.length < d.total;
+  body.innerHTML = `<h2>${d.total} buildings whose own site gave nothing usable</h2>
+    <p class="small">${counts}. Each leaves the list by itself once one of its sites gives priced offers. <b>Add URL</b> adds one more source for the building (it never replaces the others); the next <code>promote-sites</code> checks its address and <code>render</code> reads it.</p>
+    <p class="muted small"><a href="#" id="v-back">back to the conflicts</a></p>
+    ${d.items.map(block).join("") || "<p>Nothing here.</p>"}
+    <p style="margin-top:14px"><button id="o-prev" ${S.ownSkip ? "" : "disabled"}>Previous ${OWN_PAGE}</button>
+      ${more ? `<button id="o-more" class="accent">Next ${OWN_PAGE}</button>` : ""}
+      <button id="o-rest" class="${more ? "" : "accent"}">${more ? "Skip to" : "Continue:"} the sample</button></p>`;
+  const note = async (pk, attribute, comment, msg) => {
+    try { await post("api/annotations", { entity_key: pk, attribute, comment }); toast(msg); renderOwnSites(); loadStatus(); }
+    catch (e) { toast("Not saved: " + e.message, 5000); }
+  };
+  $$(".vconf", body).forEach((box) => {
+    const pk = box.dataset.pk;
+    $(".own-add", box).addEventListener("click", () => {
+      const u = $(".own-url", box).value.trim();
+      if (!/^https?:\/\//i.test(u)) { toast("Type a URL starting with http"); return; }
+      note(pk, "website", u, "URL added: pending check (promote-sites fetches it)");
+    });
+    $(".own-dismiss", box).addEventListener("click", () => note(pk, "own_site", "dismissed: no plans online", "Dismissed"));
+    $(".own-none", box)?.addEventListener("click", () => note(pk, "website", "none", "Marked: no website"));
+  });
+  $$("[data-goto]", body).forEach((a) => a.addEventListener("click", (ev) => { ev.preventDefault(); gotoPlace(a.dataset.goto); }));
+  $("#v-back").addEventListener("click", backToConflicts);
+  $("#o-prev").addEventListener("click", () => { S.ownSkip = Math.max(0, S.ownSkip - OWN_PAGE); renderOwnSites(); });
+  $("#o-more")?.addEventListener("click", () => { S.ownSkip += OWN_PAGE; renderOwnSites(); });
+  $("#o-rest").addEventListener("click", () => { S.verifyMode = "rest"; S.verifySkip = 0; renderVerify(); });
 }
 
 function backToConflicts(e) { e.preventDefault(); S.verifyMode = "conflict"; S.conflictSkip = 0; renderVerify(); }
@@ -706,7 +732,7 @@ async function loadStatus() {
   if (!s.accuracy.length) parts.push(`<span>no hand checks yet</span>`);
   $("#status-strip").innerHTML = parts.join("");
   const pend = s.queues.conflict_pending ? ` + ${s.queues.conflict_pending} pending render` : "";
-  $("#queue-count").textContent = `(${s.queues.conflict} conflicts${pend} · ${s.queues.no_website ?? 0} no website · ${s.queues.sample})`;
+  $("#queue-count").textContent = `(${s.queues.conflict} conflicts${pend} · ${s.queues.own_site ?? 0} own site · ${s.queues.sample})`;
 }
 
 /* ---------------------------------------------------------------- boot */

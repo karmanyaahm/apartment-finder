@@ -74,7 +74,7 @@ def test_website_states_and_no_website_count(db, monkeypatch):
     assert pipeline.website_status(conn, b) == {b: ws[b]}
     d = pipeline.overview(conn)
     nv = next(s for s in d["stages"] if s["id"] == "verify")
-    assert nv["counts"]["no_website"] == len(verify.no_website_queue(conn))
+    assert nv["counts"]["own_site"] == len(verify.own_site_queue(conn))
 
 
 def test_sites_show_the_last_render_outcome_failure_or_not(db):

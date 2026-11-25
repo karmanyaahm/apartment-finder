@@ -247,7 +247,8 @@ def promote(conn, chunks: list[str], *, limit: int, dry_run: bool = False, fetch
             retry_failed: bool = False) -> dict[str, Any]:
     """Websites that listings already name (Apartments.com's website field, URLs read from Craigslist text by
     `extract`) become `[[found]]` sites without a search, then go through the same Apify fetch and address check
-    as searched ones. One proposal per place: the URL most of its listings give. Found sites whose page was not
+    as searched ones. One proposal per place: the URL most of its listings give; every URL you added in Verify
+    is a proposal of its own, beside any site the place already has. Found sites whose page was not
     fetched last time (blocked, timed out) are fetched again with them; `retry_failed`: only those."""
     from collections import Counter
 
@@ -271,22 +272,29 @@ def promote(conn, chunks: list[str], *, limit: int, dry_run: bool = False, fetch
             continue
         by_place.setdefault(r["place_key"], Counter())[(r["website"], r["source"])] += 1
         info[r["place_key"]] = r
-    # a website you typed in Verify (annotation `website` on the place) outranks any listing's link
+    # every website you added in Verify (annotation `website` on the place) is a site of its own, even when the
+    # place already has one: a place can have several sources; only a URL already found or listed is skipped
+    def norm(u: str) -> str:
+        return (clean_url(u, keep_query=True)[0] or u).rstrip("/").lower()
+
+    known = {norm(f["url"]) for f in rec.get("found", [])} | {norm(s["url"]) for s in load_sites().values()}
+    yours = []
     for r in conn.execute(
             "SELECT a.entity_key AS place_key, a.comment AS website, p.property_name, p.address, p.lat, p.lon "
             "FROM annotations a JOIN places p ON p.place_key = a.entity_key "
             "WHERE a.entity_type = 'place' AND a.attribute = 'website' AND a.comment LIKE 'http%' "
             "AND p.address IS NOT NULL ORDER BY a.id"):
-        if r["place_key"] in have or chunk_of(r["lat"], r["lon"]) not in chunks:
+        url = clean_url(r["website"], keep_query=True)[0] or r["website"]
+        if norm(url) in known or chunk_of(r["lat"], r["lon"]) not in chunks:
             continue
-        by_place[r["place_key"]] = Counter({(clean_url(r["website"], keep_query=True)[0] or r["website"], "you"): 10**6})
-        info[r["place_key"]] = r
+        known.add(norm(url))
+        by_place.pop(r["place_key"], None)  # your URL outranks a listing's link for the same place
+        yours.append((r["place_key"], url, r))
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     taken = set(load_sites()) | {r["id"] for r in rec.get("found", [])}
     rows = []
-    for pk, c in list(by_place.items())[:limit]:
-        (url, source), n = c.most_common(1)[0]
-        r = info[pk]
+    picks = [(pk, *c.most_common(1)[0], info[pk]) for pk, c in by_place.items()]
+    for pk, (url, source), n, r in ([(pk, (url, "you"), 1, r) for pk, url, r in yours] + picks)[:limit]:
         name = html.unescape(r["property_name"] or r["address"]).strip()
         sid = _slug(name, taken)
         taken.add(sid)
