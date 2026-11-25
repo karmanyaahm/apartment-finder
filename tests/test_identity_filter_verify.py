@@ -301,6 +301,9 @@ def test_third_party_stay_is_its_own_place_with_the_buildings_trips():
     t = _Trips(dict)
     t[lease[1]][("x", "bike")] = {"minutes": 5}
     assert t.get(stay[1]) == {("x", "bike"): {"minutes": 5}} and t.get("p_other") is None
+    t[stay[1]][("x", "bike")] = {"minutes": None}  # an old estimate of the stay's own does not hide the building's
+    t[stay[1]][("y", "walk")] = {"minutes": 9}  # ...and still fills a (point, mode) the building lacks
+    assert t.get(stay[1]) == {("x", "bike"): {"minutes": 5}, ("y", "walk"): {"minutes": 9}}
 
 
 def test_unitless_ads_in_a_building_are_not_one_unit():

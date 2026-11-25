@@ -19,13 +19,17 @@ PROVIDER_PREF = {"google": 0, "knn": 1, "estimate": 9}
 
 class _Trips(defaultdict):
     """A third-party stay place (`<building>~<operator>`) is at its building's address: it reads the building's
-    trips instead of having its own routed (identity.stay_key)."""
+    trips instead of having its own routed (identity.stay_key). Where the stay also has old trips of its own
+    (estimates appended before the stay rule), the building's trip wins for each (point, mode) it has, so the
+    stay's estimate never hides the building's Google or KNN time; the stay's own fill only what the building lacks.
+    """
 
     def get(self, key, default=None):
+        base = key.split("~", 1)[0] if key and "~" in key else None
+        if base in self:
+            return {**self[key], **self[base]} if key in self else self[base]
         if key in self:
             return self[key]
-        if key and "~" in key and key.split("~", 1)[0] in self:
-            return self[key.split("~", 1)[0]]
         return default
 
 
