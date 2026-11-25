@@ -13,9 +13,10 @@ from . import run
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="aptf-identity")
     ap.add_argument("--db", default=str(settings.DB_PATH))
-    ap.add_argument("cmd", nargs="?", default="run", choices=["run", "geocode", "duplicates"],
+    ap.add_argument("cmd", nargs="?", default="run", choices=["run", "geocode", "duplicates", "ranges"],
                     help="run: link listings (default); geocode: read new address strings with Google, then run; "
-                         "duplicates: list suspected duplicate buildings")
+                         "duplicates: list suspected duplicate buildings; ranges: dry run of the address-range merge "
+                         "(what it would merge, and near misses it leaves alone; writes nothing)")
     ap.add_argument("--limit", type=int, default=5000)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
@@ -25,6 +26,11 @@ def main(argv: list[str] | None = None) -> None:
         from .addresses import suspected_duplicates
 
         print(json.dumps(suspected_duplicates(conn), indent=1))
+        return
+    if args.cmd == "ranges":
+        from . import range_report
+
+        print(json.dumps(range_report(conn), indent=1))
         return
     if args.cmd == "geocode":
         from .addresses import geocode

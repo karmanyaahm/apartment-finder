@@ -112,17 +112,36 @@ def _near_address(decisions: dict, rows: list) -> None:
                               f"no address; {best_m:.0f} m from address place")
 
 
-def run(conn: sqlite3.Connection) -> dict[str, int]:
+def _decisions(conn: sqlite3.Connection) -> tuple[list, dict]:
+    """(rows, rule decisions) over every listing: the address and coordinate rules, then coordinate-only listings
+    re-pointed at a nearby building. Loads the geocode cache."""
     global _GEOCODES
-    from . import same_site
     from .addresses import load_geocodes
 
     _GEOCODES = load_geocodes()
     rows = conn.execute(
         "SELECT source, source_id, address, unit, city, floor_plan, property_name, kind, lat, lon, beds, price, term, "
-        "operator, url, json_extract(data, '$.extra.website') AS website "
+        "operator, url, json_extract(data, '$.extra.website') AS website, json_extract(data, '$.zip') AS zip "
         "FROM listings"
     ).fetchall()
+    decisions = {(r["source"], r["source_id"]): decide(r) for r in rows}
+    _near_address(decisions, rows)
+    return rows, decisions
+
+
+def range_report(conn: sqlite3.Connection) -> dict:
+    """Dry run of the address-range merge (identity/ranges.py) on the current data: what it would merge, and the
+    places inside a range that it leaves alone (near misses). Writes nothing."""
+    from . import ranges
+
+    rows, decisions = _decisions(conn)
+    return ranges.candidates(conn, decisions, rows, _GEOCODES)
+
+
+def run(conn: sqlite3.Connection) -> dict[str, int]:
+    from . import ranges, same_site
+
+    rows, decisions = _decisions(conn)
     last_rule, prev_kept = {}, set()
     for r in conn.execute(
         "SELECT * FROM (SELECT l.*, ROW_NUMBER() OVER (PARTITION BY source, source_id ORDER BY id DESC)"
@@ -131,8 +150,11 @@ def run(conn: sqlite3.Connection) -> dict[str, int]:
         if r["author"] == same_site.AUTHOR:
             prev_kept.add(r["place_key"])
     counts = {"listings": len(rows), "linked": 0, "unchanged": 0, "unidentified": 0}
-    decisions = {(r["source"], r["source_id"]): decide(r) for r in rows}
-    _near_address(decisions, rows)
+    # a building written as a house-number range absorbs the places inside it sharing its name or operator
+    rm = ranges.candidates(conn, decisions, rows, _GEOCODES)["merges"]
+    if rm:
+        counts["range_merged_places"] = len(rm)
+        counts["range_merged_listings"] = ranges.apply(decisions, rm)
     # obvious duplicate buildings (the same building-specific own website, under 100 m apart) join into one place
     cand = same_site.candidates(conn, decisions, rows, _GEOCODES)
     merged = same_site.merge_map(cand["pairs"], cand["n_listings"], prev_kept)
