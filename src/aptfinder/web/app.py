@@ -184,6 +184,15 @@ class CheckIn(BaseModel):
     note: str | None = None
 
 
+class ComputeIn(BaseModel):
+    point: str  # a point id (`commute_targets:Meta HQ`) or `set:<name>`
+    mode: str
+    provider: str = "estimate"
+    scope: str = "list"  # "list": place_keys (the places the list shows); "zone": every place in a walk zone
+    place_keys: list[str] | None = None
+    confirm_calls: int | None = None  # Google: the dry run's call count, used as this run's cap
+
+
 class LinkIn(BaseModel):
     source: str
     source_id: str
@@ -634,6 +643,110 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         except RuntimeError as e:
             raise HTTPException(502, str(e))
         return {"new_trips": n, "provider": provider, "api_calls": getattr(source, "calls", 0)}
+
+    # ------------------------------------------------------------------ compute one attribute (Pipeline panel)
+    # One (point or set, mode) for a chosen list of places: a dry run first (places, uncached paid calls, cost
+    # against the monthly caps), then a run in a background thread. A Google run must carry the dry run's call
+    # count, which becomes its --max-calls, so it never spends more than the dry run showed.
+    job: dict[str, Any] = {"state": "idle"}
+
+    def _compute_places(body: ComputeIn) -> list[str]:
+        located = {r["place_key"]: (r["lat"], r["lon"]) for r in all_places().values() if r["lat"] is not None}
+        if body.scope == "zone":
+            keys = [pk for pk, (la, lo) in located.items() if in_walk_zone(la, lo)]
+        else:
+            keys = body.place_keys or []
+        # a stay place (`<building>~<operator>`) reads its building's trips: route the building when it is a place
+        out = {(pk.split("~", 1)[0] if pk.split("~", 1)[0] in located else pk) for pk in keys}
+        return sorted(pk for pk in out if pk in located)
+
+    def _check_spec(body: ComputeIn) -> tuple[str, str]:
+        if body.provider not in ("estimate", "google"):
+            raise HTTPException(400, "provider must be estimate or google")
+        if body.mode not in MODES:
+            raise HTTPException(400, f"unknown mode {body.mode!r}")
+        sets = load_point_sets()
+        if body.point.startswith("set:"):
+            if body.point[4:] not in sets:
+                raise HTTPException(400, f"no point set {body.point[4:]!r}")
+        elif not any(p.id == body.point for p in load_points().get(body.point.split(":", 1)[0], [])):
+            raise HTTPException(400, f"no point {body.point!r}")
+        return body.point, body.mode
+
+    @app.post("/api/compute/dry_run")
+    def compute_dry_run(body: ComputeIn) -> dict[str, Any]:
+        from ..trips import dry_run, google_usage
+
+        only = _check_spec(body)
+        keys = _compute_places(body)
+        if not keys:
+            raise HTTPException(400, "no located places in that scope")
+        if body.provider == "estimate":  # free: no calls to count
+            with lock:
+                use = google_usage(conn)
+            return {"places": len(keys), "would_call": 0, "est_cost_usd": 0.0, "over_caps": [],
+                    "google_usage_now": use, "provider": "estimate"}
+        res = dry_run(db_path, "google", keys, on_demand=True, only=only)
+        cfg = load_point_sets().get(only[0][4:] if only[0].startswith("set:") else only[0].split(":", 1)[0])
+        if cfg is not None and not cfg.paid:
+            res["note"] = "point_sets.toml has paid = false for this set: Google is never used for it"
+        return {**res, "provider": "google"}
+
+    @app.post("/api/compute/run")
+    def compute_run(body: ComputeIn) -> dict[str, Any]:
+        from ..store import finish_run, start_run
+        from ..trips import build_commute, compute_all, make_source
+
+        only = _check_spec(body)
+        keys = _compute_places(body)
+        if not keys:
+            raise HTTPException(400, "no located places in that scope")
+        if body.provider == "google":
+            if not body.confirm_calls or body.confirm_calls < 1:
+                raise HTTPException(400, "a Google run needs the dry run's call count (confirm_calls)")
+            if not settings.secret("GOOGLE_MAPS_API_KEY"):
+                raise HTTPException(400, "GOOGLE_MAPS_API_KEY is not set")
+        with lock:
+            if job["state"] == "running":
+                raise HTTPException(409, "a computation is already running")
+            job.clear()
+            job.update(state="running", spec={"point": body.point, "mode": body.mode, "provider": body.provider},
+                       places=len(keys), done=0, new_trips=0, started=time.time())
+
+        def work() -> None:
+            wconn = connect(db_path)  # its own connection: the dashboard stays responsive while this runs
+            run = None
+            try:
+                source = make_source(body.provider, max_calls=body.confirm_calls or 0, meter_db=db_path)
+                commute = build_commute(db_path, source)
+                run = start_run(wconn, "commute", body.provider, {"places": len(keys), "only": list(only),
+                                                                   "from": "dashboard"})
+
+                def progress(done: int, total: int, new: int) -> None:
+                    job.update(done=done, new_trips=new)
+
+                res = compute_all(wconn, commute, keys, on_demand=True, only=only, progress=progress)
+                calls = getattr(source, "calls", 0)
+                finish_run(wconn, run, "error" if res["error"] else "ok", {**res, "api_calls": calls},
+                           est_cost=round(calls * 0.005, 3) if body.provider == "google" else 0.0,
+                           error=res["error"])
+                job.update(state="error" if res["error"] else "done", result={**res, "api_calls": calls})
+            except BaseException as e:  # SystemExit from make_source included
+                if run is not None:
+                    finish_run(wconn, run, "error", {}, error=str(e))
+                job.update(state="error", result={"error": str(e)})
+            finally:
+                job["finished"] = time.time()
+                wconn.close()
+                with lock:
+                    memo.clear()  # the user's own run: show its trips now, not after SCRAPE_REFRESH_S
+
+        threading.Thread(target=work, daemon=True).start()
+        return {"started": True, "places": len(keys)}
+
+    @app.get("/api/compute/status")
+    def compute_status() -> dict[str, Any]:
+        return dict(job)
 
     # ------------------------------------------------------------------ static
     settings.MEDIA_DIR.mkdir(parents=True, exist_ok=True)

@@ -834,6 +834,7 @@ async function openPipeline() {
     <p class="muted small">Computed now from the logs (${esc(d.now.slice(0, 16).replace("T", " "))} UTC). Website, own-site and Google counts are over places inside a station walk zone. Stale = older than ${d.stale_days} days.
       ${["done", "partial", "stale", "todo", "blocked"].map((s) => stChip(s)).join(" ")}</p>
     ${stuck}${statusBlock(S.status)}
+    <h3>Compute an attribute</h3>${computeBlock()}
     <h3>Search areas</h3><div id="areas-map" class="areas-map"></div><div id="areas-legend" class="small"></div>
     <h3>Stages</h3>${stages}
     <h3>Intake coverage (aggregators)</h3>${matrix}
@@ -844,7 +845,81 @@ async function openPipeline() {
       <div class="scroll-x"><table><tr><th>station</th><th>target</th><th>routed</th></tr>
       ${anchors.map((a) => `<tr><td>${esc(a.station)}</td><td>${esc(a.target)}</td><td>${a.routed ? "Google" : '<span class="muted">estimate</span>'}</td></tr>`).join("")}</table></div></details>
   </div>`;
+  wireCompute();
   drawAreasMap().catch((e) => { $("#areas-legend").textContent = `Area map failed: ${e.message}`; });
+}
+
+/* ---------------------------------------------------------------- compute one attribute (Pipeline panel) */
+// Pick a point or set, a mode, a provider and which places; a dry run shows the places, the uncached Google calls
+// and their cost against the monthly caps; only then does Run appear. Google never starts without that click, and
+// the run is capped at the dry run's call count.
+function computeBlock() {
+  const pOpts = limitOptions().map(([v, label]) => `<option value="${esc(v)}">${esc(label)}</option>`).join("");
+  const mOpts = S.meta.modes.map((m) => `<option value="${esc(m)}">${esc(MODE_LABEL[m])}</option>`).join("");
+  const n = filtered().length;
+  return `<div class="compute small" id="compute">
+    <select id="c-point">${pOpts}</select> <select id="c-mode">${mOpts}</select>
+    <select id="c-provider"><option value="estimate">estimate (free)</option><option value="google">Google (paid)</option></select>
+    <label><input type="radio" name="c-scope" value="list" checked> the ${n} places the list shows</label>
+    <label><input type="radio" name="c-scope" value="zone"> every place in a walk zone</label>
+    <button id="c-dry">Dry run</button> <button id="c-run" class="accent hidden">Run</button>
+    <div id="c-out" class="muted"></div></div>`;
+}
+function computeSpec() {
+  const scope = $("input[name=c-scope]:checked").value;
+  return { point: $("#c-point").value, mode: $("#c-mode").value, provider: $("#c-provider").value, scope,
+    place_keys: scope === "list" ? filtered().map((p) => p.place_key) : null };
+}
+function wireCompute() {
+  let dry = null;
+  const out = $("#c-out");
+  const reset = () => { dry = null; $("#c-run").classList.add("hidden"); };
+  ["#c-point", "#c-mode", "#c-provider", ...$$("input[name=c-scope]")].forEach((el) =>
+    (typeof el === "string" ? $(el) : el).addEventListener("input", () => { reset(); out.textContent = ""; }));
+  $("#c-dry").addEventListener("click", async () => {
+    reset();
+    const spec = computeSpec();
+    out.textContent = spec.provider === "google" ? "Counting uncached Google calls (no calls are made)…" : "Counting…";
+    try {
+      const d = await post("api/compute/dry_run", spec);
+      const u = d.google_usage_now;
+      out.innerHTML = d.provider === "estimate"
+        ? `${d.places} places · straight-line estimates, free.`
+        : `${d.places} places · <b>${d.would_call}</b> uncached Google calls (${esc(Object.entries(d.by_mode).map(([m, k]) => `${m} ${k}`).join(", ") || "none")})
+           · est. <b>$${d.est_cost_usd.toFixed(2)}</b> · this month ${u.calls}/${u.cap} calls used
+           ${d.over_caps.length ? `<br><span class="reason fail">Would pass ${esc(d.over_caps.join("; "))}: the run stops at the cap.</span>` : ""}
+           ${d.note ? `<br><span class="reason fail">${esc(d.note)}</span>` : ""}`;
+      if (d.provider === "estimate" || d.would_call > 0) {
+        dry = { spec, calls: d.would_call };
+        $("#c-run").textContent = d.provider === "google" ? `Run: up to ${d.would_call} Google calls` : "Run";
+        $("#c-run").classList.remove("hidden");
+      } else out.innerHTML += "<br>Nothing to route: every pair is cached.";
+    } catch (e) { out.textContent = "Dry run failed: " + e.message; }
+  });
+  $("#c-run").addEventListener("click", async () => {
+    if (!dry) return;
+    $("#c-run").classList.add("hidden");
+    try {
+      await post("api/compute/run", { ...dry.spec, confirm_calls: dry.spec.provider === "google" ? dry.calls : null });
+      dry = null;
+      pollCompute(out);
+    } catch (e) { out.textContent = "Not started: " + e.message; }
+  });
+  api("api/compute/status").then((s) => { if (s.state === "running") pollCompute(out); }).catch(() => {});
+}
+async function pollCompute(out) {
+  const s = await api("api/compute/status").catch((e) => ({ state: "error", result: { error: e.message } }));
+  const what = s.spec ? `${s.spec.mode} to ${s.spec.point} (${s.spec.provider})` : "";
+  if (s.state === "running") {
+    out.textContent = `Running ${what}: ${s.done}/${s.places} places, ${s.new_trips} new trips…`;
+    setTimeout(() => pollCompute(out), 1500);
+    return;
+  }
+  const r = s.result || {};
+  out.innerHTML = s.state === "done"
+    ? `Done ${esc(what)}: ${r.places_done}/${r.places} places, ${r.new_trips} new trips${r.api_calls ? `, ${r.api_calls} Google calls` : ""}.`
+    : `<span class="reason fail">Stopped ${esc(what)}: ${esc(r.error || "unknown error")}${r.new_trips ? ` (${r.new_trips} new trips kept)` : ""}</span>`;
+  await loadPlaces().catch(() => {});
 }
 
 /* ---------------------------------------------------------------- search areas map (Pipeline panel) */

@@ -154,3 +154,7 @@ td.nowrap { white-space: nowrap; }
 .commute-limits .limit { max-width: 100%; }
 .commute-limits .limit select { width: auto; max-width: 10.5em; min-width: 0; }
 .commute-limits .limit select[data-k=mode] { max-width: 7em; }
+
+/* Pipeline panel: compute one attribute */
+.compute { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+.compute #c-out { flex: 1 1 100%; }

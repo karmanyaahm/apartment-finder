@@ -120,13 +120,16 @@ def latest_trip(conn: sqlite3.Connection, place_key: str, point_id: str, mode: s
 
 
 def compute_for_place(conn: sqlite3.Connection, commute: Commute, place: sqlite3.Row | dict,
-                      on_demand: bool = False, sets: list[str] | None = None) -> int:
+                      on_demand: bool = False, sets: list[str] | None = None,
+                      only: tuple[str, str] | None = None) -> int:
     """Append trips for one place. Returns the number of new rows.
 
     Paid providers respect each set's prefilter_km, per-mode max_km and `auto` (point -> modes) unless
     on_demand, which routes the set's full `modes` table.
     A row is appended only when no trip exists for that place, point, mode and provider, or its
-    minutes changed (the leg cache makes recomputation free; this keeps the log from growing)."""
+    minutes changed (the leg cache makes recomputation free; this keeps the log from growing).
+    `only` = (point, mode) computes one attribute: a point id (`commute_targets:Meta HQ`) or `set:<name>` (that
+    set's k nearest points), by that one mode, whether or not the set's `modes` lists it."""
     origin = (place["lat"], place["lon"])
     if origin[0] is None or origin[1] is None:
         return 0
@@ -137,6 +140,16 @@ def compute_for_place(conn: sqlite3.Connection, commute: Commute, place: sqlite3
         if sets and set_name not in sets:
             continue
         pts: list[Point] = points.get(set_name, [])
+        modes = cfg.modes
+        if only:
+            target, mode_only = only
+            if target.startswith("set:") and target[4:] != set_name:
+                continue
+            if not target.startswith("set:"):
+                if target.split(":", 1)[0] != set_name:
+                    continue
+                pts = [p for p in pts if p.id == target]
+            modes = [mode_only]
         if not pts or (paid and not cfg.paid):
             continue
         shortlist = sorted(pts, key=lambda p: haversine_m(origin, (p.lat, p.lon)))
@@ -146,7 +159,7 @@ def compute_for_place(conn: sqlite3.Connection, commute: Commute, place: sqlite3
             km = haversine_m(origin, (p.lat, p.lon)) / 1000
             if paid and not on_demand and cfg.prefilter_km is not None and km > cfg.prefilter_km:
                 continue
-            for mode in cfg.modes:
+            for mode in modes:
                 if paid and not on_demand and cfg.auto is not None and mode not in cfg.auto.get(p.name, []):
                     continue
                 limit = cfg.max_km.get(mode)
@@ -165,7 +178,8 @@ def compute_for_place(conn: sqlite3.Connection, commute: Commute, place: sqlite3
 
 
 def compute_all(conn: sqlite3.Connection, commute: Commute, place_keys: list[str] | None = None,
-                on_demand: bool = False) -> dict[str, Any]:
+                on_demand: bool = False, only: tuple[str, str] | None = None,
+                progress=None) -> dict[str, Any]:
     # stay places (`<building>~<operator>`) share their building's trips (filter._Trips): never routed twice
     q = "SELECT place_key, lat, lon FROM places WHERE lat IS NOT NULL"
     places = conn.execute(q).fetchall()
@@ -178,11 +192,60 @@ def compute_all(conn: sqlite3.Connection, commute: Commute, place_keys: list[str
     total, done, error = 0, 0, None
     try:
         for p in places:
-            total += compute_for_place(conn, commute, p, on_demand=on_demand)
+            total += compute_for_place(conn, commute, p, on_demand=on_demand, only=only)
             done += 1
+            if progress:
+                progress(done, len(places), total)
     except SpendCapReached as e:
         error = str(e)
     return {"places": len(places), "places_done": done, "new_trips": total, "error": error}
+
+
+def dry_run(db_path: str, provider: str, place_keys: list[str] | None = None, on_demand: bool = False,
+            only: tuple[str, str] | None = None) -> dict[str, Any]:
+    """The uncached calls `provider` would make for these places, counted on a scratch copy of the database
+    with straight-line answers (so nothing is routed, paid for or written), and what they would cost against
+    the monthly caps in config/google.toml."""
+    import shutil
+    import tempfile
+
+    class Counting(StraightLineLegSource):
+        name = provider
+        calls = 0
+        by_mode: dict[str, int] = {}
+
+        def leg(self, o, d, mode, depart):
+            Counting.calls += 1
+            Counting.by_mode[mode] = Counting.by_mode.get(mode, 0) + 1
+            return StraightLineLegSource.leg(self, o, d, mode if mode != "transit" else "bike", depart)
+
+    tmp = tempfile.mkdtemp()
+    try:
+        cache_copy = f"{tmp}/cache.db"
+        src = connect(db_path)
+        dst = connect(cache_copy)
+        src.backup(dst)
+        dst.close()
+        dry = connect(cache_copy)
+        init_db(dry)
+        res = compute_all(dry, build_commute(cache_copy, Counting()), place_keys, on_demand, only)
+        dry.close()
+    finally:
+        shutil.rmtree(tmp)
+    usage = google_usage(src)
+    src.close()
+    caps = load_google_caps()
+    free, price = caps.get("free_calls_per_month", 0), caps.get("price_per_1000_usd", 5.0)
+    billable = max(0, usage["calls"] + Counting.calls - free) - max(0, usage["calls"] - free)
+    over = []
+    if usage["calls"] + Counting.calls > usage["cap"]:
+        over.append(f"monthly cap {usage['cap']} ({usage['calls']} used)")
+    for mode, n in Counting.by_mode.items():
+        cap = usage["cap_by_mode"].get(mode)
+        if cap is not None and usage["by_mode"].get(mode, 0) + n > cap:
+            over.append(f"monthly {mode} cap {cap} ({usage['by_mode'].get(mode, 0)} used)")
+    return {"would_call": Counting.calls, "by_mode": dict(Counting.by_mode), "places": res["places"],
+            "est_cost_usd": round(billable * price / 1000, 2), "over_caps": over, "google_usage_now": usage}
 
 
 def _ll(text: str) -> tuple[float, float]:
@@ -238,29 +301,7 @@ def main(argv: list[str] | None = None) -> None:
         args.place = sorted(pk for pk in merged if pk in located and in_walk_zone(*located[pk]))
         print(f"{len(args.place)} candidate places in station walk zones; routing the `auto` modes in point_sets.toml")
     if args.cmd == "compute" and args.dry_run:
-        import shutil
-        import tempfile
-
-        class Counting(StraightLineLegSource):
-            name = args.provider
-            calls = 0
-
-            def leg(self, o, d, mode, depart):
-                Counting.calls += 1
-                return StraightLineLegSource.leg(self, o, d, mode if mode != "transit" else "bike", depart)
-
-        tmp = tempfile.mkdtemp()
-        cache_copy = f"{tmp}/cache.db"
-        src = connect(args.db)
-        dst = connect(cache_copy)
-        src.backup(dst)
-        dst.close()
-        dry = connect(cache_copy)
-        init_db(dry)
-        res = compute_all(dry, build_commute(cache_copy, Counting()), args.place, args.on_demand)
-        shutil.rmtree(tmp)
-        print(json.dumps({"would_call": Counting.calls, "places": res["places"],
-                          "google_usage_now": google_usage(conn)}, indent=1))
+        print(json.dumps(dry_run(args.db, args.provider, args.place, args.on_demand), indent=1))
         return
     source = make_source(args.provider, args.max_calls)
     commute = build_commute(args.db, source)

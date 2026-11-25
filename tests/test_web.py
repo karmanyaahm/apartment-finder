@@ -216,3 +216,71 @@ def test_places_carry_the_nearest_point_of_each_set(client):
     n = p["nearest"]["caltrain_stations|walk"]
     walks = [v["minutes"] for k, v in p["minutes"].items() if k.startswith("caltrain_stations:") and k.endswith("|walk")]
     assert n["minutes"] == min(m for m in walks if m is not None) and n["point"] and n["provider"]
+
+
+def _wait_for_job(c):
+    import time
+
+    for _ in range(200):
+        s = c.get("/api/compute/status").json()
+        if s["state"] in ("done", "error"):
+            return s
+        time.sleep(0.05)
+    raise AssertionError("compute job did not finish")
+
+
+def test_compute_one_attribute_estimate(client):
+    c, db = client
+    keys = [p["place_key"] for p in c.get("/api/places").json()]
+    spec = {"point": "commute_targets:Meta HQ", "mode": "drive", "provider": "estimate", "place_keys": keys}
+    d = c.post("/api/compute/dry_run", json=spec).json()
+    assert d["places"] >= 1 and d["would_call"] == 0 and d["est_cost_usd"] == 0
+    assert c.post("/api/compute/dry_run", json={**spec, "point": "commute_targets:Nowhere"}).status_code == 400
+    conn = connect(db)
+    before = conn.execute("SELECT MAX(id) FROM trips").fetchone()[0]
+    # a mode the set does not list (point_sets.toml: grocery_chains walks only), so every row is new
+    r = c.post("/api/compute/run", json={**spec, "point": "set:grocery_chains", "mode": "bike"})
+    assert r.status_code == 200
+    s = _wait_for_job(c)
+    assert s["state"] == "done" and s["result"]["new_trips"] > 0
+    rows = conn.execute("SELECT DISTINCT substr(point_id, 1, instr(point_id, ':') - 1), mode, provider FROM trips "
+                        "WHERE id > ?", (before,)).fetchall()
+    assert [tuple(r) for r in rows] == [("grocery_chains", "bike", "estimate")]  # only that attribute
+    assert "grocery_chains|bike" in next(p for p in c.get("/api/places").json() if p["nearest"])["nearest"]
+
+
+def test_compute_one_attribute_google_needs_the_dry_run_and_stops_at_its_count(client, monkeypatch):
+    import sys
+
+    from aptfinder import trips
+
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
+    from test_commute import FakeSource
+
+    c, db = client
+    keys = [p["place_key"] for p in c.get("/api/places").json()]
+    spec = {"point": "commute_targets:Meta HQ", "mode": "drive", "provider": "google", "place_keys": keys}
+    d = c.post("/api/compute/dry_run", json=spec).json()
+    assert d["would_call"] >= 1 and d["by_mode"] == {"drive": d["would_call"]}
+    assert d["google_usage_now"]["calls"] == 0  # a dry run calls nothing
+    assert c.post("/api/compute/run", json=spec).status_code == 400  # no confirm: refused
+    fake = FakeSource()
+    fake.name = "google"
+    monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "test")
+    monkeypatch.setattr(trips, "make_source", lambda provider, max_calls=200, meter_db=None:
+                        trips.MeteredSource(fake, max_calls, meter_db))
+    r = c.post("/api/compute/run", json={**spec, "confirm_calls": 1})  # fewer than needed: stops at 1 call
+    assert r.status_code == 200
+    s = _wait_for_job(c)
+    assert len(fake.calls) == 1 and s["state"] == "error" and "cap of 1" in s["result"]["error"]
+    conn = connect(db)
+    assert conn.execute("SELECT COUNT(*) FROM api_calls WHERE provider = 'google'").fetchone()[0] == 1
+
+
+def test_compute_is_refused_in_the_redacted_view(tmp_path):
+    db = tmp_path / "seed.db"
+    seed_db(db, with_trips=True)
+    c = TestClient(create_app(db, redact={}))
+    spec = {"point": "commute_targets:Meta HQ", "mode": "drive", "scope": "zone"}
+    assert c.post("/api/compute/dry_run", json=spec).status_code == 403
+    assert c.post("/api/compute/run", json=spec).status_code == 403
