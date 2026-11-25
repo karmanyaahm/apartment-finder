@@ -132,6 +132,11 @@ def _differs(field: str, a: Any, b: Any) -> bool:
         return False
     if field == "price_month":
         return abs(a - b) > 0.01 * max(abs(a), abs(b))
+    if field == "available_from":  # two dates on or before today both say 'available now'
+        from datetime import date
+
+        today = date.today().isoformat()
+        return a != b and not (str(a)[:10] <= today and str(b)[:10] <= today)
     return a != b
 
 

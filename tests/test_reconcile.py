@@ -116,3 +116,10 @@ def test_available_now_keeps_past_dates_and_own_site_rows_stay():
     assert not rc.same_value("available_from", "2026-12-04", "2026-11-25", t)
     ev = [{"source": "direct", "obs": {"price": None, "price_basis": None, "data": '{"beds": 1}'}}]
     assert rc.plan_checks({}, ev, "beds", 2, t)[0] == []
+
+
+def test_past_availability_dates_are_no_conflict():
+    from aptfinder.verify import _differs
+
+    assert not _differs("available_from", "2026-01-04", "2020-01-05")
+    assert _differs("available_from", "2026-01-04", "2999-01-05")
