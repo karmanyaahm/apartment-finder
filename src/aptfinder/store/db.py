@@ -22,7 +22,8 @@ def connect(path: str | Path) -> sqlite3.Connection:
     if str(path) != ":memory:":
         path.parent.mkdir(parents=True, exist_ok=True)
     # timeout: wait for another process's write (web app + intake run side by side) instead of failing
-    conn = sqlite3.connect(path, check_same_thread=False, timeout=60)
+    # 300 s: parallel intake runs each rebuild identity after writing, which holds the write lock for a while
+    conn = sqlite3.connect(path, check_same_thread=False, timeout=300)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
