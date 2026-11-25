@@ -757,9 +757,10 @@ function sorted(list) {
   const key = $("#sort").value;
   const nil = (v) => (v == null ? Infinity : v);
   const fns = {
-    status: (p) => [RANK[placeStatus(p)], -(p.goals[S.goal]?.nice_score || 0), nil(p.min_price_per_bed)],
-    price: (p) => [nil(goalTerm(S.goal) === "short" ? p.min_stay_month : goalTerm(S.goal) === "long" ? p.min_lease_month : p.min_price_month)],
-    ppb: (p) => [nil(goalTerm(S.goal) === "long" ? p.min_lease_per_bed : p.min_price_per_bed)],
+    // under a goal, prices are the goal's offer (the cheapest of its best status, filter.goal_offer), as on the card
+    status: (p) => [RANK[placeStatus(p)], -(p.goals[S.goal]?.nice_score || 0), nil(goalOffer(p) ? goalOffer(p).price_per_bed : p.min_price_per_bed)],
+    price: (p) => [nil(goalOffer(p) ? goalOffer(p).price_month : goalTerm(S.goal) === "short" ? p.min_stay_month : goalTerm(S.goal) === "long" ? p.min_lease_month : p.min_price_month)],
+    ppb: (p) => [nil(goalOffer(p) ? goalOffer(p).price_per_bed : goalTerm(S.goal) === "long" ? p.min_lease_per_bed : p.min_price_per_bed)],
     beds: (p) => [-(p.max_beds || 0)],
     // complete sums first, then those with unknown terms (by what is known), then none
     // complete, then partial (mean / median of the known trips), then a total missing a time, then no time at all
@@ -778,7 +779,20 @@ function sorted(list) {
 // shows leases, any other goal and All both. A price failure marks the price shown for its goal's offer (a
 // short-term goal: the stay, otherwise the lease); when the
 // deciding listing's price differs from the minimum on the card, its own price follows in brackets.
+// The selected goal's offer at a place (filter.goal_offer: the cheapest of its best status), null under All
+const goalOffer = (p) => (S.goal !== "all" && p.goals[S.goal]?.offer) || null;
 function priceFacts(p, fails = []) {
+  const o = goalOffer(p);
+  if (o) {
+    // one offer, the goal's: its price, per person (a goal with people) or per bed, and its size
+    const ppl = goalPeople(S.goal);
+    const mk = (f) => markFor(fails, (x) => x.f === f);
+    const size = o.beds != null ? `${o.beds === 0 ? "studio" : o.beds + "bd"}/${o.baths != null ? o.baths : "?"}ba` : "";
+    const title = ` title="${esc(`the cheapest ${STATUS_LABEL[p.goals[S.goal].status] || ""} offer for this goal (${o.source})`)}"`;
+    const per = ppl ? `<span${mk("price_per_person") || ' title="the price shared by the goal\'s people"'}><b>${money(o.price_month / ppl)}</b>/person (÷${ppl})</span>`
+      : o.price_per_bed != null ? `<span${mk("price_per_bed") || ' title="per bedroom; a studio counts as one"'}><b>${money(o.price_per_bed)}</b>/bed</span>` : "";
+    return `<span${mk("price_month") || title}><b>${money(o.price_month)}</b>/mo</span>${per}${size ? `<span${title}>${esc(size)}</span>` : ""}`;
+  }
   const term = goalTerm(S.goal);
   const showLease = p.min_lease_month != null && term !== "short";
   const showStay = p.min_stay_month != null && term !== "long";

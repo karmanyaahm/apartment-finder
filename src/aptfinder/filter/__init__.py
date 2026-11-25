@@ -403,8 +403,29 @@ def evaluate_goal(inp: dict[str, Any], goal: Goal) -> tuple[dict[tuple[str, str]
             lres[(row["source"], row["source_id"])] = res
         if pk is not None and decides:
             by_place[pk].append((res, row))
-    pres = {pk: place_outcome(by_place.get(pk, []), pk) for pk in (inp.get("places") or by_place)}
+    pres = {}
+    for pk in (inp.get("places") or by_place):
+        rs = by_place.get(pk, [])
+        pres[pk] = place_outcome(rs, pk)
+        o = goal_offer(rs)
+        if o:
+            pres[pk] = {**pres[pk], "offer": o}
     return lres, pres
+
+
+def goal_offer(rs: list[tuple[dict[str, Any], dict[str, Any]]]) -> dict[str, Any] | None:
+    """The offer a place's card shows for a goal: among its deciding priced rows (active ones where any is active),
+    the cheapest of the best status (a pass, else needs_check, else any): {price_month, price_per_bed, beds, baths,
+    source, source_id}. None without a priced row. Not the place's cheapest unit of any size (a 1bd's $3,799 under
+    a 3bd goal)."""
+    if any(res["active"] for res, _ in rs):
+        rs = [(res, row) for res, row in rs if res["active"]]
+    priced_rows = [(res, row) for res, row in rs if row.get("price_month") is not None]
+    if not priced_rows:
+        return None
+    res, row = min(priced_rows, key=lambda x: (RANK[x[0]["status"]], x[1]["price_month"]))
+    return {"price_month": row["price_month"], "price_per_bed": row.get("price_per_bed"), "beds": row.get("beds"),
+            "baths": row.get("baths"), "source": row["source"], "source_id": row["source_id"]}
 
 
 NO_OFFERS = "no offers known"

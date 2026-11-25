@@ -328,7 +328,9 @@ def goal_view(r: dict[str, Any], commute: list[dict[str, Any]] | None = None) ->
             "reasons": [t for s, t, *_ in r["reasons"] if s != "pass"],
             "fails": r["fails"],  # the attribute of each reason, for red/amber facts
             "unit_key": r["unit_key"], "source": r["source"], "source_id": r["source_id"],
-            **({"why": r["why"]} if r.get("why") else {})}  # no_listings: none / no_price / unavailable
+            **({"why": r["why"]} if r.get("why") else {}),  # no_listings: none / no_price / unavailable
+            # the card's price for this goal: the cheapest offer of the best status (filter.goal_offer)
+            **({"offer": r["offer"]} if r.get("offer") else {})}
 
 
 def _parse_value(v: Any) -> Any:

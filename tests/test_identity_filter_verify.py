@@ -601,3 +601,16 @@ def test_an_active_failing_plan_beats_a_gone_fitting_offer():
     assert (places["p1"]["status"], places["p1"]["source_id"]) == ("fail", "a")
     _, places = _nl_eval([_nl_row("g", "p1", 3, 2, 6000, active=0)])
     assert places["p1"]["status"] == "pass"
+
+
+def test_goal_offer_is_the_cheapest_of_the_best_status_not_the_cheapest_unit():
+    """Avalon Mountain View (2026-11-25): the lease card showed $3,799 (a 1bd) / 3 people. Under a goal the card
+    prices the cheapest passing offer, else needs_check, else the cheapest overall (filter.goal_offer)."""
+    _, places = _nl_eval([_nl_row("1bd", "p1", 1, 1, 3799), _nl_row("3a", "p1", 3, 2, 7400),
+                          _nl_row("3b", "p1", 3, 2, 7100), _nl_row("3c", "p1", 3, None, 6500)])
+    o = places["p1"]["offer"]
+    assert (o["source_id"], o["price_month"], o["beds"], o["baths"]) == ("3b", 7100, 3, 2)
+    _, places = _nl_eval([_nl_row("1bd", "p1", 1, 1, 3799), _nl_row("3c", "p1", 3, None, 6500)])
+    assert places["p1"]["offer"]["source_id"] == "3c"  # no pass: the needs_check one, though dearer
+    _, places = _nl_eval([_nl_row("1bd", "p1", 1, 1, 3799), _nl_row("3x", "p1", 3, 2, 9500)])
+    assert places["p1"]["offer"]["source_id"] == "1bd"  # all fail: the cheapest overall
