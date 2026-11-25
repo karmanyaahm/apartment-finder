@@ -885,7 +885,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
 
     @app.post("/api/compute/run")
     def compute_run(body: ComputeIn) -> dict[str, Any]:
-        from ..store import finish_run, start_run
+        from ..store import begin_write, finish_run, start_run
         from ..trips import build_commute, compute_all, make_source
 
         only = _check_spec(body)
@@ -919,8 +919,11 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             try:
                 source = make_source(body.provider, max_calls=body.confirm_calls or 0, meter_db=db_path)
                 commute = build_commute(db_path, source)
+                # SQLite has one writer: say so while another job holds the write lock, instead of looking stuck
+                begin_write(wconn, on_wait=lambda: job.update(note="waiting for the database (another job is writing)"))
                 run = start_run(wconn, "commute", body.provider, {"places": len(keys), "only": list(only),
                                                                    "from": "dashboard"})
+                job.pop("note", None)
 
                 def progress(done: int, total: int, new: int) -> None:
                     job.update(done=done, new_trips=new)
@@ -931,14 +934,18 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                            est_cost=round(calls * 0.005, 3) if body.provider == "google" else 0.0,
                            error=res["error"])
                 final = {"state": "error" if res["error"] else "done", "result": {**res, "api_calls": calls}}
-            except BaseException as e:  # SystemExit from make_source included
-                if run is not None:
-                    finish_run(wconn, run, "error", {}, error=str(e))
-                final = {"state": "error", "result": {"error": str(e)}}
+            except BaseException as e:  # SystemExit from make_source included; 'database is locked' shown as is
+                final = {"state": "error", "result": {"error": str(e) or repr(e)}}
+                try:
+                    if run is not None:
+                        finish_run(wconn, run, "error", {}, error=str(e))
+                except Exception:  # noqa: BLE001  (the job must still end, whatever the database says)
+                    pass
             finally:
                 wconn.close()
             with lock:
                 memo.clear()  # the user's own run: show its trips now, not after SCRAPE_REFRESH_S
+                job.pop("note", None)
                 job.update(final, finished=time.time())  # published only after the cache is cleared
 
         threading.Thread(target=work, daemon=True).start()

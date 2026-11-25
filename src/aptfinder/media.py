@@ -384,9 +384,8 @@ def fetch(conn: sqlite3.Connection, *, retry_failed: bool = False, limit: int | 
                 (now_iso(), j["url"], j["kind"], row["status"], row["error"], row.get("sha256"), row.get("phash"),
                  row.get("same_as"), row.get("distance"), row.get("width"), row.get("height"), row.get("bytes"),
                  row.get("stored_bytes")))
+            conn.commit()  # per row: never hold the write lock while waiting for the next download
             done = sum(n.values()) - n["skipped"]
-            if done % 50 == 0:
-                conn.commit()
             if done % 500 == 0:
                 rate = done / (time.monotonic() - t0)
                 top = sorted(per_host.items(), key=lambda kv: -sum(kv[1].values()))[:6]

@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .. import identity, settings
-from ..store import append_observation, finish_run, start_run
+from ..store import COMMIT_EVERY, append_observation, finish_run, start_run
 from ..store.models import ObservationData
 from .discover import SECRET_ENV, Blocker, clean_url
 
@@ -388,9 +388,9 @@ def _pending(conn, source: str, reread: bool = False) -> list[dict[str, Any]]:
 
 def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: str = "haiku", max_usd: float = 1.0,
             workers: int = 8, dry_run: bool = False, reread: bool = False, cached_only: bool = False,
-            ask_fn: Callable | None = None) -> dict[str, Any]:
+            ask_fn: Callable | None = None, rebuild_identity: bool = True) -> dict[str, Any]:
     """Read the whole entry of every unread active listing of `source`. `cached_only`: apply cached answers, ask
-    nothing (after a reparse). `ask_fn` replaces `ask` (tests)."""
+    nothing (after a reparse). `ask_fn` replaces `ask` (tests). `rebuild_identity=False`: the caller rebuilds it."""
     if source not in TEXT_SOURCES:
         raise SystemExit(f"extract supports {', '.join(TEXT_SOURCES)} or all")
     todo = _pending(conn, source, reread)[:limit]
@@ -428,58 +428,64 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
         cache.update(new)
         save_cache(new)
 
-    res = ask_parallel(groups, lambda g, cap: one([{"key": x["key"], "text": x["text"]} for x in g], model, cap),
-                       workers, max_usd, on_answer)
-    filled: dict[str, int] = {}
-    facts_n: dict[str, int] = {}
     n_obs = 0
-    for t in todo:
-        if t["hash"] not in cache:
-            continue  # budget ran out, or a blocker stopped the calls, before this one
-        got_ = check_answer(cache[t["hash"]], t["text"])
-        facts = got_.pop("facts", {})
-        d = dict(t["data"])
-        extra = dict(d.get("extra") or {})
-        flat = {**got_, **{k: facts[k]["value"] for k in ("furnished", "private_bath", "min_stay_days",
-                                                          "utilities_included") if k in facts}}
-        got, conflicts = [], {}
-        for k, v in flat.items():
-            stated = d.get(k)
-            if k in CONFLICT_FIELDS and stated is not None and _disagrees(k, stated, v):
-                conflicts[k] = v  # the source's value stays; the text's goes to the Verify conflicts
-                continue
-            if k in ("website", "min_stay_days", "utilities_included"):
-                if extra.get(k) is None:
-                    extra[k] = v
+    try:  # the Claude calls write nothing to the database; the answers are applied after them
+        res = ask_parallel(groups, lambda g, cap: one([{"key": x["key"], "text": x["text"]} for x in g], model, cap),
+                           workers, max_usd, on_answer)
+        filled: dict[str, int] = {}
+        facts_n: dict[str, int] = {}
+        for t in todo:
+            if t["hash"] not in cache:
+                continue  # budget ran out, or a blocker stopped the calls, before this one
+            got_ = check_answer(cache[t["hash"]], t["text"])
+            facts = got_.pop("facts", {})
+            d = dict(t["data"])
+            extra = dict(d.get("extra") or {})
+            flat = {**got_, **{k: facts[k]["value"] for k in ("furnished", "private_bath", "min_stay_days",
+                                                              "utilities_included") if k in facts}}
+            got, conflicts = [], {}
+            for k, v in flat.items():
+                stated = d.get(k)
+                if k in CONFLICT_FIELDS and stated is not None and _disagrees(k, stated, v):
+                    conflicts[k] = v  # the source's value stays; the text's goes to the Verify conflicts
+                    continue
+                if k in ("website", "min_stay_days", "utilities_included"):
+                    if extra.get(k) is None:
+                        extra[k] = v
+                        got.append(k)
+                elif d.get(k) is None:
+                    if k == "address" and "," not in v and d.get("city"):
+                        v = f"{v}, {str(d['city']).title()}"  # "850 Calderon Ave" -> "..., Mountain View"
+                    d[k] = v
                     got.append(k)
-            elif d.get(k) is None:
-                if k == "address" and "," not in v and d.get("city"):
-                    v = f"{v}, {str(d['city']).title()}"  # "850 Calderon Ave" -> "..., Mountain View"
-                d[k] = v
-                got.append(k)
-        add = [a for a in amenities_from(facts) if a not in (d.get("amenities") or [])]
-        if add:  # only positives; a listing with no list keeps none (unknown, never 'not listed')
-            d["amenities"] = list(d.get("amenities") or []) + add
-            got.append("amenities")
-        extra["extracted"] = {"v": VERSION, "fields": got, "model": model, "run_id": run, "facts": facts,
-                              **({"conflicts": conflicts} if conflicts else {})}
-        d["extra"] = extra
-        r = t["row"]
-        append_observation(conn, run, source, r["source_id"], ObservationData(**d), url=r["url"], price=r["price"],
-                           price_basis=r["price_basis"], query_checkin=r["query_checkin"],
-                           query_checkout=r["query_checkout"], raw_path=r["raw_path"], commit=False)
-        n_obs += 1
-        for k in got:
-            filled[k] = filled.get(k, 0) + 1
-        for k in facts:
-            facts_n[k] = facts_n.get(k, 0) + 1
-    conn.commit()
+            add = [a for a in amenities_from(facts) if a not in (d.get("amenities") or [])]
+            if add:  # only positives; a listing with no list keeps none (unknown, never 'not listed')
+                d["amenities"] = list(d.get("amenities") or []) + add
+                got.append("amenities")
+            extra["extracted"] = {"v": VERSION, "fields": got, "model": model, "run_id": run, "facts": facts,
+                                  **({"conflicts": conflicts} if conflicts else {})}
+            d["extra"] = extra
+            r = t["row"]
+            append_observation(conn, run, source, r["source_id"], ObservationData(**d), url=r["url"],
+                               price=r["price"], price_basis=r["price_basis"], query_checkin=r["query_checkin"],
+                               query_checkout=r["query_checkout"], raw_path=r["raw_path"], commit=False)
+            n_obs += 1
+            if n_obs % COMMIT_EVERY == 0:
+                conn.commit()
+            for k in got:
+                filled[k] = filled.get(k, 0) + 1
+            for k in facts:
+                facts_n[k] = facts_n.get(k, 0) + 1
+        conn.commit()
+    except Exception as e:  # close the run (its commit keeps the rows appended so far)
+        finish_run(conn, run, "error", {**plan, "observations": n_obs}, error=repr(e)[:500])
+        raise
     err = res["error"]
     counts = {**plan, "calls": res["calls"], "observations": n_obs, "filled": filled, "facts": facts_n,
               "not_asked": sum(1 for t in todo if t["hash"] not in cache)}
     finish_run(conn, run, "error" if err else "ok", counts, est_cost=round(res["spent"], 4),
                error=str(err)[:500] if err else None)
-    if n_obs:
+    if n_obs and rebuild_identity:
         identity.run(conn)
     if err:
         raise Blocker(f"{source}: {err} (answers before it were applied: {n_obs} listings)") from err
@@ -494,7 +500,8 @@ def after_intake(conn, source: str, observations: int, *, skip: bool = False, fo
     if not observations:
         return None
     try:
-        return None if skip or source not in TEXT_SOURCES else extract(conn, source, **kw)
+        # identity is rebuilt once per run, by after_steps (--no-followup skips it with the other follow-up steps)
+        return None if skip or source not in TEXT_SOURCES else extract(conn, source, rebuild_identity=False, **kw)
     finally:
         if followup:
             print(after_steps(conn, db_path or str(settings.DB_PATH), geocode=geocode), flush=True)

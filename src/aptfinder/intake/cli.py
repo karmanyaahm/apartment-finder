@@ -131,7 +131,7 @@ def main(argv: list[str] | None = None) -> None:
         print_coverage(conn)
         return
     if args.cmd == "reparse":
-        res = reparse(conn, ADAPTERS[args.source], args.raw_file, args.covers)
+        res = reparse(conn, ADAPTERS[args.source], args.raw_file, args.covers, rebuild_identity=False)
         print(json.dumps(res, indent=1))
         from .extract import after_intake  # the new rows hide earlier readings: apply cached ones (free)
 
@@ -206,7 +206,8 @@ def main(argv: list[str] | None = None) -> None:
     print(f"{args.source}: {len(pick)} areas: {', '.join(a.id for a in pick)}")
     if args.dry_run:
         return
-    res = run_source(conn, adapter, pick, max_items=args.max_items, max_usd=args.max_usd)
+    # identity: rebuilt once, by the after-intake hook below (after_steps)
+    res = run_source(conn, adapter, pick, max_items=args.max_items, max_usd=args.max_usd, rebuild_identity=False)
     print(json.dumps({"run_id": res.run_id, "status": res.status, "cost_usd": res.cost_usd, **res.counts},
                      indent=1))
     if res.warnings:

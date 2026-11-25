@@ -242,7 +242,7 @@ def test_after_intake_steps_run_when_reading_is_blocked(conn, monkeypatch):
 def test_cli_reparse_never_geocodes(monkeypatch, tmp_path):
     from aptfinder.intake import cli, extract as ex
     calls = _stub_steps(monkeypatch, ex)
-    monkeypatch.setattr(cli, "reparse", lambda *a: {"observations": 4})
+    monkeypatch.setattr(cli, "reparse", lambda *a, **k: {"observations": 4})
     cli.main(["--db", str(tmp_path / "x.db"), "reparse", "google_places", "raw.json"])
     assert calls == ["identity", "estimates"]
     calls.clear()

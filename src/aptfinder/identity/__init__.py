@@ -6,7 +6,7 @@ import re
 import sqlite3
 
 from ..commute.geo import haversine_m
-from ..store import append_link
+from ..store import COMMIT_EVERY, append_link
 from ..store.keys import place_key, unit_key
 
 # A listing with only coordinates joins the nearest address-keyed *building* within this distance:
@@ -142,5 +142,7 @@ def run(conn: sqlite3.Connection) -> dict[str, int]:
             continue
         append_link(conn, rule, r["source"], r["source_id"], pk, uk, reason, commit=False)
         counts["linked"] += 1
+        if counts["linked"] % COMMIT_EVERY == 0:  # decisions come from the one read above; write in short batches
+            conn.commit()
     conn.commit()
     return counts

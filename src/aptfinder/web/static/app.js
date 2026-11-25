@@ -1074,7 +1074,7 @@ async function pollCompute() {
   if (!out) return;
   const what = s.spec ? `${s.spec.mode} to ${s.spec.point} (${s.spec.provider})` : "";
   if (s.state === "running") {
-    out.textContent = `Running ${what}: ${s.done}/${s.places} places, ${s.new_trips} new trips…`;
+    out.textContent = `Running ${what}: ${s.done}/${s.places} places, ${s.new_trips} new trips…${s.note ? ` (${s.note})` : ""}`;
     setTimeout(pollCompute, 1500);
     return;
   }

@@ -354,12 +354,17 @@ def render(conn, *, sites: list[str] | None = None, model: str = "haiku",
                                                "actor": ACTOR, "model": model,
                                                "proxy": "residential" if residential else "datacenter"})
     n_req = PAGES_PER_SITE * len(pick)
-    res = run_actor(ACTOR, {"startUrls": [{"url": s["url"], "userData": {"site": sid}} for sid, s in pick.items()],
-                            "pageFunction": PAGE_FUNCTION, **browser_proxy(residential),
-                            "maxRequestsPerCrawl": n_req, "maxRequestRetries": 2, "headless": True,
-                            "pageLoadTimeoutSecs": 120, "pageFunctionTimeoutSecs": 240, "waitUntil": "domcontentloaded"},
-                    max_items=2 * n_req, max_charge_usd=max_apify_usd, timeout_s=1800, memory_mb=2048,
-                    clean=False, with_log=True)
+    try:
+        res = run_actor(ACTOR, {"startUrls": [{"url": s["url"], "userData": {"site": sid}} for sid, s in pick.items()],
+                                "pageFunction": PAGE_FUNCTION, **browser_proxy(residential),
+                                "maxRequestsPerCrawl": n_req, "maxRequestRetries": 2, "headless": True,
+                                "pageLoadTimeoutSecs": 120, "pageFunctionTimeoutSecs": 240,
+                                "waitUntil": "domcontentloaded"},
+                        max_items=2 * n_req, max_charge_usd=max_apify_usd, timeout_s=1800, memory_mb=2048,
+                        clean=False, with_log=True)
+    except Exception as e:  # close the run, then re-raise
+        finish_run(conn, run, "error", {}, error=repr(e)[:500])
+        raise
     raw_dir = settings.RAW_DIR / "render"
     raw_dir.mkdir(parents=True, exist_ok=True)
     raw_path = raw_dir / f"run{run}.json"
@@ -411,6 +416,7 @@ def render(conn, *, sites: list[str] | None = None, model: str = "haiku",
                                    price_basis="month" if p.get("price") else None, raw_path=str(raw_path),
                                    commit=False)
                 n_obs += 1
+            conn.commit()  # this site's rows, before the next site's Claude call: never hold the write lock across it
             oc = "ok" if plans else "no_plans"
             per_area[f"{sid}#render"] = {"state": STATE_OF[oc], "items": len(plans), "outcome": oc, **info}
             report[sid] = [_line(p) for p in plans] if plans else "no plans on the page"
@@ -419,6 +425,10 @@ def render(conn, *, sites: list[str] | None = None, model: str = "haiku",
         finish_run(conn, run, "error", {"areas": per_area, "observations": n_obs},
                    est_cost=round((res.cost_usd or 0) + spent, 4), error=str(e))
         raise Blocker(str(e)) from e
+    except Exception as e:  # close the run (its commit keeps the sites read so far), then re-raise
+        finish_run(conn, run, "error", {"areas": per_area, "observations": n_obs},
+                   est_cost=round((res.cost_usd or 0) + spent, 4), error=repr(e)[:500])
+        raise
     conn.commit()
     finish_run(conn, run, "ok", {"areas": per_area, "observations": n_obs, "items": len(res.items)},
                est_cost=round((res.cost_usd or 0) + spent, 4))

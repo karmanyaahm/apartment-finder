@@ -361,3 +361,24 @@ def test_places_carry_amenity_flags_for_the_require_checkboxes(client):
         listed = [a for (am,) in conn.execute("SELECT amenities FROM listings WHERE place_key = ?", (p["place_key"],))
                   if am for a in json.loads(am)]
         assert p["amenities"] == amenity_flags(listed)
+
+
+def test_compute_job_says_it_waits_for_the_database_lock(client):
+    import sqlite3
+    import time
+
+    c, db = client
+    keys = [p["place_key"] for p in c.get("/api/places").json()]
+    holder = sqlite3.connect(db, isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")  # another job writing
+    spec = {"point": "set:grocery_chains", "mode": "bike", "provider": "estimate", "place_keys": keys}
+    assert c.post("/api/compute/run", json=spec).status_code == 200
+    for _ in range(100):
+        s = c.get("/api/compute/status").json()
+        if s.get("note"):
+            break
+        time.sleep(0.05)
+    assert s["state"] == "running" and s["note"] == "waiting for the database (another job is writing)"
+    holder.execute("COMMIT")
+    s = _wait_for_job(c)
+    assert s["state"] == "done" and "note" not in s

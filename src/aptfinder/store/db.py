@@ -13,6 +13,12 @@ from .models import ObservationData
 from .schema import ddl
 
 
+# Bulk appends commit every COMMIT_EVERY rows, so another process (the dashboard, a parallel run) never waits more
+# than a fraction of a second for SQLite's one write lock; no write transaction stays open across a network,
+# Apify or Claude wait (design.md, "Write transactions").
+COMMIT_EVERY = 200
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -40,6 +46,28 @@ def init_db(conn: sqlite3.Connection) -> None:
     if conn.execute("PRAGMA user_version").fetchone()[0] == version:
         return
     conn.executescript(f"BEGIN IMMEDIATE;\n{script}\nPRAGMA user_version = {version};\nCOMMIT;")
+
+
+def begin_write(conn: sqlite3.Connection, on_wait=None, max_s: float = 300.0) -> None:
+    """Open a write transaction (BEGIN IMMEDIATE) now, calling `on_wait()` once if another connection holds the
+    write lock, so a caller can say it is waiting instead of looking stuck. Raises 'database is locked' after max_s."""
+    import time
+
+    t0, told = time.monotonic(), False
+    conn.execute("PRAGMA busy_timeout = 1000")
+    try:
+        while True:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                return
+            except sqlite3.OperationalError as e:
+                if "locked" not in str(e) or time.monotonic() - t0 > max_s:
+                    raise
+                if on_wait and not told:
+                    on_wait()
+                    told = True
+    finally:
+        conn.execute("PRAGMA busy_timeout = 300000")
 
 
 def _j(value: Any) -> str:

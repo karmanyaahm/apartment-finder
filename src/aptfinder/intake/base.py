@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 from .. import identity, settings
 from ..config import Area, load_areas
-from ..store import append_observation, finish_run, start_run
+from ..store import COMMIT_EVERY, append_observation, finish_run, start_run
 from ..store.models import ObservationData
 from .apify import ActorRun, account_remaining_usd, run_actor
 
@@ -131,9 +131,10 @@ def _area_states(per_area: dict[str, int], cap_each: int, exhausted: bool, ok: b
 
 
 def run_source(conn: sqlite3.Connection, adapter: Adapter, areas: list[Area], *, max_items: int | None = None,
-               max_usd: float | None = None) -> IntakeResult:
+               max_usd: float | None = None, rebuild_identity: bool = True) -> IntakeResult:
     """Collect a source over some areas. Records, per area, how many items came back and whether the area
-    is complete (counts.areas), which is what the coverage ledger and liveness read."""
+    is complete (counts.areas), which is what the coverage ledger and liveness read. `rebuild_identity=False`:
+    the caller rebuilds it (the CLI's after-intake hook), so it runs once per run."""
     sources = load_sources()
     cfg = sources[adapter.name]
     cap = max_usd if max_usd is not None else sources["spend"]["max_usd_per_run"]
@@ -236,7 +237,9 @@ def run_source(conn: sqlite3.Connection, adapter: Adapter, areas: list[Area], *,
                                    price_basis=q.price_basis, query_checkin=q.query_checkin,
                                    query_checkout=q.query_checkout, raw_path=str(raw_path), commit=False)
                 counts["observations"] += 1
-            conn.commit()
+                if counts["observations"] % COMMIT_EVERY == 0:
+                    conn.commit()
+            conn.commit()  # before the next area's Apify wait
         for r in conn.execute("SELECT source_id, content_hash FROM observations WHERE run_id = ?", (run_id,)):
             if r["source_id"] not in prev:
                 counts["new"] += 1
@@ -252,7 +255,8 @@ def run_source(conn: sqlite3.Connection, adapter: Adapter, areas: list[Area], *,
     except Exception as e:  # record the failure, then re-raise
         finish_run(conn, run_id, "error", counts, est_cost=round(spent, 4), error=repr(e)[:500])
         raise
-    identity.run(conn)
+    if rebuild_identity:
+        identity.run(conn)
     return IntakeResult(run_id, status, counts, warnings, round(spent, 4), console)
 
 
@@ -317,7 +321,8 @@ def done(cov: dict, source: str, area_id: str) -> bool:
     return bool(c) and c["state"] in ("complete", "empty")
 
 
-def reparse(conn: sqlite3.Connection, adapter: Adapter, raw_file: str, covers: str | None = None) -> dict[str, Any]:
+def reparse(conn: sqlite3.Connection, adapter: Adapter, raw_file: str, covers: str | None = None,
+            rebuild_identity: bool = True) -> dict[str, Any]:
     """Parse a saved raw file again as a new (targeted) run. Costs nothing; appends observations.
 
     `covers` ('complete' or 'partial') credits the file's areas in the coverage ledger: for a scrape made outside
@@ -340,25 +345,32 @@ def reparse(conn: sqlite3.Connection, adapter: Adapter, raw_file: str, covers: s
     run_id = start_run(conn, "intake", adapter.name, params)
     counts = {"items": len(blob["items"]), "observations": 0, "unparsed": 0, "skipped": 0}
     seen: set[str] = set()
-    for item in blob["items"]:
-        if adapter.skip and adapter.skip(item):
-            counts["skipped"] += 1
-            continue
-        p = adapter.parse(item, cfg)
-        if not p:
-            counts["unparsed"] += 1
-            continue
-        for q in p if isinstance(p, list) else [p]:
-            if q.source_id in seen:
+    try:
+        for item in blob["items"]:
+            if adapter.skip and adapter.skip(item):
+                counts["skipped"] += 1
                 continue
-            seen.add(q.source_id)
-            append_observation(conn, run_id, adapter.name, q.source_id, q.data, url=q.url, price=q.price,
-                               price_basis=q.price_basis, query_checkin=q.query_checkin,
-                               query_checkout=q.query_checkout, raw_path=raw_file, commit=False)
-            counts["observations"] += 1
-    conn.commit()
+            p = adapter.parse(item, cfg)
+            if not p:
+                counts["unparsed"] += 1
+                continue
+            for q in p if isinstance(p, list) else [p]:
+                if q.source_id in seen:
+                    continue
+                seen.add(q.source_id)
+                append_observation(conn, run_id, adapter.name, q.source_id, q.data, url=q.url, price=q.price,
+                                   price_basis=q.price_basis, query_checkin=q.query_checkin,
+                                   query_checkout=q.query_checkout, raw_path=raw_file, commit=False)
+                counts["observations"] += 1
+                if counts["observations"] % COMMIT_EVERY == 0:
+                    conn.commit()
+        conn.commit()
+    except Exception as e:  # close the run (its commit keeps the rows appended so far), then re-raise
+        finish_run(conn, run_id, "error", counts, est_cost=0.0, error=repr(e)[:500])
+        raise
     if covers:
         counts["areas"] = {aid: {"state": covers, "items": counts["items"]} for aid in area_ids}
     finish_run(conn, run_id, "ok", counts, est_cost=0.0)
-    identity.run(conn)
+    if rebuild_identity:
+        identity.run(conn)
     return {"run_id": run_id, **counts}

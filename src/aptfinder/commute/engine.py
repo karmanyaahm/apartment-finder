@@ -63,7 +63,8 @@ class Commute:
         self.depart = depart
         self.k_stations = k_stations
         self.bike_m_per_min = bike_m_per_min
-        self._db = sqlite3.connect(str(cache_path), check_same_thread=False)
+        # timeout: wait for another process's write (the default 5 s fails a paid leg's cache write under load)
+        self._db = sqlite3.connect(str(cache_path), check_same_thread=False, timeout=300)
         self._db.execute(CACHE_DDL)
         self._db.commit()
 
