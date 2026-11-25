@@ -302,3 +302,38 @@ def test_same_street_ignores_formatting_but_not_another_number(conn):
         "address": "240 Ortega Ave, Mountain View, CA 94040",
         "extra": {"extracted": {"fields": [], "model": "haiku", "run_id": run, "conflicts": {"address": "240 Ortega Avenue"}}}})
     assert verify.text_conflict_queue(conn) == []
+
+
+def test_a_sonnet_reading_survives_a_rescrape_while_text_is_unchanged(conn, tmp_path, monkeypatch):
+    """Furnished Finder 190174_1: Sonnet read private_bath true; the next scrape's default Haiku reading keeps it
+    while the text is the same and no newer Haiku reading exists; a changed text is read by Haiku again."""
+    import json
+    from aptfinder import settings
+    from aptfinder.intake import extract as ex
+    monkeypatch.setattr(settings, "DATA_DIR", tmp_path)
+    quote = "One with ensuite bathroom the other has sole use of the non ensuite bathroom."
+    row = {"title": "Room", "description": "Two bedrooms upstairs. " + quote}
+    _listings(conn, "furnishedfinder", [("190174_1", row)])
+    asked = []
+
+    def stub(batch, model, cap):
+        asked.append(model)
+        facts = {"private_bath": {"value": True, "evidence": quote}} if model == "sonnet" else {}
+        return [{"key": x["key"], "facts": facts} for x in batch], 0.0
+
+    def current():
+        d = json.loads(conn.execute("SELECT data FROM latest_obs WHERE source_id = '190174_1'").fetchone()["data"])
+        return d.get("private_bath"), d["extra"]["extracted"]["model"]
+
+    ex.extract(conn, "furnishedfinder", ask_fn=stub)  # haiku: nothing
+    ex.extract(conn, "furnishedfinder", model="sonnet", reread=True, ask_fn=stub)
+    assert asked == ["haiku", "sonnet"] and current() == (True, "sonnet")
+    _listings(conn, "furnishedfinder", [("190174_1", row)])  # a re-scrape, same text
+    res = ex.extract(conn, "furnishedfinder", ask_fn=stub)
+    assert asked == ["haiku", "sonnet"] and res["kept_stronger"] == 1 and current() == (True, "sonnet")
+    _listings(conn, "furnishedfinder", [("190174_1", {**row, "description": row["description"] + " Now $1,500."})])
+    ex.extract(conn, "furnishedfinder", ask_fn=stub)  # the text changed: Haiku reads it
+    assert asked == ["haiku", "sonnet", "haiku"] and current() == (None, "haiku")
+    _listings(conn, "furnishedfinder", [("190174_1", row)])  # the old text again: the Haiku reading is newer now
+    res = ex.extract(conn, "furnishedfinder", ask_fn=stub)
+    assert res["kept_stronger"] == 0 and current() == (None, "haiku")

@@ -30,7 +30,8 @@ that contradicts a stated address / furnished / private bath goes to `extra.extr
 
 Calls run in a thread pool (`workers`), each a separate `claude -p`; the database and the cache are written only
 in the main thread. Answers are cached by schema version, model and text in `data/extract_cache.json`, so reading
-an unchanged entry again (after the next scrape, or a reparse) costs nothing. A blocked call stops new calls; the
+an unchanged entry again (after the next scrape, or a reparse) costs nothing. A stronger model's reading (Sonnet) that is
+the listing's newest reading is kept for an unchanged text (`keep_stronger`), so a re-scrape does not reset it. A blocked call stops new calls; the
 answers already paid for are applied, then the blocker is raised.
 """
 
@@ -50,7 +51,7 @@ from typing import Any, Callable
 from .. import identity, settings
 from ..store import COMMIT_EVERY, append_observation, finish_run, start_run
 from ..store.models import ObservationData
-from .discover import SECRET_ENV, Blocker, clean_url
+from .discover import SECRET_ENV, Blocker, _rank, clean_url
 
 TEXT_SOURCES = ("craigslist", "furnishedfinder", "airbnb", "apartments_com", "zillow", "zumper", "padmapper",
                 "rentcafe", "direct", "google_places", "portfolio")  # every source: a name alone can state a limit
@@ -599,6 +600,27 @@ def save_cache(new: dict[str, Any]) -> None:
 
 # --- the run ------------------------------------------------------------------------------------------------------
 
+def keep_stronger(conn, source: str, todo: list[dict[str, Any]], model: str, cache: dict[str, Any]) -> int:
+    """A stronger model's reading survives a re-scrape: where a listing's newest reading is by a stronger model than
+    `model` (a Sonnet reading newer than any Haiku one) and that model's cached answer is for this very text (same
+    schema, same entry text: the text has not changed), the listing keeps it (its hash and model) instead of being
+    read again by `model`. A changed text, or a newer reading by `model`, ends it. -> listings kept."""
+    newest = {r[0]: r[1] for r in conn.execute(
+        "SELECT source_id, json_extract(data, '$.extra.extracted.model'), MAX(id) FROM observations "
+        "WHERE source = ? AND json_extract(data, '$.extra.extracted.v') IS NOT NULL GROUP BY source_id", (source,))}
+    kept = 0
+    for t in todo:
+        lm = newest.get(t["row"]["source_id"])
+        if not lm or _rank(lm) <= _rank(model):
+            continue
+        tag = " units" if t["own"] else ""
+        h = hashlib.sha1(f"v{VERSION}{tag}\n{lm}\n{t['text']}".encode()).hexdigest()
+        if h in cache:
+            t["hash"], t["model"] = h, lm
+            kept += 1
+    return kept
+
+
 def _pending(conn, source: str, reread: bool = False, pages: set[str] | None = None,
              id_like: str | None = None) -> list[dict[str, Any]]:
     """Active listings with text not read under the current schema; with `reread`, also those already read (their
@@ -669,6 +691,9 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
         # a row read for its beds / baths is asked for them even when its text is unchanged (a Craigslist post)
         tag = " units" if t["own"] else ""
         t["hash"] = hashlib.sha1(f"v{VERSION}{tag}\n{model}\n{t['text']}".encode()).hexdigest()
+        t["model"] = model
+    cache = load_cache()
+    kept = keep_stronger(conn, source, todo, model, cache)
     if recheck_none:
         said_none = {r[0] for r in conn.execute(
             "SELECT source_id FROM listings WHERE source = ? "
@@ -679,13 +704,13 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
             "SELECT source_id FROM listings WHERE source = ? "
             "AND json_extract(data, '$.extra.extracted.restriction.value') = ?", (source, recheck))}
         todo = [t for t in todo if t["row"]["source_id"] in said]
-    cache = load_cache()
     uniq: dict[str, str] = {}
     for t in todo:
         if t["hash"] not in cache:
             uniq.setdefault(t["hash"], t["text"])
     plan = {"source": source, "listings": len(todo), "texts": len({t["hash"] for t in todo}), "to_ask": len(uniq),
-            "calls_planned": -(-len(uniq) // batch), "raw_missing": raw_missing}
+            "calls_planned": -(-len(uniq) // batch), "raw_missing": raw_missing,
+            "kept_stronger": kept}
     if dry_run or not todo or (cached_only and len(uniq) == plan["texts"]):
         return plan
     if cached_only:
@@ -778,7 +803,7 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
             if add:  # only positives; a listing with no list keeps none (unknown, never 'not listed')
                 d["amenities"] = list(d.get("amenities") or []) + add
                 got.append("amenities")
-            extra["extracted"] = {"v": VERSION, "fields": got, "model": model, "run_id": run, "facts": facts,
+            extra["extracted"] = {"v": VERSION, "fields": got, "model": t["model"], "run_id": run, "facts": facts,
                                   **({"units": units} if units else {}),
                                   **({"restriction": rx} if rx else {}),
                                   **({"parking": pk} if pk else {}),
