@@ -116,3 +116,39 @@ def test_parking_cost_reads_one_reading_whole_and_passes_only_at_zero():
     st = lambda rs: evaluate(rule, {"parking_readings": rs}, Ctx())[0]  # noqa: E731
     assert (st([inc2]), st([paid]), st([]), st([rd(offered="no")])) == (PASS, FAIL, CHECK, FAIL)
     assert evaluate(rule, {"parking_readings": [paid]}, Ctx())[1].startswith("parking for 2 spots: +$150/mo for 2 spots ($75/spot")
+
+
+def test_parking_cost_falls_back_to_the_cards_reading(conn):
+    """Palmetto: the own-site plan row decides and has no parking reading; Craigslist posts there say '2 assigned
+    parking spots in a gated carport area at no extra charge' (a unit post: it does not pool). The cost reads the
+    reading the card shows, so 2 spots cost $0, not '?'. A row's own reading still wins over it."""
+    from aptfinder import identity
+    from aptfinder.filter.rules import PASS, CHECK, Ctx, evaluate, row_parking_cost
+    from aptfinder.store import append_observation, finish_run, start_run
+    run = start_run(conn, "intake", "direct", {"scope": "full"})
+    base = {"address": "100 Main St, Mountain View, CA", "lat": 37.39, "lon": -122.08, "kind": "apartment",
+            "term": "long", "beds": 3}
+    append_observation(conn, run, "direct", "s:r:3bd", {**base}, url="https://s", price=3995, price_basis="month")
+    finish_run(conn, run, "ok", {})
+    run = start_run(conn, "intake", "craigslist", {"scope": "full"})
+    post = {"offered": "yes", "kinds": ["assigned", "carport"], "spots": 2, "cost": "included", "usd_month": None,
+            "evidence": ["Comes with 2 assigned parking spots in a gated carport area", "at no extra charge"]}
+    paid = {"offered": "yes", "kinds": ["garage"], "spots": None, "cost": "paid", "usd_month": None,
+            "evidence": ["garage parking available for a fee"]}
+    append_observation(conn, run, "craigslist", "c1", {**base, "extra": {"extracted": {"v": 4, "parking": post}}},
+                       url="https://c", price=3664, price_basis="month")
+    append_observation(conn, run, "craigslist", "c2", {**base, "extra": {"extracted": {"v": 4, "parking": paid}}},
+                       url="https://c2", price=3700, price_basis="month")
+    finish_run(conn, run, "ok", {})
+    identity.run(conn)
+    rows = {r["source_id"]: r for r in goal_inputs(conn)["listings"]}
+    assert rows["s:r:3bd"]["parking_readings"] == []  # nothing of its own, nothing pooled
+    c = row_parking_cost(rows["s:r:3bd"], 2)
+    assert c["usd"] == 0 and c["why"] == "2 included, from another listing here" and "craigslist" in c["ev"]
+    assert evaluate({"type": "parking_cost", "spots": 2}, rows["s:r:3bd"], Ctx())[0] == PASS
+    assert row_parking_cost(rows["s:r:3bd"], 3)["usd"] is None  # 2 included, a third not stated
+    # the rule fields stay the row's own and pooled readings: the card's reading feeds only parking_cost
+    assert rows["s:r:3bd"]["parking_included"] is None
+    # a row whose own reading says paid without a price keeps that, never the place's $0
+    assert row_parking_cost(rows["c2"], 2)["why"] == "paid, price not stated"
+    assert evaluate({"type": "parking_cost", "spots": 2}, rows["c2"], Ctx())[0] == CHECK

@@ -197,6 +197,17 @@ def parking_cost(readings: list[dict[str, Any]], spots: int) -> dict[str, Any]:
     return {**out, "why": "parking cost not stated", "ev": None}
 
 
+def row_parking_cost(row: dict[str, Any], spots: int) -> dict[str, Any]:
+    """parking_cost of a row: its ordered readings; when none of them says no parking, included or paid, the
+    reading its place's card shows (`parking_place`, filter.place_parking: the most informative of any listing at the
+    place, e.g. a Craigslist post at a building whose own-site plan row decides), still one reading read whole."""
+    c = parking_cost(row.get("parking_readings") or [], spots)
+    if c["why"] != "parking cost not stated" or not row.get("parking_place"):
+        return c
+    f = parking_cost([row["parking_place"]], spots)
+    return f if f["why"] == "parking cost not stated" else {**f, "why": f"{f['why']}, from another listing here"}
+
+
 def parking_cost_text(c: dict[str, Any]) -> str:
     """'+$150/mo for 2 spots', '$0 for 2 spots', 'no parking', '? for 2 spots': the card's and the reason's words."""
     n = f"{c['spots']:g} spot{'s' if c['spots'] != 1 else ''}"
@@ -243,7 +254,7 @@ def evaluate(rule: dict[str, Any], row: dict[str, Any], ctx: Ctx) -> tuple[str, 
     if t == "parking_cost":
         # the added monthly cost of the wanted spaces (lower is better): pass only at $0, a stated cost or no parking
         # is a fail (a nice-to-have: it only ranks), unknown is needs_check naming what is missing
-        c = parking_cost(row.get("parking_readings") or [], rule["spots"])
+        c = row_parking_cost(row, rule["spots"])
         why = f"{parking_cost_text(c)} ({c['why']}{', ' + c['ev'] if c.get('ev') else ''})"
         return (CHECK if c["usd"] is None and not c.get("none") else PASS if c["usd"] == 0 else FAIL), f"{label}: {why}"
 
@@ -400,7 +411,7 @@ def fact(rule: dict[str, Any], row: dict[str, Any], people: int | None = None) -
     if t == "not_operator":
         return {"f": "operator", "v": rule["name"]}
     if t == "parking_cost":
-        c = parking_cost(row.get("parking_readings") or [], rule["spots"])
+        c = row_parking_cost(row, rule["spots"])
         return {"f": "parking_cost", "v": c["usd"], "spots": rule["spots"]}
     return {"f": t}
 

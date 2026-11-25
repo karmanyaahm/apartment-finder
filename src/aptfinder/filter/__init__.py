@@ -13,7 +13,7 @@ from ..plans import inherit_baths, inherit_prices, is_own_priced
 from ..verify import accuracy, low_accuracy
 from .building import building_note, building_units_by_place, place_building_units
 from .rules import (CHECK, FAIL, NO_LISTINGS, PASS, RANK, Ctx, combine, commute_trips, evaluate, fact, in_net,
-                    parking_cost)
+                    row_parking_cost)
 
 PROVIDER_PREF = {"google": 0, "knn": 1, "estimate": 9}
 
@@ -136,6 +136,7 @@ def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None, trips:
     market: set[str] = set()
     pk_of: dict[tuple[str, str], list[dict[str, Any]]] = {}
     pk_place: dict[str, list[dict[str, Any]]] = {}
+    pk_all: dict[str, list[dict[str, Any]]] = {}  # every listing's own readings at a place: the card's (best_parking)
     places: set[str] = set()  # every place, site_info-only ones included: a place with no offer is 'no listings'
     gone: dict[tuple[str, str], str] = {}  # a row its source marks unavailable (unavailable_label)
     min_stays: dict[tuple[str, str], tuple[float, str]] = {}  # the source's stated minimum stay (min_stay)
@@ -150,7 +151,8 @@ def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None, trips:
                           "json_extract(data, '$.extra.min_stay_days') AS msd, "
                           "json_extract(data, '$.extra.minimum_stay_days') AS mnsd, "
                           "json_extract(data, '$.extra.min_lease_days') AS mld, "
-                          "json_extract(data, '$.extra.min_lease_months') AS mlm FROM listings"):
+                          "json_extract(data, '$.extra.min_lease_months') AS mlm FROM listings "
+                          "ORDER BY source, source_id"):
         if r["place_key"]:
             places.add(r["place_key"])
         ms = min_stay(r["msd"], r["mnsd"], r["mld"], r["mlm"])
@@ -163,6 +165,8 @@ def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None, trips:
                                        json.loads(r["ppk"]) if r["ppk"] else None, r["source"], r["source_id"])
         if own_pk:
             pk_of[(r["source"], r["source_id"])] = own_pk
+            if r["place_key"]:
+                pk_all.setdefault(r["place_key"], []).extend(own_pk)
         if building and r["place_key"]:
             pk_place.setdefault(r["place_key"], []).extend(building)
         pk, am = r["place_key"], r["amenities"]
@@ -209,6 +213,8 @@ def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None, trips:
         r["parking_readings"] = (pk_of.get((r["source"], r["source_id"]), []) +
                                  sorted(pk_place.get(r["place_key"] or "", []), key=lambda x: not x["page"]))
         r.update(parking_fields(r["parking_readings"]))
+        # the reading the place's card shows (place_parking), a parking_cost rule's last resort (rules.row_parking_cost)
+        r["parking_place"] = best_parking(pk_all.get(r["place_key"] or "", []))
     return {"listings": listings, "unpriced": unpriced, "places": places, "trips": trips, "anns": anns, "low": low,
             "own": own}
 
@@ -346,16 +352,22 @@ def place_parking(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     """The place's parking for its card: the most informative reading of any listing there (cost stated, then a
     number of spaces, then offered yes / no; an own site's pages first on a tie), or None when none says anything.
     `rows`: listings with `data` parsed."""
-    best, rank = None, None
+    readings = []
     for x in rows:
         extra = (x.get("data") or {}).get("extra") or {}
-        mine, _ = row_parking((extra.get("extracted") or {}).get("parking"), extra.get("page_parking"),
-                              x["source"], x["source_id"])
-        for p in mine:
-            r = (p.get("cost") is not None or p.get("offered") == "no", p.get("spots") is not None,
-                 p.get("offered") is not None, p["page"])
-            if rank is None or r > rank:
-                best, rank = p, r
+        readings += row_parking((extra.get("extracted") or {}).get("parking"), extra.get("page_parking"),
+                                x["source"], x["source_id"])[0]
+    return best_parking(readings)
+
+
+def best_parking(readings: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The most informative of a place's parking readings (place_parking's pick; the first on a tie), or None."""
+    best, rank = None, None
+    for p in readings:
+        r = (p.get("cost") is not None or p.get("offered") == "no", p.get("spots") is not None,
+             p.get("offered") is not None, p["page"])
+        if rank is None or r > rank:
+            best, rank = p, r
     return best
 
 
@@ -423,7 +435,7 @@ def evaluate_goal(inp: dict[str, Any], goal: Goal) -> tuple[dict[tuple[str, str]
         # the attribute each non-pass rule judges (rules.fact), in reasons order: cards mark it red or amber
         fails = [{"s": s, **fact(r, row, goal.people)} for r, (s, _, _) in zip(goal.rules, reasons) if s != PASS]
         res = {"status": combine([s for s, _, _ in reasons]), "reasons": reasons, "fails": fails, "nice": nice,
-               **({"parking_cost": parking_cost(row.get("parking_readings") or [], pc["spots"])} if pc else {}),
+               **({"parking_cost": row_parking_cost(row, pc["spots"])} if pc else {}),
                "nice_score": sum(s == PASS for s, _, _ in nice), "source": row["source"],
                "source_id": row["source_id"], "unit_key": row["unit_key"], "place_key": pk,
                "decides": decides, "own_site": pk in own, "active": bool(row.get("active"))}
