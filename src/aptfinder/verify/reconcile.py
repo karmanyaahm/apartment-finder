@@ -362,21 +362,27 @@ def accept(d: dict[str, Any], item: dict[str, Any], ev: list[dict[str, Any]], bl
     return True, ""
 
 
-def same_value(field: str, a: Any, b: Any) -> bool:
+def same_value(field: str, a: Any, b: Any, today: str | None = None) -> bool:
+    """Equal values; two availability dates on or before today are the same fact ('available now')."""
+    if field == "available_from" and today and isinstance(a, str) and isinstance(b, str):
+        return a == b or (a[:10] <= today and b[:10] <= today)
     if isinstance(a, (int, float)) and isinstance(b, (int, float)) and not isinstance(a, bool):
         return abs(a - b) < 0.5
     return a == b
 
 
-def plan_checks(item: dict[str, Any], ev: list[dict[str, Any]], field: str, value: Any
+def plan_checks(item: dict[str, Any], ev: list[dict[str, Any]], field: str, value: Any, today: str | None = None
                 ) -> tuple[list[dict[str, Any]], str]:
-    """The checks rows settling `field` across the conflict's listings, or ([], why not)."""
+    """The checks rows settling `field` across the conflict's listings, or ([], why not). A building's own-site
+    row (`direct`) is never corrected by a machine: there the conflict is more likely two plans grouped as one unit."""
     rows = []
     for e in ev:
         if field == "price" and e["obs"]["price_basis"] not in ("month", None):
             return [], f"{e['source']} prices by the {e['obs']['price_basis']}"
         stored = stored_value(e["obs"], field)
-        ok = stored is not None and same_value(field, stored, value)
+        ok = stored is not None and same_value(field, stored, value, today)
+        if not ok and e["source"] == "direct":
+            return [], "would correct the own site's row"
         rows.append({"e": e, "stored": stored, "verdict": "correct" if ok else "wrong",
                      "true": None if ok else value})
     return rows, ""
@@ -447,6 +453,12 @@ def _decide(conn, items, pages_by_url, texts, today, model, ask_fn, workers, log
             for d in decisions:
                 ok, why = accept(d, it, ev, blocks, today)
                 r["decisions"].append({**d, "accepted": ok, "why_not": why})
+            if it.get("cheap"):  # a real price closes a too-cheap item: only when Sonnet is sure what is offered
+                kind = next((d for d in r["decisions"] if d.get("field") == "kind"), None)
+                if not kind or kind.get("confidence") != "high" or kind.get("status") != "decided":
+                    for d in r["decisions"]:
+                        if d.get("field") == "price" and d["accepted"]:
+                            d["accepted"], d["why_not"] = False, "unsure whether a room or the whole unit"
         out.append(r)
     return out
 
@@ -459,7 +471,7 @@ def write_checks(conn, r: dict[str, Any], model: str, run_id: int | None) -> lis
     for d in r["decisions"]:
         if not d["accepted"]:
             continue
-        rows, why = plan_checks(r["item"], r["ev"], d["field"], d["value"])
+        rows, why = plan_checks(r["item"], r["ev"], d["field"], d["value"], date.today().isoformat())
         if not rows or any((x["e"]["source"], x["e"]["source_id"], d["field"]) in mine for x in rows):
             d["accepted"], d["why_not"] = False, why or "user answered meanwhile"
             continue
@@ -552,7 +564,9 @@ def reconcile(conn, *, goal: str | None = None, limit: int = 10, max_usd: float 
         written = [] if dry_run else write_checks(conn, r, model, run_id)
         acc = [d for d in r["decisions"] if d["accepted"]]
         fields_done = {d["field"] for d in acc}
-        state = ("error" if r["error"] else "resolved" if fields_done >= set(r["item"]["decide"])
+        closes = ({"price"} & fields_done or {"kind"} & fields_done) if r["item"].get("cheap") \
+            else fields_done >= set(r["item"]["decide"])  # a too-cheap item leaves on its price (or kind room)
+        state = ("error" if r["error"] else "resolved" if closes
                  else "partly" if fields_done else "undecided")
         stats["errors" if state == "error" else state] += 1
         stats["fields_accepted"] += len(acc)
@@ -587,3 +601,19 @@ def reconcile(conn, *, goal: str | None = None, limit: int = 10, max_usd: float 
         finish_run(conn, run_id, "ok", {k: v for k, v in stats.items()}, est_cost=round(apify["usd"], 4))
     stats["run_id"] = run_id
     return stats
+
+
+def retract(conn, check_id: int, why: str) -> int:
+    """Withdraw one of the reconciler's checks: a newer `reconcile:` row on the same observation and field whose
+    stored value (null) matches no current value, so the current_checks view no longer holds a valid check for the
+    listing and field and the conflict reopens. Append-only: the retracted row stays. Refused for a user's check
+    or when the listing's current value is empty (a null stored value would then be valid)."""
+    c = conn.execute("SELECT * FROM checks WHERE id = ?", (check_id,)).fetchone()
+    if c is None or not c["author"].startswith("reconcile:"):
+        raise ValueError(f"check {check_id} is not a reconciler check")
+    o = conn.execute("SELECT lo.* FROM observations o JOIN latest_obs lo ON lo.source = o.source "
+                     "AND lo.source_id = o.source_id WHERE o.id = ?", (c["observation_id"],)).fetchone()
+    if stored_value(dict(o), c["field"]) is None:
+        raise ValueError(f"check {check_id}: the listing's {c['field']} is empty; a retraction would not reopen it")
+    return append_check(conn, c["author"], "conflict", c["field"], "cannot_tell", observation_id=c["observation_id"],
+                        stored_value=None, note=json.dumps({"retracts": check_id, "why": why}))

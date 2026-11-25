@@ -36,6 +36,8 @@ def main(argv: list[str] | None = None) -> None:
     rp.add_argument("--model", default="sonnet")
     rp.add_argument("--kind", action="append", choices=["cross", "text", "cheap", "pending"],
                     help="only these conflict kinds (repeatable)")
+    rp.add_argument("--retract", type=int, nargs="+", metavar="CHECK_ID", help="withdraw these reconciler checks")
+    rp.add_argument("--why", default="", help="reason recorded with --retract")
     rp.add_argument("--dry-run", action="store_true", help="decide and report, write no checks")
     rp.add_argument("--out", help="append one JSON line per conflict to this file")
     args = ap.parse_args(argv)
@@ -44,8 +46,12 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "reconcile":
         from pathlib import Path
 
-        from .reconcile import reconcile
+        from .reconcile import reconcile, retract
 
+        if args.retract:
+            for cid in args.retract:
+                print(cid, "->", retract(conn, cid, args.why))
+            return
         stats = reconcile(conn, goal=args.goal, limit=args.limit, skip=args.skip, max_usd=args.max_usd,
                           dry_run=args.dry_run, model=args.model, workers=args.workers,
                           residential=not args.datacenter, out_path=Path(args.out) if args.out else None,

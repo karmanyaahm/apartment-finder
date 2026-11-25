@@ -95,3 +95,24 @@ def test_open_price_goes_to_the_current_page(conn):
     assert st["resolved"] == 1 and conflict_queue(conn) == []
     note = conn.execute("SELECT note FROM checks LIMIT 1").fetchone()[0]
     assert '"url": "https://z/1"' in note and '"evidence": "P1"' in note
+
+
+def test_retraction_reopens_the_conflict(conn):
+    two_sources(conn)
+    run(conn, answer(3200, "Rent $3,200 per month", evidence="E2"))
+    assert conflict_queue(conn) == []
+    ids = [r[0] for r in conn.execute("SELECT id FROM checks ORDER BY id")]
+    rc.retract(conn, ids[0], "test")
+    assert [c["fields"] for c in conflict_queue(conn)] == [["price_month"]]
+    append_check(conn, "user", "conflict", "price", "correct", observation_id=1, stored_value=3000)
+    import pytest
+    with pytest.raises(ValueError):
+        rc.retract(conn, conn.execute("SELECT MAX(id) FROM checks").fetchone()[0], "a user's")
+
+
+def test_available_now_keeps_past_dates_and_own_site_rows_stay():
+    t = "2026-11-25"
+    assert rc.same_value("available_from", "2026-11-04", "2026-11-25", t)
+    assert not rc.same_value("available_from", "2026-12-04", "2026-11-25", t)
+    ev = [{"source": "direct", "obs": {"price": None, "price_basis": None, "data": '{"beds": 1}'}}]
+    assert rc.plan_checks({}, ev, "beds", 2, t)[0] == []
