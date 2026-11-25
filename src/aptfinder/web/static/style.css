@@ -2,16 +2,19 @@
   --bg: #f6f5f2; --panel: #ffffff; --ink: #1d1d1f; --muted: #6b6b70; --line: #e2e0da;
   --pass: #1f9d55; --check: #e0a100; --fail: #8a8a8a; --accent: #2457c5; --bad: #c53030;
   --chip-bg: #efeee9;
+  --src-google: #1a5fd0; --src-osrm: #7a3fc2;  /* commute time sources: blue, violet (pass/fail are green/amber/red) */
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #141416; --panel: #1d1d20; --ink: #ececee; --muted: #9a9aa0; --line: #2e2e33;
     --pass: #3ccf7a; --check: #f2b92b; --fail: #77777d; --accent: #6b94ff; --bad: #ff6b6b; --chip-bg: #2a2a2f;
+    --src-google: #8ab4f8; --src-osrm: #c39bff;
   }
 }
 :root[data-theme="dark"] {
   --bg: #141416; --panel: #1d1d20; --ink: #ececee; --muted: #9a9aa0; --line: #2e2e33;
   --pass: #3ccf7a; --check: #f2b92b; --fail: #77777d; --accent: #6b94ff; --bad: #ff6b6b; --chip-bg: #2a2a2f;
+  --src-google: #8ab4f8; --src-osrm: #c39bff;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
@@ -185,3 +188,5 @@ input[type=number] { padding-right: 2px; }
 /* Pipeline panel: compute one attribute */
 .compute { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
 .compute #c-out { flex: 1 1 100%; }
+.src-google { color: var(--src-google); } .src-osrm { color: var(--src-osrm); } .src-estimate { color: var(--muted); }
+.src-key { white-space: nowrap; }

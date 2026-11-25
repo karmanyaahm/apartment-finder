@@ -212,6 +212,13 @@ function limitName(pt, mode) {
 function limitValue(p, pt, mode) {
   return pt.startsWith("set:") ? (p.nearest || {})[`${pt.slice(4)}|${mode}`] : p.minutes[`${pt}|${mode}`];
 }
+// a commute time coloured by the provider that computed it, the provider named on hover ("~" marks an estimate)
+const SRC = { google: ["src-google", "Google Maps"], osrm: ["src-osrm", "OSRM (self-hosted road route; drive without traffic)"],
+  estimate: ["src-estimate", "straight-line estimate (not routed)"] };
+const srcOf = (prov) => SRC[prov] || ["", prov || "unknown source"];
+const srcMin = (v) => `<b class="${srcOf(v.provider)[0]}" title="${esc(srcOf(v.provider)[1])}">${v.provider === "estimate" ? "~" : ""}${num(v.minutes)}</b>`;
+const SRC_LEGEND = `<span class="src-key"><b class="src-google">■</b> Google Maps · <b class="src-osrm">■</b> OSRM (self-hosted, drive without traffic) · <b class="src-estimate">■ ~</b> straight-line estimate</span>`;
+
 // the selected goal's commute rules as (point, mode) facts on each card, so the requirement is visible:
 // "walk to nearest Google bus 6 min (stop name, est.)"; the goal's fails colour them
 function commuteRows() {
@@ -227,7 +234,7 @@ function limitFacts(p, fails = []) {
     const name = limitName(pt, mode);
     const at = v && v.point ? ` (${v.point})` : "";
     const mk = markFor(fails, (x) => x.modes?.includes(mode) && (pt.startsWith("set:") ? x.f === "near" && x.set === pt.slice(4) : x.f === "commute" && x.pt === pt));
-    return v && v.minutes != null ? `<span${mk}>${esc(name)} <b>${num(v.minutes)}</b> min${esc(at)}${v.provider === "estimate" ? " (est.)" : ""}</span>`
+    return v && v.minutes != null ? `<span${mk}>${esc(name)} ${srcMin(v)} min${esc(at)}</span>`
       : `<span${mk}>${esc(name)}: no time</span>`;
   }).join("");
 }
@@ -779,13 +786,13 @@ function matrixTable(d) {
       const v = d.matrix[`${t}|${m}`];
       if (!v || v.minutes == null) return `<td class="muted">–</td>`;
       const legs = (v.legs || []).map((l) => `${l.mode}${l.from || l.to ? ` ${l.from || ""}${l.to ? "→" + l.to : ""}` : ""}: ${num(l.minutes)}m`).join("\n");
-      const est = v.provider === "estimate";
-      return `<td title="${esc(legs)}\nprovider: ${esc(v.provider)}">${est ? "~" : ""}${num(v.minutes)}</td>`;
+      const [cls, src] = srcOf(v.provider);
+      return `<td class="${cls}" title="${esc(src)}\n${esc(legs)}">${v.provider === "estimate" ? "~" : ""}${num(v.minutes)}</td>`;
     }).join("");
     return `<tr><th>${esc(t.split(":")[1])}</th>${cells}</tr>`;
   }).join("");
   return `<div class="scroll-x"><table><tr><th></th>${modes.map((m) => `<th>${esc(MODE_LABEL[m])}</th>`).join("")}</tr>${rows}</table></div>
-    <p class="muted small">Minutes. ~ = straight-line estimate (not routed). Hover a cell for legs and provider (osrm: self-hosted route, drive without traffic; google: Google Routes).</p>`;
+    <p class="muted small">Minutes, coloured by source: ${SRC_LEGEND}. Hover a cell for its source and legs.</p>`;
 }
 
 function nearestBlock(d) {
@@ -794,7 +801,7 @@ function nearestBlock(d) {
   return entries.map(([k, list]) => {
     const [set, mode] = k.split("|");
     const label = S.meta.point_sets[set]?.label || set;
-    return `<div class="small"><b>${esc(label)}</b> (${esc(mode)}): ${list.map((x) => `${esc(x.point)} ${x.provider === "estimate" ? "~" : ""}${num(x.minutes)} min`).join(", ")}</div>`;
+    return `<div class="small"><b>${esc(label)}</b> (${esc(mode)}): ${list.map((x) => `${esc(x.point)} ${srcMin(x)} min`).join(", ")}</div>`;
   }).join("");
 }
 
