@@ -51,3 +51,28 @@ def test_requests_answer_while_a_recompute_runs(tmp_path, monkeypatch):
         time.sleep(0.2)
     else:
         raise AssertionError("the rebuilt list never arrived")
+
+
+def test_a_restart_answers_from_the_snapshots_on_disk(tmp_path, monkeypatch):
+    db = tmp_path / "seed.db"
+    seed_db(db, with_trips=True)
+    c = TestClient(webapp.create_app(db, background=True))
+    before = c.get("/api/places").json()
+    deadline = time.monotonic() + 10
+    while not list((tmp_path / "cache" / "seed").glob("*.pkl")) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    pk = before[0]["place_key"]
+    assert c.post("/api/annotations", json={"entity_key": pk, "attribute": "overall", "rating": 5}).status_code == 200
+
+    real = webapp.evaluate_all
+
+    def evaluate_all(conn, *a, **k):  # the new process's rebuild is slow
+        time.sleep(3)
+        return real(conn, *a, **k)
+
+    monkeypatch.setattr(webapp, "evaluate_all", evaluate_all)
+    t = time.perf_counter()
+    c2 = TestClient(webapp.create_app(db, background=True))  # a restart after the edit
+    r = c2.get("/api/places")
+    assert time.perf_counter() - t < 1.0, "the restarted app waited for its rebuild"
+    assert r.json() == before and r.headers.get("X-Updating") == "places_body"  # last run's list, flagged

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import itertools
 import json
+import pickle
+import queue
 import re
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
@@ -50,6 +53,21 @@ def _tv(t: dict[str, Any]) -> dict[str, Any]:
 SCRAPE_REFRESH_S = 120  # how stale the dashboard may be while an intake run is writing
 WATCH_EVERY_S = 3  # the background app checks the data version this often
 WATCH_RECENT_S = 600  # and rebuilds the results read within this long
+# results the background app keeps on disk (data/cache/<db name>/), served at once after a restart (a deploy) while
+# the worker rebuilds them: the list, the header counts and queues, the Pipeline panel, the KNN status table, and
+# every whole-database input of the drawer (so a click after a restart never waits for a rebuild)
+PERSIST = ("places_body", "pipeline", "all_conflicts", "agreement", "n_sample", "own_site_queue", "duplicate_queue",
+           "counts", "knn_status|", "places_by_key", "best_trips", "evaluate_all", "located", "listings_by_place",
+           "media_files", "current_checks", "website_status", "plan_readings")
+PERSIST_EVERY_S = 300  # a result is written to disk at most this often (the big ones are tens of MB)
+
+
+def _code_version() -> str:
+    """A hash of this package's source: a snapshot from other code is served only as out of date."""
+    h = hashlib.sha1()
+    for f in sorted(Path(__file__).resolve().parents[1].rglob("*.py")):
+        h.update(f.read_bytes())
+    return h.hexdigest()[:12]
 
 
 def _group_listings(conn) -> dict[str, list[dict[str, Any]]]:
@@ -387,7 +405,11 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
     memo_lock = threading.Lock()  # guards memo, pending and last_read only (never held while computing)
     pending: dict[str, Future] = {}
     last_read: dict[str, float] = {}
-    worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="aptf-recompute")
+    # the one worker's queue: (priority, order, name, fn, future); 0 = a request waits for it (a result with no
+    # snapshot yet), 1 = a rebuild nobody waits for
+    jobs: queue.PriorityQueue = queue.PriorityQueue()
+    order = itertools.count()
+    persisted: dict[str, float] = {}
     in_worker = threading.local()
     updating: ContextVar[list | None] = ContextVar("updating", default=None)
 
@@ -412,6 +434,37 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         return bool(hit) and hit[0] == version[0] and (hit[1] == version[1]
                                                        or time.monotonic() - hit[2] < SCRAPE_REFRESH_S)
 
+    snap_dir = (Path(db_path).parent / "cache" / Path(db_path).stem) if background and redact is None else None
+    code_version = _code_version() if snap_dir is not None else ""
+
+    def persist(name: str, version: tuple[tuple, tuple], val: Any) -> None:
+        """Write a PERSIST result to disk (atomically: a temp file renamed), for the next start."""
+        if snap_dir is None or not name.startswith(PERSIST) or time.monotonic() - persisted.get(name, -1e9) < PERSIST_EVERY_S:
+            return
+        persisted[name] = time.monotonic()
+        try:
+            snap_dir.mkdir(parents=True, exist_ok=True)
+            f = snap_dir / (hashlib.sha1(name.encode()).hexdigest()[:16] + ".pkl")
+            tmp = f.with_suffix(".tmp")
+            tmp.write_bytes(pickle.dumps((code_version, name, version, time.time(), val)))
+            tmp.replace(f)
+        except Exception:  # noqa: BLE001  (a full disk or the like: the snapshot stays in memory only)
+            pass
+
+    def load_persisted() -> None:
+        """Last run's snapshots: with the same code they keep their data version (current if nothing changed since),
+        from other code they are out of date; either way the worker rebuilds what is out of date and requests are
+        answered from them meanwhile, flagged X-Updating."""
+        if snap_dir is None or not snap_dir.is_dir():
+            return
+        for f in snap_dir.glob("*.pkl"):
+            try:
+                code, name, version, wall, val = pickle.loads(f.read_bytes())
+            except Exception:  # noqa: BLE001  (a truncated or old-format file: ignored)
+                continue
+            t = time.monotonic() - max(0.0, time.time() - wall)
+            memo[name] = (*(version if code == code_version else (None, None)), t, val, None)
+
     def compute(name: str, fn) -> Any:
         """fn() over the data version read first, stored as the snapshot (unless already current)."""
         version = data_version()
@@ -422,22 +475,35 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         val = fn()
         with memo_lock:
             memo[name] = (*version, time.monotonic(), val, fn)
+        persist(name, version, val)
         return val
 
-    def run_in_worker(name: str, fn) -> Any:
+    def work() -> None:
+        """The one background worker: rebuilds queued results, the ones a request waits for first."""
         in_worker.on = True
-        try:
-            return compute(name, fn)
-        finally:
-            with memo_lock:
-                pending.pop(name, None)
+        while True:
+            _, _, name, fn, f = jobs.get()
+            if f.done():  # queued twice (moved ahead for a waiting request): already built
+                continue
+            try:
+                f.set_result(compute(name, fn))
+            except BaseException as e:  # noqa: BLE001  (handed to whoever waits; the next read schedules again)
+                f.set_exception(e)
+            finally:
+                with memo_lock:
+                    if pending.get(name) is f:
+                        pending.pop(name)
 
-    def schedule(name: str, fn) -> Future:
-        """Queue a rebuild of `name` on the one worker (once: a rebuild already queued is reused)."""
+    def schedule(name: str, fn, urgent: bool = False) -> Future:
+        """Queue a rebuild of `name` on the worker, once (a rebuild already queued is reused; `urgent`, for a request
+        that waits for it, moves it ahead of the rebuilds nobody waits for)."""
         with memo_lock:
             f = pending.get(name)
             if f is None:
-                f = pending[name] = worker.submit(run_in_worker, name, fn)
+                f = pending[name] = Future()
+                jobs.put((0 if urgent else 1, next(order), name, fn, f))
+            elif urgent:
+                jobs.put((0, next(order), name, fn, f))
             return f
 
     def cached(name: str, fn):
@@ -456,7 +522,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         if not background or worker_side:
             return compute(name, fn)
         if hit is None:
-            return schedule(name, fn).result()
+            return schedule(name, fn, urgent=True).result()
         schedule(name, fn)
         flag = updating.get()
         if flag is not None:
@@ -568,7 +634,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         nearest_all = cached("nearest_sets", lambda: {
             pk: {f"{s}|{m}": {**_tv(t), "point": t["point_id"].split(":", 1)[1]}
                  for (s, m), t in nearest_by_set(tr).items() if s != "commute_targets"}
-            for pk, tr in trips.items()})
+            for pk, tr in all_trips().items()})
         files = media_files()
         # `minutes` feeds the cards' commute rows (app.js limitValue): commute targets one by one, sets through
         # `nearest`. Times to other sets' single points (stations, bus stops, groceries: about a fifth of all keys)
@@ -811,13 +877,14 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
     def filtered_conflicts(goal: str, zone: str) -> tuple[list[dict[str, Any]], dict[str, int]]:
         """The Verify conflicts that matter to one goal (verify.goal_relevance) and/or lie in a station walk zone,
         plus how many each filter hid. goal '' and zone '' keep everything."""
-        items = cached("all_conflicts", lambda: verify.all_conflicts(conn))
-        hidden = {"irrelevant": 0, "settled": 0, "same": 0, "zone": 0}
         if not goal and not zone:
-            return items, hidden
+            return (cached("all_conflicts", lambda: verify.all_conflicts(conn)),
+                    {"irrelevant": 0, "settled": 0, "same": 0, "zone": 0})
 
         def compute() -> tuple[list[dict[str, Any]], dict[str, int]]:
-            keep = items
+            # every input read here, never captured from the request: the worker reruns this after data changes
+            keep = cached("all_conflicts", lambda: verify.all_conflicts(conn))
+            hidden = {"irrelevant": 0, "settled": 0, "same": 0, "zone": 0}
             if goal:
                 g = effective().goals.get(goal)
                 if g is None:
@@ -1171,6 +1238,11 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             # SCRAPE_REFRESH_S, so the drawer refreshed with the old estimates
             with lock:
                 invalidate()
+        if background and n:
+            # the user's own route shows in the drawer the page reloads next: this request (only it, holding no lock)
+            # waits for the worker to rebuild the trips and goal results; every other request keeps answering
+            schedule("best_trips", lambda: best_trips(conn, located()), urgent=True).result()
+            schedule("evaluate_all", lambda: evaluate_all(conn, trips=all_trips()), urgent=True).result()
         return {"new_trips": n, "provider": provider, "api_calls": getattr(source, "calls", 0)}
 
     # ------------------------------------------------------------------ the Pipeline panel's background job
@@ -1267,7 +1339,8 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         trips = all_trips()
         loc = located()
         return {"|".join(p): {**sampling.cell_shown(trips, p, keys),
-                              "loo": cached(f"knn_loo|{'|'.join(p)}", lambda p=p: sampling.cell_loo(trips, p, loc))}
+                              "loo": cached(f"knn_loo|{'|'.join(p)}",
+                                            lambda p=p: sampling.cell_loo(all_trips(), p, located()))}
                 for p in pairs}
 
     @app.post("/api/knn/accuracy")
@@ -1314,9 +1387,9 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         return sampling.commute_status(
             trips, pairs, keys, hinges(),
             lambda p: cached(f"knn_loo_samples|{'|'.join(p)}",
-                             lambda: loo_samples(trips, loc, sampling.cell_keys(trips, p))),
+                             lambda: loo_samples(all_trips(), located(), sampling.cell_keys(all_trips(), p))),
             lambda p: cached(f"est_errors|{'|'.join(p)}",
-                             lambda: sampling.estimate_errors(conn, sampling.cell_keys(trips, p))), cost)
+                             lambda: sampling.estimate_errors(conn, sampling.cell_keys(all_trips(), p))), cost)
 
     @app.post("/api/knn/status")
     def knn_status(body: SampleIn) -> dict[str, Any]:
@@ -1459,10 +1532,16 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                             headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"})
 
     if background:
+        load_persisted()
+        threading.Thread(target=work, daemon=True, name="aptf-recompute").start()
+        from ..planread import readings as plan_readings
         # first snapshots at start (the list, the header counts, the Pipeline panel), one queued task each, the list
         # first, so the first page load waits only for what it reads; then a watcher rebuilds, as soon as the data
         # changes, every result a page read in the last WATCH_RECENT_S seconds, so an edit shows up unasked
         for name, fn in (("places_body", encode_places),
+                         ("current_checks", lambda: verify.current_checks(conn)),  # the drawer's other inputs
+                         ("website_status", lambda: pipeline.website_status(conn)),
+                         ("plan_readings", lambda: plan_readings(conn)),
                          ("all_conflicts", lambda: verify.all_conflicts(conn)),
                          ("agreement", lambda: verify.agreement(conn)),
                          ("n_sample", lambda: len(verify.sample_queue(conn))),
@@ -1478,8 +1557,9 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                     version = data_version()
                     now = time.monotonic()
                     with memo_lock:
-                        todo = [(k, v[4]) for k, v in memo.items()
-                                if now - last_read.get(k, 0) < WATCH_RECENT_S and not fresh(v, version)]
+                        todo = [(k, v[4]) for k, v in memo.items() if v[4] is not None
+                                and now - last_read.get(k, 0) < WATCH_RECENT_S and not fresh(v, version)]
+                    todo.sort(key=lambda kv: kv[0] != "places_body")  # the list first: it is what an edit is for
                     for name, fn in todo:
                         schedule(name, fn)
                 except Exception:  # noqa: BLE001  (a locked or busy database: try again next round)
