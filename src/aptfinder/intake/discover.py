@@ -243,7 +243,7 @@ def retryable() -> list[str]:
 
 
 def promote(conn, *, limit: int, dry_run: bool = False, fetch: bool = True,
-            retry_failed: bool = False) -> dict[str, Any]:
+            retry_failed: bool = False, browser: bool = False, residential: bool = False) -> dict[str, Any]:
     """Websites that listings already name (Apartments.com's website field, URLs read from Craigslist text by
     `extract`) become `[[found]]` sites without a search, then go through the same Apify fetch and address check
     as searched ones. One proposal per place: the URL most of its listings give; every URL you added in Verify
@@ -255,7 +255,7 @@ def promote(conn, *, limit: int, dry_run: bool = False, fetch: bool = True,
     if retry_failed:
         if dry_run or not retry or not fetch:
             return {"retry": retry}
-        return {"retry": retry, "fetch": fetch_and_check(conn, retry)}
+        return {"retry": retry, "fetch": fetch_and_check(conn, retry, browser=browser, residential=residential)}
     rec = _records()
     proposed = {r.get("place_key") for r in rec.get("found", [])}
     have = {s.get("place_key") for s in load_sites().values()} | proposed
@@ -307,24 +307,79 @@ def promote(conn, *, limit: int, dry_run: bool = False, fetch: bool = True,
         append("found", rows)
     res: dict[str, Any] = {"proposed": len(rows), "retry": retry}
     if fetch:
-        res["fetch"] = fetch_and_check(conn, [r["id"] for r in rows] + retry)
+        res["fetch"] = fetch_and_check(conn, [r["id"] for r in rows] + retry, browser=browser,
+                                       residential=residential)
     return res
 
 
-def fetch_and_check(conn, ids: list[str]) -> dict[str, Any]:
-    """Fetch the new sites through Apify (the `direct` source) and record whether each page is the building's."""
+# One page per site in a real browser, for the address check only (sites that refuse the cheap fetch). The item
+# has the fields `direct.address_on_page` reads: the loaded URL, the page text and its ld+json scripts.
+BROWSER_CHECK_PAGE = r"""async function pageFunction(context) {
+  const { page, request, response } = context;
+  await page.waitForTimeout(2500);
+  const d = await page.evaluate(() => ({
+    title: document.title,
+    text: document.body ? document.body.innerText.replace(/\s+/g, ' ').slice(0, 100000) : '',
+    scripts: [...document.querySelectorAll('script[type="application/ld+json"]')]
+      .map((x) => ({ type: 'application/ld+json', id: x.id || '', text: x.textContent.slice(0, 20000) })),
+  }));
+  const st = response ? (typeof response.status === 'function' ? response.status() : response.status) : null;
+  return { url: page.url(), requested: request.url, status: st, site: (request.userData || {}).site || null,
+           images: [], ...d };
+}"""
+
+
+def _browser_fetch(conn, ids: list[str], residential: bool) -> tuple[int, float, list[dict[str, Any]], list[str]]:
+    """The check pages through the browser actor (and the residential proxy if asked). Recorded as an intake run
+    of source `direct` with `sites` (not `areas`), so it is not coverage."""
+    from . import direct
+    from .apify import browser_proxy, run_actor
+    from .render import ACTOR
+
+    sites = direct.sites()
+    reqs = [{"url": sites[i]["url"], "userData": {"site": i}} for i in ids if i in sites]
+    proxy = "residential" if residential else "datacenter"
+    run_id = start_run(conn, "intake", "direct", {"check": True, "browser": True, "proxy": proxy,
+                                                  "sites": [r["userData"]["site"] for r in reqs], "actor": ACTOR})
+    res = run_actor(ACTOR, {"startUrls": reqs, "pageFunction": BROWSER_CHECK_PAGE, **browser_proxy(residential),
+                            "maxRequestsPerCrawl": len(reqs), "maxRequestRetries": 2, "headless": True,
+                            "pageLoadTimeoutSecs": 90, "pageFunctionTimeoutSecs": 90, "waitUntil": "domcontentloaded"},
+                    max_items=2 * len(reqs), max_charge_usd=1.0, timeout_s=1800, memory_mb=2048, clean=False,
+                    with_log=True)
+    raw = settings.RAW_DIR / "direct" / f"run{run_id}_browsercheck.json"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text(json.dumps({"actor": ACTOR, "apify_run": res.run_id, "status": res.status, "proxy": proxy,
+                               "cost_usd": res.cost_usd, "items": res.items, "log": res.log}))
+    items = [i for i in res.items if not i.get("#error")]
+    finish_run(conn, run_id, "ok", {"items": len(items), "pages": len(reqs)}, est_cost=res.cost_usd)
+    return run_id, res.cost_usd or 0.0, items, [res.log or ""]
+
+
+def fetch_and_check(conn, ids: list[str], *, browser: bool = False, residential: bool = False) -> dict[str, Any]:
+    """Fetch the new sites through Apify (the `direct` source) and record whether each page is the building's.
+    `browser`: through the browser actor instead (sites that refuse the cheap fetch), `residential` also through
+    the residential proxy; one page per site, for the check only."""
     from . import ADAPTERS, direct
     from .base import run_source
 
     direct.sites.cache_clear()
-    areas = load_areas()
-    pick = [a for a in areas if a.kind == "site" and a.id in ids]
-    res = run_source(conn, ADAPTERS["direct"], pick)
-    items, apify_runs = [], []
-    for f in (settings.RAW_DIR / "direct").glob(f"run{res.run_id}_*.json"):
-        blob = json.loads(f.read_text())
-        items += blob.get("items") or []
-        apify_runs += [blob["apify_run"]] if blob.get("apify_run") else []
+    items, apify_runs, logs = [], [], []
+    if browser or residential:
+        run_id, cost, items, logs = _browser_fetch(conn, ids, residential)
+
+        class _R:  # the fields the rest of this function reads from a run
+            pass
+
+        res = _R()
+        res.run_id, res.cost_usd = run_id, cost
+    else:
+        areas = load_areas()
+        pick = [a for a in areas if a.kind == "site" and a.id in ids]
+        res = run_source(conn, ADAPTERS["direct"], pick)
+        for f in (settings.RAW_DIR / "direct").glob(f"run{res.run_id}_*.json"):
+            blob = json.loads(f.read_text())
+            items += blob.get("items") or []
+            apify_runs += [blob["apify_run"]] if blob.get("apify_run") else []
     sites = direct.sites()
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     checks, seen = [], set()
@@ -335,7 +390,10 @@ def fetch_and_check(conn, ids: list[str]) -> dict[str, Any]:
         seen.add(s["id"])
         form = is_form(it.get("url"))  # the page it landed on, before `clean_url` cuts the form off
         ok = False if form else direct.address_on_page(it, s.get("address"))
-        n = len(direct.PARSERS[s["platform"]](it, s)) if ok else 0
+        try:
+            n = len(direct.PARSERS[s["platform"]](it, s)) if ok else 0
+        except Exception:  # a browser-check item lacks fields some platform parsers read; the check stands
+            n = 0
         # where the link landed after redirects; later scrapes go there directly
         final, _ = clean_url(it.get("url"))
         moved = final if final and final.rstrip("/") != s["url"].rstrip("/") else None
@@ -351,6 +409,8 @@ def fetch_and_check(conn, ids: list[str]) -> dict[str, Any]:
         from .apify import run_log
 
         log = "\n".join(run_log(r) for r in apify_runs)
+    elif missing and logs:
+        log = "\n".join(logs)
     for i in missing:
         checks.append({"id": i, "ok": False, "at": now, "run_id": res.run_id, **unfetched(sites[i]["url"], log)})
     append("check", checks)

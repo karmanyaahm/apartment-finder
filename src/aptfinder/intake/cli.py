@@ -87,6 +87,9 @@ def main(argv: list[str] | None = None) -> None:
     ps.add_argument("--no-fetch", action="store_true")
     ps.add_argument("--retry-failed", action="store_true", help="only fetch again found sites whose page was not "
                                                                "fetched last time (blocked, timed out, empty)")
+    ps.add_argument("--browser", action="store_true", help="check pages in a real browser (sites that refuse the "
+                                                          "cheap fetch); one page per site")
+    ps.add_argument("--residential", action="store_true", help="--browser through Apify's residential proxy")
     ps.add_argument("--dry-run", action="store_true")
     ex = sub.add_parser("extract", help="read facts from listing text with Claude Haiku (address, name, website, "
                                         "furnished, private bath, minimum stay, utilities)")
@@ -138,7 +141,7 @@ def main(argv: list[str] | None = None) -> None:
 
         try:
             res = (promote(conn, limit=args.limit, dry_run=args.dry_run, fetch=not args.no_fetch,
-                           retry_failed=args.retry_failed)
+                           retry_failed=args.retry_failed, browser=args.browser, residential=args.residential)
                    if args.cmd == "promote-sites" else
                    extract(conn, args.source, limit=args.limit, batch=args.batch, model=args.model,
                            max_usd=args.max_usd, dry_run=args.dry_run, reread=args.reread))

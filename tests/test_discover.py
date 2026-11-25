@@ -172,3 +172,36 @@ def test_a_listing_link_that_lands_on_a_lead_form_is_not_a_site(tmp_path, monkey
     assert res["ok"] == [] and all(r.startswith("landed on a contact or tour form") for r in res["rejected"].values())
     assert set(res["rejected"]) == {"station-245", "woodside-place"}
     assert "station-245" not in load_sites() and "woodside-place" not in load_sites()
+
+
+def test_browser_check_reads_the_rendered_page(tmp_path, monkeypatch, conn):
+    """A site that refuses the cheap fetch is checked in the browser actor (residential proxy if asked); the
+    rendered text is what the address check reads, and the run is not coverage."""
+    import shutil
+
+    from aptfinder import settings
+    from aptfinder.intake import apify, discover
+    from aptfinder.intake.apify import ActorRun
+    from aptfinder.intake.base import coverage
+
+    shutil.copytree(settings.ROOT / "config.example", tmp_path / "cfg")
+    (tmp_path / "cfg" / "discovered_sites.toml").write_text(
+        '[[found]]\nid = "station-245"\nplace_key = "p_x"\nname = "Station 245"\naddress = "245 Bush St, Mountain View"\n'
+        'url = "https://station245.prospectportal.com/mountain-view/station-245/"\nplatform = "generic"\n'
+        'found_by = "google_places listing"\n')
+    monkeypatch.setattr(settings, "CONFIG_DIR", tmp_path / "cfg")
+    monkeypatch.setattr(settings, "RAW_DIR", tmp_path / "raw")
+    seen = {}
+
+    def fake(actor, inp, **kw):
+        seen.update(inp)
+        return ActorRun(actor=actor, run_id="r1", status="SUCCEEDED", cost_usd=0.01, charged_events=None,
+                        console_url="", items=[{"site": "station-245", "requested": inp["startUrls"][0]["url"],
+                                                "url": inp["startUrls"][0]["url"], "status": 200, "scripts": [],
+                                                "text": "Station 245 Apartments 245 Bush Street Mountain View"}])
+
+    monkeypatch.setattr(apify, "run_actor", fake)
+    res = discover.fetch_and_check(conn, ["station-245"], residential=True)
+    assert res["ok"] == ["station-245"]
+    assert seen["proxyConfiguration"]["apifyProxyGroups"] == ["RESIDENTIAL"] and seen["maxRequestsPerCrawl"] == 1
+    assert not [k for k in coverage(conn) if k[0] == "direct"]
