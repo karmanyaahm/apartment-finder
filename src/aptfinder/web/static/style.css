@@ -143,3 +143,11 @@ td.nowrap { white-space: nowrap; }
 .areas-map { height: 460px; border-radius: 8px; margin: 6px 0; }
 .area-key { display: inline-flex; align-items: center; gap: 4px; margin-right: 14px; }
 .area-key span { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
+
+/* commute limits (list filters) */
+.commute-limits { flex-wrap: wrap; gap: 6px; align-items: center; }
+.commute-limits .limit { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; margin: 2px 0; }
+.commute-limits #commute-limits { display: contents; }
+.commute-limits .limit { flex-wrap: nowrap; }
+.commute-limits .limit select { width: auto; max-width: 10.5em; min-width: 0; }
+.commute-limits .limit select[data-k=mode] { max-width: 7em; }

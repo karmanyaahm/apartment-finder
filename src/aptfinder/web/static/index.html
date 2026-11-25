@@ -50,6 +50,11 @@
           <label><input type="checkbox" id="inactive"> inactive</label>
           <label title="Places outside every Caltrain station's 25-minute walk zone (spill-over from ZIP and city searches)"><input type="checkbox" id="outzone" checked> outside walk zones</label>
         </div>
+        <div class="row commute-limits">
+          <div id="commute-limits"></div>
+          <button type="button" id="add-limit" class="small">+ commute limit</button>
+          <label title="Keep places with no time yet for a limit's target and mode (not routed, or no estimate for that mode)"><input type="checkbox" id="limit-keep-unknown" checked> keep places without a time</label>
+        </div>
       </div>
       <div id="count" class="muted small"></div>
       <div id="cards"></div>

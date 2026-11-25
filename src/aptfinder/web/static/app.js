@@ -129,6 +129,63 @@ function drawMarkers(list) {
   }
 }
 
+/* ---------------------------------------------------------------- commute limits */
+// Any number of "at most N minutes by <mode> to <target>" filters, remembered in this browser (localStorage; the
+// page works the same without it). A place with no time for a limit is kept unless "keep places without a time"
+// is off.
+const LIMITS_KEY = "aptf.commuteLimits";
+S.limits = [];
+function loadLimits() {
+  try { S.limits = JSON.parse(localStorage.getItem(LIMITS_KEY) || "[]").filter((l) => l && l.target && l.mode); }
+  catch { S.limits = []; }
+  try { const k = localStorage.getItem(LIMITS_KEY + ".keepUnknown"); if (k != null) $("#limit-keep-unknown").checked = k === "1"; }
+  catch { /* storage blocked: defaults */ }
+}
+function saveLimits() {
+  try {
+    localStorage.setItem(LIMITS_KEY, JSON.stringify(S.limits));
+    localStorage.setItem(LIMITS_KEY + ".keepUnknown", $("#limit-keep-unknown").checked ? "1" : "0");
+  } catch { /* storage blocked: limits last for this page only */ }
+}
+function renderLimits() {
+  const tOpts = (sel) => S.meta.targets.map((t) => `<option value="${esc(t)}"${t === sel ? " selected" : ""}>${esc(t.split(":")[1])}</option>`).join("");
+  const mOpts = (sel) => S.meta.modes.map((m) => `<option value="${esc(m)}"${m === sel ? " selected" : ""}>${esc(MODE_LABEL[m])}</option>`).join("");
+  $("#commute-limits").innerHTML = S.limits.map((l, i) => `<div class="limit" data-i="${i}">
+      <select data-k="target">${tOpts(l.target)}</select>
+      <select data-k="mode">${mOpts(l.mode)}</select>
+      ≤ <input data-k="max" type="number" min="0" step="5" value="${l.max ?? ""}" style="width:4em"> min
+      <button type="button" data-rm="${i}" title="remove this limit">×</button></div>`).join("");
+  $$("#commute-limits .limit").forEach((row) => {
+    const l = S.limits[+row.dataset.i];
+    $$("[data-k]", row).forEach((el) => el.addEventListener("input", () => {
+      l[el.dataset.k] = el.dataset.k === "max" ? parseFloat(el.value) : el.value;
+      saveLimits();
+      renderList();
+    }));
+  });
+  $$("#commute-limits [data-rm]").forEach((b) => b.addEventListener("click", () => {
+    S.limits.splice(+b.dataset.rm, 1);
+    saveLimits();
+    renderLimits();
+    renderList();
+  }));
+}
+function addLimit() {
+  S.limits.push({ target: $("#target").value, mode: $("#mode").value, max: 30 });
+  saveLimits();
+  renderLimits();
+  renderList();
+}
+// each limit's time on a card, so the filter is visible: "bike+train to Downtown Palo Alto 18 min (est.)"
+function limitFacts(p) {
+  return S.limits.filter((l) => l.max > 0).map((l) => {
+    const v = p.minutes[`${l.target}|${l.mode}`];
+    const name = `${MODE_LABEL[l.mode]} to ${l.target.split(":")[1]}`;
+    return v && v.minutes != null ? `<span>${esc(name)} <b>${num(v.minutes)}</b> min${v.provider === "estimate" ? " (est.)" : ""}</span>`
+      : `<span class="muted">${esc(name)}: no time</span>`;
+  }).join("");
+}
+
 /* ---------------------------------------------------------------- list */
 function filtered() {
   const q = $("#q").value.trim().toLowerCase();
@@ -137,12 +194,18 @@ function filtered() {
   const maxPpb = parseFloat($("#maxppb").value);
   const showInactive = $("#inactive").checked;
   const showOutside = $("#outzone").checked;
+  const keepUnknown = $("#limit-keep-unknown").checked;
   return S.places.filter((p) => {
     if (!sts.has(placeStatus(p))) return false;
     if (!showInactive && !p.n_active) return false;
     if (!showOutside && !p.in_zone) return false;
     if (!isNaN(minBeds) && !(p.max_beds >= minBeds)) return false;
     if (!isNaN(maxPpb) && p.min_price_per_bed != null && p.min_price_per_bed > maxPpb) return false;
+    for (const lim of S.limits) {
+      if (!(lim.max > 0)) continue;
+      const v = p.minutes[`${lim.target}|${lim.mode}`];
+      if (v && v.minutes != null ? v.minutes > lim.max : !keepUnknown) return false;
+    }
     if (q) {
       const hay = [p.label, p.address, p.city, p.sources, p.title, p.operator].join(" ").toLowerCase();
       if (!hay.includes(q)) return false;
@@ -197,6 +260,7 @@ function renderList() {
         ${priceFacts(p)}
         <span>${esc(bb)}</span>
         <span>${mins ? `<b>${num(mins.minutes)}</b> min ${esc(mode)} to ${esc(tgt)}${mins.provider === "estimate" ? " (est.)" : ""}` : `${esc(mode)} to ${esc(tgt)}: not computed`}</span>
+        ${limitFacts(p)}
         <span>${esc(p.sources)}</span>${p.n_active ? "" : '<span style="color:var(--bad)">inactive</span>'}
         ${p.user_status ? `<span>status: ${esc(p.user_status)}</span>` : ""}
       </div>
@@ -838,6 +902,10 @@ async function boot() {
   $("#mode").innerHTML = S.meta.modes.map((m) => `<option value="${esc(m)}">${esc(MODE_LABEL[m])}</option>`).join("");
   if (S.meta.default_target) $("#target").value = S.meta.default_target; // the target a goal commutes to
   $("#mode").value = "bike";
+  loadLimits();
+  renderLimits();
+  $("#add-limit").addEventListener("click", addLimit);
+  $("#limit-keep-unknown").addEventListener("input", () => { saveLimits(); renderList(); });
   initMap();
   $$("#base-switch button").forEach((b) => b.addEventListener("click", () => setBase(b.dataset.base)));
   ["#q", "#sort", "#target", "#mode", "#minbeds", "#maxppb", "#inactive", "#outzone", ...$$(".st")].forEach((el) => {
