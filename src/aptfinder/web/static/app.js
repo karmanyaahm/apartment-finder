@@ -15,12 +15,18 @@ const RANK = { pass: 0, needs_check: 1, fail: 2 };
 const STATUS_LABEL = { pass: "pass", needs_check: "needs check", fail: "fail" };
 const MODE_LABEL = { walk: "walk", bike: "bike", transit: "transit", drive: "drive", bike_train_bike: "bike+train", bike_bus_bike: "bike+bus" };
 
+// Errors always name the request and its HTTP status: over HTTP/2 (Cloudflare) statusText is empty, and an
+// error page from the edge (502, 524 timeout, 530 tunnel down) is HTML, not JSON with a `detail`.
 async function api(path, opts = {}) {
-  const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  const name = path.split("?")[0];
+  let r;
+  try { r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts }); }
+  catch (e) { throw new Error(`${name}: ${e.message || "network error"}`); }
   if (!r.ok) {
-    let msg = r.statusText;
-    try { msg = (await r.json()).detail || msg; } catch (_) { /* not json */ }
-    throw new Error(msg);
+    let detail = "";
+    try { detail = (await r.json()).detail || ""; } catch (_) { /* not json: an edge error page */ }
+    if (typeof detail !== "string") detail = JSON.stringify(detail);
+    throw new Error(`${name}: HTTP ${r.status}${r.statusText ? " " + r.statusText : ""}${detail ? ": " + detail : ""}`);
   }
   return r.json();
 }
@@ -923,7 +929,10 @@ async function boot() {
   $("#pipeline-btn").addEventListener("click", openPipeline);
   S.points = await api("api/points");
   buildPointLayers();
-  await Promise.all([loadPlaces(), loadStatus()]);
+  // the header counts are secondary: a failed /api/status says so in the strip instead of failing the page
+  await Promise.all([loadPlaces(), loadStatus().catch((e) => {
+    $("#status-strip").innerHTML = `<span class="err">status not loaded: ${esc(e.message)}</span>`;
+  })]);
   const pts = S.places.filter((p) => p.lat != null).map((p) => [p.lat, p.lon]);
   if (pts.length) map.fitBounds(L.latLngBounds(pts).pad(0.3), { maxZoom: 14 });
 }

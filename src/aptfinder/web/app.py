@@ -235,8 +235,11 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         """(edits, scrapes): what the pages show changes with a new row in any log or an edited config file.
         Edits (links, checks, annotations, config) are the user's own and must show at once; scrapes (observations,
         trips, runs) arrive in bursts while intake runs. Cheap (max rowid per table, file mtimes)."""
+        # identity's rule links arrive with every intake run (130 a minute seen live), so only the user's own
+        # links count as edits; rule links refresh with the scrapes
         row = conn.execute(
-            "SELECT (SELECT MAX(id) FROM links), (SELECT MAX(id) FROM checks), (SELECT MAX(id) FROM annotations), "
+            "SELECT (SELECT MAX(id) FROM links WHERE author = 'user'), (SELECT MAX(id) FROM checks), "
+            "(SELECT MAX(id) FROM annotations), (SELECT MAX(id) FROM links WHERE author <> 'user'), "
             "(SELECT MAX(id) FROM observations), (SELECT MAX(id) FROM trips), (SELECT MAX(id) FROM runs), "
             "(SELECT finished_at FROM runs ORDER BY id DESC LIMIT 1)").fetchone()
         cfg = tuple(f.stat().st_mtime_ns for f in sorted(settings.CONFIG_DIR.rglob("*")) if f.is_file())
