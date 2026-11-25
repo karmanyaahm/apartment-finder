@@ -5,7 +5,8 @@ Precedence (first that knows wins):
 1. a stated total: RentCafe's `extra.units_total` (0 = not given), else a count in a listing's own text
    ('a 44-unit community', 'apartment building with 12 units', 'only two units in the building');
 2. a house type: Zillow / Apartments.com single family, Craigslist house / townhouse / duplex, Furnished Finder House,
-   Airbnb '... home' -> 1 (duplex 2), unless the floor below says more;
+   Airbnb '... home' -> 1 (duplex 2), unless the floor below says more; unknown when another row says apartment
+   building (a Zillow townhome inside an apartmentComplex card);
 3. the floor: the most distinct units or floor plans one source lists at the place (a plan has at least one unit).
    It is a lower bound (`floor`): a `min` rule passes when it already reaches the limit, else needs_check, never fail.
 A type that only says 'apartment building' (Google Places, Zillow apartmentComplex, Zumper building, Apartments.com,
@@ -109,6 +110,12 @@ def place_building_units(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
                "evidence": f"{floor[0]} units or floor plans listed"} if floor[0] >= 2 else None
     if stated:
         return {**stated, "floor": False, "house": False, "type": "stated"}
+    if house and apt and not (floor_d and floor_d["value"] > house["value"]):
+        # a house type where another source (or the same Zillow card's apartmentComplex group) says apartment
+        # building: contradictory, so unknown (rule 5), never a 1 that fails a rule
+        return {"value": None, "floor": False, "house": False, "type": f"{house['name']} or {apt['type']}",
+                "source": house["source"] if house["source"] == apt["source"] else f"{house['source']} / {apt['source']}",
+                "evidence": f"{house['evidence']} vs {apt['evidence']}"}
     if house and not (floor_d and floor_d["value"] > house["value"]):
         name = house.pop("name")
         return {**house, "floor": False, "house": True, "type": name}

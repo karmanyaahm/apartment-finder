@@ -34,6 +34,11 @@ def test_house_types_give_one_duplex_two():
     assert place_building_units([row("apartments_com", kind="townhome", property_type="Townhouse")])["type"] == "townhome"
 
 
+def test_a_house_type_against_apartment_evidence_is_unknown():
+    b = place_building_units([row("zillow", kind="townhome", group_type="apartmentComplex")])
+    assert (b["value"], b["house"], b["type"]) == (None, False, "townhome or apartment building")
+
+
 def test_floor_is_the_most_plans_one_source_lists_and_beats_a_house_type():
     rows = [row("apartments_com", floor_plan=f"plan {i}") for i in range(3)] + [row("zillow", kind="house")]
     b = place_building_units(rows)
