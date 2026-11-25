@@ -117,8 +117,17 @@ def _by_source(ls: list[dict[str, Any]]) -> dict[str, list[float | None]]:
 
 
 # Image hosts that refuse hotlinked requests (Chrome: ERR_BLOCKED_BY_ORB on every images1.apartments.com URL,
-# 2026-11-24). Their photos are listed last unless we hold our own copy (aptfinder.media).
+# 2026-11-24). Their photos are listed last unless we hold our own copy (aptfinder.media; the box's downloads of
+# them succeed, 2026-11-25).
 HOTLINK_BLOCKED = ("images1.apartments.com",)
+
+
+def local_plan_images(plans: list[dict[str, Any]], files: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Each plan's drawing from our stored copy when we have one (aptfinder.media), else the source URL."""
+    for p in plans:
+        if (f := files.get(p.get("image") or "")):
+            p["image"] = f"media/{f['file']}.jpg"
+    return plans
 
 
 def gather_photos(listings: list[dict[str, Any]], limit: int = 30,
@@ -444,7 +453,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             "pipeline": pstatus,
             "place": place,
             "goals": {gid: res["places"][gid].get(place_key) for gid in res["places"]},
-            "plans": group_plans(out_listings),
+            "plans": local_plan_images(group_plans(out_listings), media_files()),
             "photos": gather_photos(out_listings, files=media_files()),
             "websites": websites(out_listings),
             "listings": out_listings,

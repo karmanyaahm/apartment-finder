@@ -156,3 +156,11 @@ def test_drawer_collapses_near_copies_stored_as_separate_files():
     listings = [{"source": "zillow", "url": "https://z", "data": {"extra": {"images": ["https://x/a", "https://x/b"]}}},
                 {"source": "zumper", "url": "https://u", "data": {"extra": {"images": ["https://y/a2"]}}}]
     assert [p["original"] for p in gather_photos(listings, files=files)] == ["https://x/a", "https://x/b"]
+
+
+def test_plan_drawings_are_served_from_the_store():
+    from aptfinder.web.app import local_plan_images
+
+    plans = [{"image": "https://x/plan.png"}, {"image": "https://x/other.png"}, {"image": None}]
+    out = local_plan_images(plans, {"https://x/plan.png": {"file": "ab" * 32}})
+    assert [p["image"] for p in out] == [f"media/{'ab' * 32}.jpg", "https://x/other.png", None]
