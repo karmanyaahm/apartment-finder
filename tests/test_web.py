@@ -349,3 +349,17 @@ def test_an_amenity_rating_is_the_buildings_for_every_goal_and_a_later_comment_k
     assert res["status"] == "pass"
     assert c.get("/api/places").json()[0]["place_key"] == pk  # the card and drawer read the same rows
     assert [a["goal_id"] for a in c.get(f"/api/places/{pk}").json()["annotations"]] == ["temp", None, None]
+
+
+def test_a_restriction_answer_must_be_one_of_the_rules_values(client):
+    c, _ = client
+    pk = c.get("/api/places").json()[0]["place_key"]
+    post = lambda comment: c.post("/api/annotations", json={"entity_key": pk, "attribute": "Restriction",
+                                                            "comment": comment})
+    r = post("students welcome")
+    assert r.status_code == 400 and "none, income, senior, veterans, student, employer, other" in r.json()["detail"]
+    assert post(None).status_code == 400
+    assert post(" Income ").status_code == 200
+    a = c.get(f"/api/places/{pk}").json()["annotations"][-1]
+    assert (a["attribute"], a["comment"]) == ("restriction", "income")
+    assert c.post("/api/annotations", json={"entity_key": pk, "attribute": "gym", "comment": "students"}).status_code == 200

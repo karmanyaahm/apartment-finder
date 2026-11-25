@@ -809,9 +809,16 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             raise HTTPException(400, "rating must be 1 to 5")
         if a.rating is None and not (a.comment or "").strip():
             raise HTTPException(400, "rating or comment required")
+        comment = a.comment
+        if a.entity_type == "place" and a.attribute.strip().lower() == "restriction":
+            # who may rent: the goals' `equals restriction` rule reads this comment, so it must be one of its values
+            # (Verify's buttons and the drawer's select send them; a note typed in the drawer is checked here)
+            comment = (a.comment or "").strip().lower()
+            if comment not in EQUALS_FIELDS["restriction"]:
+                raise HTTPException(400, "restriction must be one of: " + ", ".join(EQUALS_FIELDS["restriction"]))
         with lock:
             aid = append_annotation(conn, AUTHOR, a.entity_type, a.entity_key, a.attribute.strip().lower(),
-                                    goal_id=a.goal_id, rating=a.rating, comment=a.comment)
+                                    goal_id=a.goal_id, rating=a.rating, comment=comment)
         return {"id": aid}
 
     # ------------------------------------------------------------------ goals (filter.goals): goals.toml is the

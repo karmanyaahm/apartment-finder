@@ -1009,7 +1009,8 @@ function wireDrawer(pk) {
       e.preventDefault();
       const c = e.target.c.value.trim();
       if (!c) return;
-      await post("api/annotations", { entity_key: pk, attribute: attr, comment: c });
+      // a 'restriction' note must be one of the rule's values (the server says which); show why it was refused
+      try { await post("api/annotations", { entity_key: pk, attribute: attr, comment: c }); } catch (err) { toast("Not saved: " + err.message, 6000); return; }
       await refreshAfterWrite(pk); toast("Comment saved");
     });
   });
