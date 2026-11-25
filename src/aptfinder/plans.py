@@ -2,7 +2,7 @@
 
 Two listings are the same plan when they are at the same place with the same beds, baths and size (to 10 sqft)
 and the same kind of offer (a lease, a furnished lease such as AvalonBay Furnished+, or a furnished short stay
-such as Blueground's units inside a building).
+such as Blueground's units inside a building; a furnished listing with no term is a stay, as on the cards).
 Without a size, the plan name decides.
 """
 
@@ -17,8 +17,12 @@ def plan_key(f: dict[str, Any]) -> str:
     size = f"{'studio' if beds == 0 else (f'{beds:g}bd' if beds is not None else '?bd')}/" \
            f"{f'{baths:g}' if baths is not None else '?'}ba"
     # three offers never share a row: an ordinary lease, a furnished lease (e.g. AvalonBay Furnished+ on the
-    # same unit at a higher rent), and a furnished short stay (Blueground and its listing template)
-    offer = "stay" if f.get("term") == "short" else "furnished" if f.get("furnished") else "lease"
+    # same unit at a higher rent), and a furnished short stay (Blueground and its listing template). Term first, as
+    # the cards' lease / stay prices and the goals' term rule read it; only an unknown term falls back to furnished
+    # (furnished = stay). A furnished long lease keeps its own 'furnished' row.
+    term = f.get("term")
+    offer = ("stay" if term == "short" or (term is None and f.get("furnished")) else
+             "furnished" if f.get("furnished") else "lease")
     if f.get("sqft"):
         return f"{offer}|{size}|{round(f['sqft'] / 10) * 10:.0f}sqft"
     return f"{offer}|{size}|{(f.get('floor_plan') or '').strip().lower()}"

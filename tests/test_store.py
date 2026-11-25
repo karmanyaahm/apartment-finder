@@ -251,3 +251,13 @@ def test_a_studio_counts_as_one_bedroom_per_bed_and_unknown_beds_have_none(conn)
     inherit_prices(rows)
     assert rows[1]["price_per_bed"] == 1900
     assert _with_values({"price_month": 2000, "beds": 2}, {"beds": 0})["price_per_bed"] == 2000
+
+
+def test_plan_key_reads_the_term_first_like_the_cards():
+    from aptfinder.plans import plan_key
+
+    size = {"beds": 2, "baths": 1, "sqft": 900}
+    assert plan_key({**size, "term": "short"}).startswith("stay|")
+    assert plan_key({**size, "furnished": True}).startswith("stay|")  # no term: furnished = a stay, as on the cards
+    assert plan_key({**size, "term": "long", "furnished": True}).startswith("furnished|")  # a furnished lease
+    assert plan_key({**size, "term": "long"}).startswith("lease|") and plan_key(size).startswith("lease|")
