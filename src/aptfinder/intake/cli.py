@@ -117,6 +117,8 @@ def main(argv: list[str] | None = None) -> None:
     ex.add_argument("--dry-run", action="store_true")
     ex.add_argument("--reread", action="store_true", help="apply cached answers again to listings already read "
                                                           "(free; after a change to the checks)")
+    ex.add_argument("--id-like", help="only listings whose source_id matches this SQL LIKE pattern "
+                                      "(e.g. '%%:%%': Zillow buildings' bedroom rows)")
     zd = sub.add_parser("zillow-detail", help="fetch the detail page of every active Zillow listing without one "
                                               "(Apify; raw only, read by `extract zillow`)")
     zd.add_argument("--max-usd", type=float, required=True, help="cap on Apify spend for this command")
@@ -203,7 +205,8 @@ def main(argv: list[str] | None = None) -> None:
         for src in (TEXT_SOURCES if args.source == "all" else [args.source]):
             try:
                 res = extract(conn, src, limit=args.limit, batch=args.batch, model=args.model, max_usd=left,
-                              workers=args.workers, dry_run=args.dry_run, reread=args.reread)
+                              workers=args.workers, dry_run=args.dry_run, reread=args.reread,
+                              id_like=args.id_like)
             except Blocker as e:
                 raise SystemExit(f"BLOCKED: extract {e}")
             print(json.dumps(res, indent=1, default=str), flush=True)

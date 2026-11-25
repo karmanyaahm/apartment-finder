@@ -112,6 +112,30 @@ def test_detail_lines_leave_out_unit_values_and_placeholders():
     assert "Pets allowed: No Pets" in ex.raw_lines("zillow", UNIT)
 
 
+def test_a_buildings_rows_never_get_the_representative_units_flags():
+    # a building's page is one unit's: its furnished, laundry, appliances and cooling flags are not the building's
+    page = {**UNIT, "reso_facts": {**UNIT["reso_facts"], "appliances": ["Washer", "Dryer"],
+                                   "communityFeatures": ["Fitness Center"]}}
+    unit = ex.raw_lines("zillow", page)
+    bld = ex.raw_lines("zillow", page, building=True)
+    for line in ("Furnished: yes", "Laundry: In Unit", "Appliances: Washer; Dryer",
+                 "Cooling: Air Conditioner; Central Air"):
+        assert line in unit and line not in bld
+    for line in ("Pets allowed: No Pets", "Parking: Attached; Garage; Off Street", "Lease term: 6 Month",
+                 "Community features: Fitness Center"):
+        assert line in bld
+    assert any(x.startswith("Description: The owner leases") for x in bld)
+
+
+def test_reread_limited_by_source_id_pattern(conn, fake):
+    _zillow(conn)
+    zd.fetch(conn, max_usd=1.0)
+    stub = lambda batch, model, cap: ([{"key": b["key"], "facts": {}} for b in batch], 0.0)  # noqa: E731
+    assert ex.extract(conn, "zillow", ask_fn=stub)["listings"] == 4
+    res = ex.extract(conn, "zillow", reread=True, id_like="%:%", ask_fn=stub)
+    assert res["listings"] == 2 and res["observations"] == 2  # Harken's two bedroom rows only
+
+
 def test_extract_reads_the_page_and_a_building_sends_one_text(conn, fake, monkeypatch):
     _zillow(conn)
     zd.fetch(conn, max_usd=1.0)

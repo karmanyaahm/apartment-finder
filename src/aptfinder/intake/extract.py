@@ -223,8 +223,9 @@ def _flat(v: Any) -> str:
     return str(v).strip()
 
 
-def raw_lines(source: str, item: dict[str, Any]) -> list[str]:
-    """Allowlisted raw fields as 'label: value' lines. Never reviews, schools, transit or other buildings."""
+def raw_lines(source: str, item: dict[str, Any], building: bool = False) -> list[str]:
+    """Allowlisted raw fields as 'label: value' lines. Never reviews, schools, transit or other buildings.
+    `building`: a Zillow page read for a building's bedroom row (no unit-level flags)."""
     out: list[tuple[str, Any]] = []
     if source == "apartments_com":
         md = item.get("moreDetails") or {}
@@ -250,7 +251,7 @@ def raw_lines(source: str, item: dict[str, Any]) -> list[str]:
     elif source == "zillow":  # the listing's detail page (intake/zillow_detail.py), never its unit's beds or price
         from .zillow_detail import detail_lines
 
-        out = detail_lines(item)
+        out = detail_lines(item, building)
     return [f"{k}: {s}" for k, v in out if (s := _flat(v))]
 
 
@@ -398,10 +399,12 @@ def save_cache(new: dict[str, Any]) -> None:
 
 # --- the run ------------------------------------------------------------------------------------------------------
 
-def _pending(conn, source: str, reread: bool = False, pages: set[str] | None = None) -> list[dict[str, Any]]:
+def _pending(conn, source: str, reread: bool = False, pages: set[str] | None = None,
+             id_like: str | None = None) -> list[dict[str, Any]]:
     """Active listings with text not read under the current schema; with `reread`, also those already read (their
     answers come from the cache). A listing already read starts from its scraped observation under the reading.
-    `pages`: zpids with a Zillow detail page, which is text even when the stored row has none."""
+    `pages`: zpids with a Zillow detail page, which is text even when the stored row has none. `id_like`: only
+    source_ids matching this SQL LIKE pattern (e.g. '%:%', a Zillow building's bedroom rows)."""
     has_text = HAS_TEXT_SQL.replace('data', 'lo.data')
     if pages:
         has_text = (f"({has_text} OR CAST(json_extract(lo.data, '$.extra.zpid') AS TEXT) IN "
@@ -409,8 +412,8 @@ def _pending(conn, source: str, reread: bool = False, pages: set[str] | None = N
     rows = conn.execute(
         "SELECT lo.* FROM latest_obs lo JOIN listings l ON l.source = lo.source AND l.source_id = lo.source_id "
         f"WHERE lo.source = ? AND l.active = 1 AND (? OR {UNREAD_SQL.replace('data', 'lo.data')}) "
-        f"AND {has_text} ORDER BY lo.source_id",
-        (source, reread, *([json.dumps(sorted(pages))] if pages else []))).fetchall()
+        f"AND {has_text} AND (? IS NULL OR lo.source_id LIKE ?) ORDER BY lo.source_id",
+        (source, reread, *([json.dumps(sorted(pages))] if pages else []), id_like, id_like)).fetchall()
     out = []
     for r in rows:
         if (json.loads(r["data"]).get("extra") or {}).get("extracted") is not None:
@@ -424,9 +427,11 @@ def _pending(conn, source: str, reread: bool = False, pages: set[str] | None = N
 
 def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: str = "haiku", max_usd: float = 1.0,
             workers: int = 8, dry_run: bool = False, reread: bool = False, cached_only: bool = False,
-            ask_fn: Callable | None = None, rebuild_identity: bool = True) -> dict[str, Any]:
+            ask_fn: Callable | None = None, rebuild_identity: bool = True,
+            id_like: str | None = None) -> dict[str, Any]:
     """Read the whole entry of every unread active listing of `source`. `cached_only`: apply cached answers, ask
-    nothing (after a reparse). `ask_fn` replaces `ask` (tests). `rebuild_identity=False`: the caller rebuilds it."""
+    nothing (after a reparse). `ask_fn` replaces `ask` (tests). `rebuild_identity=False`: the caller rebuilds it.
+    `id_like`: only source_ids matching this SQL LIKE pattern."""
     if source not in TEXT_SOURCES:
         raise SystemExit(f"extract supports {', '.join(TEXT_SOURCES)} or all")
     pages = None
@@ -434,14 +439,14 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
         from .zillow_detail import load_pages
 
         pages = load_pages()
-    todo = _pending(conn, source, reread, set(pages or ()))[:limit]
+    todo = _pending(conn, source, reread, set(pages or ()), id_like)[:limit]
     raws = RawIndex(source) if source in RAW_SOURCES else None
     raw_missing = 0
     for t in todo:
         lines = None
         if pages is not None:
             page = pages.get(str((t["data"].get("extra") or {}).get("zpid")))
-            lines = raw_lines(source, page) if page else None
+            lines = raw_lines(source, page, ":" in t["row"]["source_id"]) if page else None  # <zpid>:Nbd
         elif raws is not None:
             item = raws.item(t["row"]["raw_path"], t["row"]["source_id"])
             raw_missing += item is None

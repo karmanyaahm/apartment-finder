@@ -64,11 +64,13 @@ def load_pages() -> dict[str, dict[str, Any]]:
 
 
 # Structured facts sent to the text reading as plain lines. Building-level or stated policy only: no beds, baths,
-# area, price, dates or deposit (on a building's page those are one representative unit's).
+# area, price, dates or deposit (on a building's page those are one representative unit's). On a building's page
+# the UNIT_LINES and the furnished flag are that one unit's too, so a building's bedroom rows never get them.
 RESO_LINES = (("feesAndDues", "Fees"), ("allowedPets", "Pets allowed"), ("laundryFeatures", "Laundry"),
               ("appliances", "Appliances"), ("cooling", "Cooling"), ("parkingFeatures", "Parking"),
               ("communityFeatures", "Community features"), ("associationAmenities", "Amenities"),
               ("poolFeatures", "Pool"), ("utilities", "Utilities"), ("leaseTerm", "Lease term"))
+UNIT_LINES = {"laundryFeatures", "appliances", "cooling"}
 PLACEHOLDER = re.compile(r"^(contact|call|ask|see|none|n/?a|other|unknown)\b", re.I)
 
 
@@ -89,16 +91,19 @@ def _vals(v: Any) -> list[str]:
     return out
 
 
-def detail_lines(item: dict[str, Any]) -> list[tuple[str, Any]]:
-    """(label, value) pairs of a detail page for the text reading (`extract.raw_lines('zillow', ...)`)."""
+def detail_lines(item: dict[str, Any], building: bool = False) -> list[tuple[str, Any]]:
+    """(label, value) pairs of a detail page for the text reading (`extract.raw_lines('zillow', ...)`). `building`:
+    the page is read for a building's bedroom row (`<zpid>:Nbd`), so the unit-level flags are left out; the
+    description and what's special stay (a stated 'all units furnished' is still read, with its quote)."""
     rf = dict(item.get("reso_facts") or {})
     # the security deposit is the representative unit's on a building's page; fees by type are the building's
     rf["feesAndDues"] = [f for f in rf.get("feesAndDues") or [] if not (isinstance(f, dict)
                                                                          and str(f.get("type")).lower() == "deposit")]
     out: list[tuple[str, Any]] = [("Description", (item.get("description") or "").strip()),
                                   ("What's special", item.get("whats_special"))]
-    out += [(label, "; ".join(v)) for key, label in RESO_LINES if (v := _vals(rf.get(key)))]
-    if rf.get("furnished") is True:  # `false` is on almost every page, a default, not a statement
+    out += [(label, "; ".join(v)) for key, label in RESO_LINES
+            if not (building and key in UNIT_LINES) and (v := _vals(rf.get(key)))]
+    if rf.get("furnished") is True and not building:  # `false` is on almost every page, a default, not a statement
         out.append(("Furnished", "yes"))
     return out
 
