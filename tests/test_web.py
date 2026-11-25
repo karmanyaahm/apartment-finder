@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
 from aptfinder import identity
-from aptfinder.store import connect, init_db
+from aptfinder.store import append_annotation, connect, init_db
 from aptfinder.store.seed import seed_db
 from aptfinder.web.app import create_app
 
@@ -183,29 +185,20 @@ def test_raw_is_fetched_per_listing_on_demand(client):
     assert c.get("/api/raw", params={"source": "nope", "source_id": "x"}).status_code == 404
 
 
-def test_list_filters_saved_for_everyone(client):
+def test_old_saved_filters_are_offered_once_as_a_goal(client):
+    """The list filters saved before goals were editable (view / list / filters) are no longer an endpoint; the goal
+    list offers the last saved set until a goal `saved_filters` exists (its import)."""
     c, db = client
-    assert c.get("/api/view/filters").json()["filters"] is None
-    first = {"sort": "price", "limits": [{"point": "commute_targets:Office", "mode": "bike", "max": 20}]}
-    assert c.post("/api/view/filters", json={"filters": first}).status_code == 200
-    assert c.get("/api/view/filters").json()["filters"] == first
-    second = {**first, "minbeds": 3}
-    c.post("/api/view/filters", json={"filters": second})
-    assert c.get("/api/view/filters").json()["filters"] == second  # the latest save wins
-    assert c.post("/api/view/filters", json={"filters": "x"}).status_code == 400
+    assert c.get("/api/goals").json()["legacy_filters"] is None
+    old = {"maxppb": "2500", "limits": [{"point": "commute_targets:Meta HQ", "mode": "drive", "max": 30}]}
     conn = connect(db)
-    rows = conn.execute("SELECT entity_type, entity_key, attribute FROM annotations").fetchall()
-    assert [tuple(r) for r in rows] == [("view", "list", "filters")] * 2  # appended, never replaced
-    # a view row is not a place annotation
-    assert all(p["rating"] is None and p["user_status"] is None for p in c.get("/api/places").json())
-
-
-def test_saving_filters_is_refused_in_the_redacted_view(tmp_path):
-    db = tmp_path / "seed.db"
-    seed_db(db, with_trips=True)
-    c = TestClient(create_app(db, redact={}))
-    assert c.post("/api/view/filters", json={"filters": {"sort": "price"}}).status_code == 403
-    assert c.get("/api/view/filters").json()["filters"] is None
+    append_annotation(conn, "user", "view", "list", "filters", comment=json.dumps(old))
+    g = c.get("/api/goals").json()
+    assert g["legacy_filters"] == old and g["legacy_imported"] is False
+    rules = [{"type": "max", "field": "price_per_bed", "value": 2500},
+             {"type": "commute_any", "target": "commute_targets:Meta HQ", "options": [{"mode": "drive", "max": 30}]}]
+    assert c.post("/api/goals", json={"id": "saved_filters", "label": "Saved filters", "rules": rules}).status_code == 200
+    assert c.get("/api/goals").json()["legacy_imported"] is True
 
 
 def test_places_carry_the_nearest_point_of_each_set(client):

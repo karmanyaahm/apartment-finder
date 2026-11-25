@@ -45,21 +45,10 @@
           <label><input type="checkbox" class="st" value="pass" checked> pass</label>
           <label><input type="checkbox" class="st" value="needs_check" checked> needs check</label>
           <label><input type="checkbox" class="st" value="fail" checked> fail</label>
-          <label>min beds <input id="minbeds" type="number" min="0" max="6" step="1" style="width:3.5em"></label>
-          <label>max $/bed <input id="maxppb" type="number" min="0" step="100" style="width:5.5em"></label>
           <label><input type="checkbox" id="inactive"> inactive</label>
           <label title="Places outside every Caltrain station's 25-minute walk zone (spill-over from ZIP and city searches)"><input type="checkbox" id="outzone" checked> outside walk zones</label>
         </div>
-        <div class="row commute-limits">
-          <div id="commute-limits"></div>
-          <button type="button" id="add-limit" class="small">+ requirement</button>
-          <label title="Keep places with no time yet for a requirement's point and mode (not computed yet)"><input type="checkbox" id="limit-keep-unknown" checked> keep places without a time</label>
-        </div>
-        <div class="row saved-filters">
-          <button type="button" id="save-filters" class="small" title="Store these filters (requirements included) on the server; every browser opens with them">Save for everyone</button>
-          <button type="button" id="reset-filters" class="small hidden" title="Drop this browser's unsaved changes and use the saved filters">reset to saved</button>
-          <span id="filters-state" class="muted"></span>
-        </div>
+        <div id="goal-editor" class="goal-editor"></div>
       </div>
       <div id="count" class="muted small"></div>
       <div id="cards"></div>

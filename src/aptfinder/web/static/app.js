@@ -175,151 +175,392 @@ function drawMarkers(list) {
   }
 }
 
-/* ---------------------------------------------------------------- list filters: saved for everyone */
-// "Save for everyone" stores the list filters (commute limits included) on the server; every browser opens with
-// that saved set. A change made here is kept in this browser's localStorage, and that working copy exists only
-// while it holds unsaved changes: it is deleted on save and on "reset to saved", so a browser without changes
-// always picks up the latest save. The search box and the goal switch are not part of the set.
-const FILTERS_KEY = "aptf.listFilters";
-const OLD_LIMITS_KEY = "aptf.commuteLimits"; // per-browser limits before saved filters (2026-11-25)
-S.limits = [];
-S.savedFilters = null; // {filters, ts} from the server
-S.defaultFilters = null; // the page's own defaults, when nothing was ever saved
+/* ---------------------------------------------------------------- view controls (this browser only) */
+// Sort, target, mode, the status ticks, inactive and outside walk zones are view controls, kept per browser in
+// localStorage. What a place must have is the selected goal's rules (the goal editor below), stored on the server.
+const VIEW_KEY = "aptf.view";
+const OLD_FILTERS_KEY = "aptf.listFilters"; // per-browser filters before goals were editable (2026-11-25)
 const lsGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
 const lsSet = (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch { /* blocked */ } };
-
-function readFilters() {
+function readView() {
   return {
     sort: $("#sort").value, target: $("#target").value, mode: $("#mode").value,
     statuses: $$(".st").filter((c) => c.checked).map((c) => c.value),
-    minbeds: $("#minbeds").value, maxppb: $("#maxppb").value,
     inactive: $("#inactive").checked, outzone: $("#outzone").checked,
-    keepUnknown: $("#limit-keep-unknown").checked,
-    limits: S.limits.map((l) => ({ ...l })),
   };
 }
-function applyFilters(f) {
+function applyView(f) {
   const has = (sel, v) => v != null && [...$(sel).options].some((o) => o.value === v);
   if (has("#sort", f.sort)) $("#sort").value = f.sort;
   if (has("#target", f.target)) $("#target").value = f.target;
   if (has("#mode", f.mode)) $("#mode").value = f.mode;
   if (Array.isArray(f.statuses)) $$(".st").forEach((c) => { c.checked = f.statuses.includes(c.value); });
-  $("#minbeds").value = f.minbeds ?? "";
-  $("#maxppb").value = f.maxppb ?? "";
   if (f.inactive != null) $("#inactive").checked = !!f.inactive;
   if (f.outzone != null) $("#outzone").checked = !!f.outzone;
-  if (f.keepUnknown != null) $("#limit-keep-unknown").checked = !!f.keepUnknown;
-  // old rows carried `target`; they become `point`
-  S.limits = (f.limits || []).filter((l) => l && limitPoint(l) && l.mode)
-    .map(({ target, ...l }) => ({ ...l, point: l.point || target }));
-  renderLimits();
 }
-// the working copy if this browser has unsaved changes, else the saved set, else the page's defaults
-function loadFilters() {
-  S.defaultFilters = readFilters();
-  let local = null;
-  try { local = JSON.parse(lsGet(FILTERS_KEY) || "null"); } catch { local = null; }
-  if (!local) { // fold the old per-browser limits in once, so they survive until saved
-    let old = [];
-    try { old = JSON.parse(lsGet(OLD_LIMITS_KEY) || "[]"); } catch { old = []; }
-    if (old.length) {
-      local = { ...(S.savedFilters?.filters || S.defaultFilters), limits: old };
-      const k = lsGet(OLD_LIMITS_KEY + ".keepUnknown");
-      if (k != null) local.keepUnknown = k === "1";
-      lsSet(FILTERS_KEY, JSON.stringify(local));
-    }
-  }
-  lsSet(OLD_LIMITS_KEY, null); lsSet(OLD_LIMITS_KEY + ".keepUnknown", null);
-  applyFilters(local || S.savedFilters?.filters || S.defaultFilters);
-  showFilterState();
+function loadView() {
+  let v = null;
+  try { v = JSON.parse(lsGet(VIEW_KEY) || "null"); } catch { v = null; }
+  if (v) applyView(v);
 }
-function filtersChanged() {
-  lsSet(FILTERS_KEY, JSON.stringify(readFilters()));
-  showFilterState();
-}
-function showFilterState() {
-  const dirty = lsGet(FILTERS_KEY) != null;
-  const when = S.savedFilters?.ts ? new Date(S.savedFilters.ts).toLocaleString() : null;
-  $("#filters-state").textContent = dirty ? "unsaved changes in this browser"
-    : when ? `saved set (${when})` : "defaults (nothing saved yet)";
-  $("#reset-filters").classList.toggle("hidden", !dirty);
-}
-async function saveFiltersForEveryone() {
-  const f = readFilters();
-  try {
-    await post("api/view/filters", { filters: f });
-    S.savedFilters = { filters: f, ts: new Date().toISOString() };
-    lsSet(FILTERS_KEY, null);
-    showFilterState();
-    toast("Filters saved for everyone");
-  } catch (e) { toast("Not saved: " + e.message, 5000); }
-}
-function resetFilters() {
-  lsSet(FILTERS_KEY, null);
-  applyFilters(S.savedFilters?.filters || S.defaultFilters);
-  showFilterState();
-  renderList();
-}
-const saveLimits = filtersChanged;
-// A requirement row: "at most N minutes by <mode> to <point>", where the point is one commute target
-// (`commute_targets:Meta HQ`) or the nearest point of a set (`set:google_bus_stops`). Rows saved before 2026-11-25
-// carried `target` (always a commute target); they read as that point.
-const limitPoint = (l) => l.point || l.target;
+const saveView = () => lsSet(VIEW_KEY, JSON.stringify(readView()));
+
+// A commute row's point: one commute target (`commute_targets:Meta HQ`) or the nearest point of a set
+// (`set:google_bus_stops`); a goal stores the first as a `commute_any` rule and the second as a `near` rule.
 function limitOptions() {
   return [...S.meta.targets.map((t) => [t, t.split(":")[1]]),
     ...Object.entries(S.meta.point_sets).filter(([k]) => k !== "commute_targets").map(([k, v]) => [`set:${k}`, `nearest ${v.label}`])];
 }
-function limitName(l) {
-  const pt = limitPoint(l);
+function limitName(pt, mode) {
   const where = pt.startsWith("set:") ? `nearest ${S.meta.point_sets[pt.slice(4)]?.label || pt.slice(4)}` : pt.split(":")[1];
-  return `${MODE_LABEL[l.mode] || l.mode} to ${where}`;
+  return `${MODE_LABEL[mode] || mode} to ${where}`;
 }
-function limitValue(p, l) {
-  const pt = limitPoint(l);
-  return pt.startsWith("set:") ? (p.nearest || {})[`${pt.slice(4)}|${l.mode}`] : p.minutes[`${pt}|${l.mode}`];
+function limitValue(p, pt, mode) {
+  return pt.startsWith("set:") ? (p.nearest || {})[`${pt.slice(4)}|${mode}`] : p.minutes[`${pt}|${mode}`];
 }
-function renderLimits() {
-  const opts = limitOptions();
-  const pOpts = (sel) => opts.map(([v, label]) => `<option value="${esc(v)}"${v === sel ? " selected" : ""}>${esc(label)}</option>`).join("");
-  const mOpts = (sel) => S.meta.modes.map((m) => `<option value="${esc(m)}"${m === sel ? " selected" : ""}>${esc(MODE_LABEL[m])}</option>`).join("");
-  $("#commute-limits").innerHTML = S.limits.map((l, i) => `<div class="limit" data-i="${i}">
-      <select data-k="point">${pOpts(limitPoint(l))}</select>
-      <select data-k="mode">${mOpts(l.mode)}</select>
-      ≤ <input data-k="max" type="number" min="0" step="5" value="${l.max ?? ""}" style="width:4em"> min
-      <button type="button" data-rm="${i}" title="remove this requirement">×</button></div>`).join("");
-  $$("#commute-limits .limit").forEach((row) => {
-    const l = S.limits[+row.dataset.i];
-    $$("[data-k]", row).forEach((el) => el.addEventListener("input", () => {
-      l[el.dataset.k] = el.dataset.k === "max" ? parseFloat(el.value) : el.value;
-      saveLimits();
-      renderList();
+// the selected goal's commute rules as (point, mode) facts on each card, so the requirement is visible:
+// "walk to nearest Google bus 6 min (stop name, est.)"; the goal's fails colour them
+function commuteRows() {
+  const g = S.goal !== "all" && S.draft && S.draft.id === S.goal ? S.draft : null;
+  if (!g) return [];
+  return [...g.rules, ...g.nice].flatMap((r) => r.type === "commute_any" ? (r.options || []).map((o) => [r.target, o.mode])
+    : r.type === "near" ? [[`set:${r.set}`, r.mode]] : []);
+}
+function limitFacts(p, fails = []) {
+  return commuteRows().map(([pt, mode]) => {
+    const v = limitValue(p, pt, mode);
+    const name = limitName(pt, mode);
+    const at = v && v.point ? ` (${v.point})` : "";
+    const mk = markFor(fails, (x) => x.modes?.includes(mode) && (pt.startsWith("set:") ? x.f === "near" && x.set === pt.slice(4) : x.f === "commute" && x.pt === pt));
+    return v && v.minutes != null ? `<span${mk}>${esc(name)} <b>${num(v.minutes)}</b> min${esc(at)}${v.provider === "estimate" ? " (est.)" : ""}</span>`
+      : `<span${mk}>${esc(name)}: no time</span>`;
+  }).join("");
+}
+
+/* ---------------------------------------------------------------- goals: the filter panel edits the selected goal */
+// A goal is {id, label, rules, nice} (filter/rules.py rule dicts). The panel edits a draft of the selected goal;
+// every change is judged on the server (POST api/goals/preview, writes nothing) and shown in the list at once.
+// "Save" stores the goal for everyone (an append-only annotation row), "Save as new goal" stores a copy,
+// "Revert" drops the draft. All shows each place's best status over every goal and edits nothing.
+S.goalsData = null; // GET api/goals
+S.draft = null; // {id, label, rules, nice}: the selected goal being edited
+S.previewMsg = "";
+const clone = (o) => JSON.parse(JSON.stringify(o));
+const savedGoal = (id) => S.goalsData?.goals.find((g) => g.id === id);
+const draftDirty = () => S.draft && JSON.stringify({ l: S.draft.label, r: S.draft.rules, n: S.draft.nice })
+  !== JSON.stringify((({ label, rules, nice }) => ({ l: label, r: rules, n: nice }))(savedGoal(S.draft.id) || {}));
+// the offer a goal makes: "short" term = furnished stay prices, "long" = lease prices, neither = both
+function goalTerm(id) {
+  const g = S.draft && S.draft.id === id ? S.draft : savedGoal(id);
+  return g?.rules.find((r) => r.type === "equals" && r.field === "term")?.value || null;
+}
+
+// "+ add" menu: [label, the new rule]
+function ruleTemplates() {
+  const pt = $("#target").value || S.meta.targets[0];
+  return [
+    ["price / bed at most", { type: "max", field: "price_per_bed", value: 2500 }],
+    ["price / month at most", { type: "max", field: "price_month", value: 4000 }],
+    ["beds at least", { type: "min", field: "beds", value: 3 }],
+    ["beds and baths", { type: "size_options", options: [{ beds: 3, min_baths: 2 }] }],
+    ["commute", { type: "commute_any", target: pt, options: [{ mode: $("#mode").value || "walk", max: 25 }] }],
+    ["amenity", { type: "amenity", name: "gym", match: ["gym", "fitness"] }],
+    ["lease term", { type: "equals", field: "term", value: "long" }],
+    ["furnished", { type: "equals", field: "furnished", value: true }],
+    ["private bath", { type: "equals", field: "private_bath", value: true }],
+    ["available for dates", { type: "dates_cover", start: new Date().toISOString().slice(0, 10), end: new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10) }],
+    ["field known", { type: "known", field: "sqft" }],
+  ];
+}
+const opt = (v, label, sel) => `<option value="${esc(v)}"${String(v) === String(sel) ? " selected" : ""}>${esc(label)}</option>`;
+const FIELD_LABEL = { price: "price", price_month: "price / month", price_per_bed: "price / bed", beds: "beds", baths: "baths",
+  sqft: "sqft", term: "term", furnished: "furnished", private_bath: "private bath", kind: "kind" };
+const fieldName = (f) => FIELD_LABEL[f] || f.replace(/_/g, " ");
+// one rule row's inputs; each input names the path it sets in data-p ("value", "options.0.max", ...)
+function ruleInputs(r) {
+  const G = S.goalsData;
+  const numIn = (p, v, w = 5, step = "any") => `<input data-p="${p}" data-num type="number" step="${step}" value="${v ?? ""}" style="width:${w}em">`;
+  if (r.type === "max" || r.type === "min") {
+    const op = (r.type === "max" ? (r.strict ? "<" : "≤") : (r.strict ? ">" : "≥"));
+    return `<select data-p="field">${G.numeric_fields.map((f) => opt(f, fieldName(f), r.field)).join("")}</select>
+      <select data-op>${["≤", "<", "≥", ">"].map((o) => opt(o, o, op)).join("")}</select>${numIn("value", r.value, 5.5)}`;
+  }
+  if (r.type === "equals") {
+    const vals = G.equals_fields[r.field] || [];
+    return `<select data-p="field">${Object.keys(G.equals_fields).map((f) => opt(f, fieldName(f), r.field)).join("")}</select> =
+      <select data-p="value" data-json>${vals.map((v) => opt(JSON.stringify(v), v === true ? "yes" : v === false ? "no" : v, JSON.stringify(r.value))).join("")}</select>`;
+  }
+  if (r.type === "known") return `<select data-p="field">${G.known_fields.map((f) => opt(f, fieldName(f), r.field)).join("")}</select> known`;
+  if (r.type === "size_options") {
+    return r.options.map((o, i) => `<span class="sub">${numIn(`options.${i}.beds`, o.beds, 3, 1)} bd, ≥ ${numIn(`options.${i}.min_baths`, o.min_baths, 3.5, 0.5)} ba
+      ${r.options.length > 1 ? `<button type="button" class="small" data-rm-opt="${i}" title="remove this size">×</button>` : ""}</span>`).join(" or ")
+      + ` <button type="button" class="small" data-add-opt="size" title="another size that also counts">+ or</button>`;
+  }
+  if (r.type === "dates_cover") return `from <input data-p="start" type="date" value="${esc(r.start)}"> to <input data-p="end" type="date" value="${esc(r.end)}">`;
+  if (r.type === "commute_any" || r.type === "near") {
+    const pt = r.type === "near" ? `set:${r.set}` : r.target;
+    const mOpts = (sel) => S.meta.modes.map((m) => opt(m, MODE_LABEL[m] || m, sel)).join("");
+    const rows = r.type === "near" ? [{ mode: r.mode, max: r.max }] : r.options;
+    return `<select data-pt>${limitOptions().map(([v, l]) => opt(v, l, pt)).join("")}</select> `
+      + rows.map((o, i) => `<span class="sub"><select data-p="${r.type === "near" ? "mode" : `options.${i}.mode`}">${mOpts(o.mode)}</select>
+        ≤ ${numIn(r.type === "near" ? "max" : `options.${i}.max`, o.max, 3.5, 1)} min${rows.length > 1 ? ` <button type="button" class="small" data-rm-opt="${i}" title="remove this mode">×</button>` : ""}</span>`).join(" or ")
+      + (r.type === "commute_any" ? ` <button type="button" class="small" data-add-opt="mode" title="another mode that also counts">+ or</button>` : "");
+  }
+  if (r.type === "amenity") {
+    const preset = Object.keys(G.amenities).includes(r.name) ? r.name : "";
+    return `<select data-amenity>${Object.keys(G.amenities).map((k) => opt(k, k.replace(/_/g, " "), preset)).join("")}${opt("", "other…", preset)}</select>
+      ${preset ? "" : `<input data-p="name" value="${esc(r.name)}" placeholder="name" style="width:7em">`}
+      <input data-words="match" value="${esc((r.match || []).join(", "))}" placeholder="words, comma separated" title="matches when an amenity entry contains any of these words" style="width:11em">`;
+  }
+  return `<code>${esc(JSON.stringify(r))}</code>`;
+}
+function setPath(o, path, v) {
+  const ks = path.split(".");
+  const last = ks.pop();
+  ks.reduce((a, k) => a[k], o)[last] = v;
+}
+function renderRuleList(part) {
+  return S.draft[part].map((r, i) => `<div class="rule" data-part="${part}" data-i="${i}">
+      <span class="rule-kind">${esc(S.goalsData.types[r.type]?.label || r.type)}</span> ${ruleInputs(r)}
+      <button type="button" class="small rm" data-rm title="remove">×</button></div>`).join("")
+    || `<div class="muted small">none</div>`;
+}
+function renderGoalEditor() {
+  const box = $("#goal-editor");
+  if (!S.goalsData) { box.innerHTML = ""; return; }
+  const ro = S.meta.readonly;
+  const imp = S.legacyFilters && !ro
+    ? `<div class="row small"><button type="button" id="g-import" class="small">Import old saved filters as a goal</button>
+       <span class="muted">${esc(legacySummary(S.legacyFilters))}</span></div>` : "";
+  if (S.goal === "all" || !S.draft) {
+    box.innerHTML = `<div class="row small"><span class="muted">All goals: each place shows its best status. Pick a goal to see and edit its rules.</span>
+      ${ro ? "" : `<button type="button" id="g-new" class="small">+ new goal</button>`}</div>${imp}`;
+  } else {
+    const g = S.draft, dirty = draftDirty();
+    const tmpl = ruleTemplates().map(([l], i) => `<option value="${i}">${esc(l)}</option>`).join("");
+    const add = (part) => ro ? "" : `<select class="g-add" data-part="${part}"><option value="">+ add…</option>${tmpl}</select>`;
+    box.innerHTML = `<details id="g-details"${S.editorOpen ? " open" : ""}>
+      <summary><b>${esc(g.label)}</b> <span class="muted small">${g.rules.length} must, ${g.nice.length} nice${dirty ? " · unsaved draft" : ""}</span></summary>
+      <div class="row small"><label>Name <input id="g-label" value="${esc(g.label)}" style="width:16em"></label>
+        <span class="muted">id ${esc(g.id)} · ${esc(savedGoal(g.id)?.origin || "")}</span></div>
+      <div class="small"><b>Must have</b> <span class="muted">(fail = any rule fails; needs check = a value is unknown)</span></div>
+      ${renderRuleList("rules")}${add("rules")}
+      <div class="small"><b>Nice to have</b> <span class="muted">(counted, never excludes)</span></div>
+      ${renderRuleList("nice")}${add("nice")}
+      ${ro ? "" : `<div class="row small">
+        <button type="button" id="g-save" class="accent small"${dirty ? "" : " disabled"}>Save</button>
+        <button type="button" id="g-saveas" class="small">Save as new goal</button>
+        <button type="button" id="g-revert" class="small"${dirty ? "" : " disabled"}>Revert</button>
+        <button type="button" id="g-delete" class="small">Delete goal</button>
+        <button type="button" id="g-new" class="small">+ new goal</button></div>`}
+      <div id="g-msg" class="small ${S.previewMsg.startsWith("!") ? "err" : "muted"}">${esc(S.previewMsg.replace(/^!/, ""))}</div>
+    </details>${imp}`;
+    $("#g-details").addEventListener("toggle", (e) => { S.editorOpen = e.target.open; });
+    if (ro) $$("#goal-editor input, #goal-editor select").forEach((el) => { el.disabled = true; });
+    $("#g-label").addEventListener("change", (e) => { g.label = e.target.value; draftChanged(); });
+    $$("#goal-editor .rule").forEach(wireRule);
+    $$("#goal-editor .g-add").forEach((s) => s.addEventListener("change", () => {
+      if (s.value === "") return;
+      g[s.dataset.part].push(clone(ruleTemplates()[+s.value][1]));
+      draftChanged(true);
     }));
+  }
+  $("#g-save")?.addEventListener("click", saveGoal);
+  $("#g-saveas")?.addEventListener("click", saveGoalAsNew);
+  $("#g-revert")?.addEventListener("click", () => { S.draft = clone(savedGoal(S.goal)); draftChanged(true); });
+  $("#g-delete")?.addEventListener("click", deleteGoal);
+  $("#g-new")?.addEventListener("click", newGoal);
+  $("#g-import")?.addEventListener("click", importLegacy);
+}
+function wireRule(row) {
+  const r = S.draft[row.dataset.part][+row.dataset.i];
+  const changed = (rerender) => draftChanged(rerender);
+  $("[data-rm]", row)?.addEventListener("click", () => { S.draft[row.dataset.part].splice(+row.dataset.i, 1); changed(true); });
+  $$("[data-p]", row).forEach((el) => el.addEventListener("change", () => {
+    let v = el.value;
+    if (el.dataset.num !== undefined) v = el.value === "" ? null : +el.value;
+    if (el.dataset.json !== undefined) v = JSON.parse(v);
+    setPath(r, el.dataset.p, v);
+    // an equals rule's field picks its first allowed value
+    if (r.type === "equals" && el.dataset.p === "field") { r.value = S.goalsData.equals_fields[r.field][0]; return changed(true); }
+    changed(false);
+  }));
+  $("[data-op]", row)?.addEventListener("change", (e) => {
+    const o = e.target.value;
+    r.type = o === "≤" || o === "<" ? "max" : "min";
+    if (o === "<" || o === ">") r.strict = true; else delete r.strict;
+    changed(true);
   });
-  $$("#commute-limits [data-rm]").forEach((b) => b.addEventListener("click", () => {
-    S.limits.splice(+b.dataset.rm, 1);
-    saveLimits();
-    renderLimits();
-    renderList();
+  $("[data-pt]", row)?.addEventListener("change", (e) => {
+    const pt = e.target.value;
+    const first = r.type === "near" ? { mode: r.mode, max: r.max } : r.options[0];
+    for (const k of Object.keys(r)) delete r[k];
+    Object.assign(r, pt.startsWith("set:") ? { type: "near", set: pt.slice(4), mode: first.mode, max: first.max }
+      : { type: "commute_any", target: pt, options: [first] });
+    changed(true);
+  });
+  $$("[data-add-opt]", row).forEach((b) => b.addEventListener("click", () => {
+    r.options.push(b.dataset.addOpt === "size" ? { beds: 3, min_baths: 2 } : { mode: "walk", max: 25 });
+    changed(true);
+  }));
+  $$("[data-rm-opt]", row).forEach((b) => b.addEventListener("click", () => { r.options.splice(+b.dataset.rmOpt, 1); changed(true); }));
+  $("[data-amenity]", row)?.addEventListener("change", (e) => {
+    const k = e.target.value;
+    const preset = S.goalsData.amenities[k];
+    for (const key of Object.keys(r)) if (key !== "type") delete r[key];
+    Object.assign(r, preset ? { name: k, match: [...preset.match], ...(preset.exclude.length ? { exclude: [...preset.exclude] } : {}) } : { name: "", match: [] });
+    changed(true);
+  });
+  $$("[data-words]", row).forEach((el) => el.addEventListener("change", () => {
+    const words = el.value.split(",").map((w) => w.trim()).filter(Boolean);
+    if (words.length) r[el.dataset.words] = words; else delete r[el.dataset.words];
+    changed(false);
   }));
 }
-function addLimit() {
-  S.limits.push({ point: $("#target").value, mode: $("#mode").value, max: 30 });
-  saveLimits();
-  renderLimits();
+// a draft change: preview it in the list (debounced), re-render the panel when its shape changed
+function draftChanged(rerender = true) {
+  if (rerender) renderGoalEditor(); else refreshEditorState();
+  clearTimeout(draftChanged._t);
+  draftChanged._t = setTimeout(previewDraft, 400);
+}
+function refreshEditorState() {
+  const dirty = draftDirty();
+  if ($("#g-save")) $("#g-save").disabled = !dirty;
+  if ($("#g-revert")) $("#g-revert").disabled = !dirty;
+  const m = $("#g-msg");
+  if (m) { m.textContent = S.previewMsg.replace(/^!/, ""); m.className = `small ${S.previewMsg.startsWith("!") ? "err" : "muted"}`; }
+  const sum = $("#g-details summary .small");
+  if (sum && S.draft) sum.textContent = `${S.draft.rules.length} must, ${S.draft.nice.length} nice${dirty ? " · unsaved draft" : ""}`;
+}
+// every place's result for the draft replaces its saved result for that goal (p.saved keeps the server's)
+async function previewDraft() {
+  const g = S.draft;
+  if (!g) return;
+  if (!draftDirty()) { applyGoalResults(g.id, null); S.previewMsg = ""; refreshEditorState(); renderList(); return; }
+  const seq = (previewDraft.seq = (previewDraft.seq || 0) + 1);
+  S.previewMsg = "previewing the draft…"; refreshEditorState();
+  try {
+    const r = await post("api/goals/preview", { label: g.label, rules: g.rules, nice: g.nice });
+    if (seq !== previewDraft.seq || S.draft !== g) return; // a newer edit is on its way
+    applyGoalResults(g.id, r.places);
+    S.previewMsg = "draft shown in the list; not saved";
+  } catch (e) {
+    if (seq !== previewDraft.seq) return;
+    S.previewMsg = "!" + e.message.replace(/^api\/goals\/preview: HTTP 400[^:]*: /, "");
+  }
+  refreshEditorState();
   renderList();
 }
-// each requirement's time on a card, so the filter is visible: "walk to nearest Google bus 6 min (stop name, est.)"
-function limitFacts(p, fails = []) {
-  return S.limits.filter((l) => l.max > 0).map((l) => {
-    const v = limitValue(p, l);
-    const name = limitName(l);
-    const pt = v && v.point ? ` (${v.point})` : "";
-    const lp = limitPoint(l);
-    const mk = markFor(fails, (x) => x.modes?.includes(l.mode) && (lp.startsWith("set:") ? x.f === "near" && x.set === lp.slice(4) : x.f === "commute" && x.pt === lp));
-    // a requirement row with no time is kept only under "keep places without a time": unknown, so amber
-    return v && v.minutes != null ? `<span${mk}>${esc(name)} <b>${num(v.minutes)}</b> min${esc(pt)}${v.provider === "estimate" ? " (est.)" : ""}</span>`
-      : `<span${mk || ` data-ff="needs_check" title="no time for this requirement yet"`}>${esc(name)}: no time</span>`;
-  }).join("");
+function applyGoalResults(gid, places) {
+  for (const p of S.places) {
+    p.saved = p.saved || p.goals;
+    if (!places) { p.goals = p.saved; continue; }
+    p.goals = { ...p.saved };
+    if (places[p.place_key]) p.goals[gid] = places[p.place_key]; else delete p.goals[gid];
+  }
+}
+function selectGoal(id) {
+  if (S.draft && draftDirty() && S.draft.id !== id && !confirm(`Drop the unsaved changes to "${S.draft.label}"?`)) return false;
+  S.goal = id;
+  S.draft = id === "all" ? null : clone(savedGoal(id) || { id, label: id, rules: [], nice: [] });
+  S.previewMsg = "";
+  if (S.places.length) applyGoalResults(null, null);
+  renderGoalSwitch();
+  if (goalTerm(S.goal) === "short") $("#sort").value = "price"; // a stay: cheaper is better within its budget
+  renderGoalEditor();
+  renderList();
+  if (S.selected && !$("#drawer").classList.contains("hidden")) openPlace(S.selected); // show only this goal
+  return true;
+}
+function renderGoalSwitch() {
+  const gs = $("#goal-switch");
+  gs.innerHTML = [`<button data-goal="all">All</button>`, ...S.goalsData.goals.map((g) => `<button data-goal="${esc(g.id)}" title="${esc(g.label)}">${esc(g.id)}</button>`)].join("");
+  $$("button", gs).forEach((b) => {
+    b.classList.toggle("on", b.dataset.goal === S.goal);
+    b.addEventListener("click", () => selectGoal(b.dataset.goal));
+  });
+}
+// after a save: the goal list, the meta (default target), and every place's saved results
+async function reloadGoals(selectId) {
+  S.goalsData = await api("api/goals");
+  S.legacyFilters = legacyFilters();
+  S.meta = await api("api/meta");
+  S.previewMsg = "saved; recomputing the list…";
+  S.draft = null;
+  S.places = []; // nothing to restore: the new list is the saved truth
+  renderGoalEditor();
+  selectGoal(savedGoal(selectId) ? selectId : "all");
+  await loadPlaces();
+  S.previewMsg = "";
+  refreshEditorState();
+}
+async function saveGoal() {
+  const g = S.draft;
+  try {
+    await api(`api/goals/${encodeURIComponent(g.id)}`, { method: "PUT", body: JSON.stringify({ label: g.label, rules: g.rules, nice: g.nice }) });
+    toast(`Saved "${g.label}" for everyone`);
+    await reloadGoals(g.id);
+  } catch (e) { toast("Not saved: " + e.message, 6000); }
+}
+async function createGoal(body) {
+  try {
+    const r = await post("api/goals", body);
+    toast(`Created "${body.label}"`);
+    S.draft = null; // the old draft is kept as the new goal; nothing to confirm
+    await reloadGoals(r.goal);
+  } catch (e) { toast("Not created: " + e.message, 6000); }
+}
+async function saveGoalAsNew() {
+  const label = prompt("Name of the new goal", `${S.draft.label} (copy)`);
+  if (!label) return;
+  const g = S.draft;
+  await createGoal({ label, rules: g.rules, nice: g.nice });
+}
+async function newGoal() {
+  const label = prompt("Name of the new goal (it starts with no rules: every place passes)");
+  if (!label) return;
+  if (S.draft && draftDirty() && !confirm(`Drop the unsaved changes to "${S.draft.label}"?`)) return;
+  await createGoal({ label, rules: [], nice: [] });
+}
+async function deleteGoal() {
+  const g = S.draft;
+  if (!confirm(`Delete the goal "${g.label}" for everyone? (It stays in the log and can be created again.)`)) return;
+  try {
+    await api(`api/goals/${encodeURIComponent(g.id)}`, { method: "DELETE" });
+    toast(`Deleted "${g.label}"`);
+    S.draft = null;
+    await reloadGoals("all");
+  } catch (e) { toast("Not deleted: " + e.message, 6000); }
+}
+// The list filters saved before goals were editable (server's last "Save for everyone", or this browser's unsaved
+// copy) as rules: max $/bed, min beds and each requirement row. Offered once as a new goal "saved_filters".
+function legacyFilters() {
+  let f = null;
+  try { f = JSON.parse(lsGet(OLD_FILTERS_KEY) || "null"); } catch { f = null; }
+  if (S.goalsData.legacy_imported) { lsSet(OLD_FILTERS_KEY, null); return null; }
+  f = f || S.goalsData.legacy_filters;
+  if (!f) return null;
+  const rules = [];
+  if (f.maxppb !== "" && f.maxppb != null && !isNaN(+f.maxppb)) rules.push({ type: "max", field: "price_per_bed", value: +f.maxppb });
+  if (f.minbeds !== "" && f.minbeds != null && !isNaN(+f.minbeds)) rules.push({ type: "min", field: "beds", value: +f.minbeds });
+  for (const l of f.limits || []) {
+    const pt = l.point || l.target;
+    if (!pt || !l.mode || !(l.max > 0)) continue;
+    rules.push(pt.startsWith("set:") ? { type: "near", set: pt.slice(4), mode: l.mode, max: l.max }
+      : { type: "commute_any", target: pt, options: [{ mode: l.mode, max: l.max }] });
+  }
+  return rules.length ? rules : null;
+}
+function legacySummary(rules) {
+  return rules.map((r) => r.type === "max" ? `$/bed ≤ ${r.value}` : r.type === "min" ? `beds ≥ ${r.value}`
+    : r.type === "near" ? `${limitName("set:" + r.set, r.mode)} ≤ ${r.max}` : `${limitName(r.target, r.options[0].mode)} ≤ ${r.options[0].max}`).join(", ");
+}
+async function importLegacy() {
+  const base = S.draft;
+  const label = prompt("Name of the goal made from the old saved filters", base ? `${base.label} + saved filters` : "Saved filters");
+  if (!label) return;
+  await createGoal({ id: "saved_filters", label, rules: [...(base?.rules || []), ...S.legacyFilters], nice: base?.nice || [] });
+  lsSet(OLD_FILTERS_KEY, null);
 }
 
 // Which attribute a place fails on: each non-pass goal rule arrives as {s, f, v, lim?, pt?/set?, modes?}
@@ -348,7 +589,7 @@ function failChip(x) {
   if (x.f === "commute") t = `${x.modes.map((m) => MODE_LABEL[m] || m).join("/")} to ${x.pt.split(":").slice(1).join(":")}`;
   else if (x.f === "near") t = `${x.modes.map((m) => MODE_LABEL[m] || m).join("/")} to nearest ${S.meta.point_sets?.[x.set]?.label || x.set}`;
   else if (x.f === "amenity") t = `no ${x.v}`;
-  else t = `${FACT_LABEL[x.f] || x.f.replace(/_/g, " ")} ${fmtv(x.v)}${x.lim != null && x.s === "fail" && x.v != null ? ` > ${num(x.lim)}` : ""}`;
+  else t = `${FACT_LABEL[x.f] || x.f.replace(/_/g, " ")} ${fmtv(x.v)}${x.lim != null && x.s === "fail" && x.v != null ? ` ${x.min ? "<" : ">"} ${num(x.lim)}` : ""}`;
   return `<span class="chip ff-chip" data-ff="${x.s}" title="${esc(`${x.goal}: ${x.text}`)}">${esc(t)}</span>`;
 }
 
@@ -356,22 +597,13 @@ function failChip(x) {
 function filtered() {
   const q = $("#q").value.trim().toLowerCase();
   const sts = new Set($$(".st").filter((c) => c.checked).map((c) => c.value));
-  const minBeds = parseFloat($("#minbeds").value);
-  const maxPpb = parseFloat($("#maxppb").value);
   const showInactive = $("#inactive").checked;
   const showOutside = $("#outzone").checked;
-  const keepUnknown = $("#limit-keep-unknown").checked;
+  // what a place must have is the goal's rules; the list shows the places whose status is ticked
   return S.places.filter((p) => {
     if (!sts.has(placeStatus(p))) return false;
     if (!showInactive && !p.n_active) return false;
     if (!showOutside && !p.in_zone) return false;
-    if (!isNaN(minBeds) && !(p.max_beds >= minBeds)) return false;
-    if (!isNaN(maxPpb) && p.min_price_per_bed != null && p.min_price_per_bed > maxPpb) return false;
-    for (const lim of S.limits) {
-      if (!(lim.max > 0)) continue;
-      const v = limitValue(p, lim);
-      if (v && v.minutes != null ? v.minutes > lim.max : !keepUnknown) return false;
-    }
     if (q) {
       const hay = [p.label, p.address, p.city, p.sources, p.title, p.operator].join(" ").toLowerCase();
       if (!hay.includes(q)) return false;
@@ -385,8 +617,8 @@ function sorted(list) {
   const nil = (v) => (v == null ? Infinity : v);
   const fns = {
     status: (p) => [RANK[placeStatus(p)], -(p.goals[S.goal]?.nice_score || 0), nil(p.min_price_per_bed)],
-    price: (p) => [nil(S.goal === "temp" ? p.min_stay_month : S.goal === "lease" ? p.min_lease_month : p.min_price_month)],
-    ppb: (p) => [nil(S.goal === "lease" ? p.min_lease_per_bed : p.min_price_per_bed)],
+    price: (p) => [nil(goalTerm(S.goal) === "short" ? p.min_stay_month : goalTerm(S.goal) === "long" ? p.min_lease_month : p.min_price_month)],
+    ppb: (p) => [nil(goalTerm(S.goal) === "long" ? p.min_lease_per_bed : p.min_price_per_bed)],
     beds: (p) => [-(p.max_beds || 0)], minutes: (p) => [nil(minutesFor(p)?.minutes)],
     rating: (p) => [-(p.rating || 0)], nice: (p) => [-(Math.max(0, ...Object.values(p.goals).map((g) => g.nice_score || 0)))],
   };
@@ -398,13 +630,15 @@ function sorted(list) {
   });
 }
 
-// Lease rent and furnished-stay prices are different offers: temp shows stays, lease shows leases, All both.
-// A price failure marks the price shown for its goal's offer (temp: the stay, otherwise the lease); when the
+// Lease rent and furnished-stay prices are different offers: a goal whose term rule is short shows stays, long
+// shows leases, any other goal and All both. A price failure marks the price shown for its goal's offer (a
+// short-term goal: the stay, otherwise the lease); when the
 // deciding listing's price differs from the minimum on the card, its own price follows in brackets.
 function priceFacts(p, fails = []) {
-  const showLease = p.min_lease_month != null && S.goal !== "temp";
-  const showStay = p.min_stay_month != null && S.goal !== "lease";
-  const forStay = (x) => (x.goal === "temp" || !showLease) && showStay;
+  const term = goalTerm(S.goal);
+  const showLease = p.min_lease_month != null && term !== "short";
+  const showStay = p.min_stay_month != null && term !== "long";
+  const forStay = (x) => (goalTerm(x.goal) === "short" || !showLease) && showStay;
   const mark = (field, shown, pick) => {
     const mk = markFor(fails, (x) => x.f === field && pick(x));
     const own = fails.find((x) => x.f === field && pick(x) && x.v != null && Math.round(x.v) !== Math.round(shown));
@@ -420,8 +654,8 @@ function priceFacts(p, fails = []) {
     const [sm, smv] = mark("price_month", p.min_stay_month, forStay);
     stay = `<span${sm || ' title="furnished short stay"'}>stay <b>${money(p.min_stay_month)}</b>/mo${smv}</span>`;
   }
-  if (S.goal === "temp") return stay || `<span class="muted">no furnished stay</span>`;
-  if (S.goal === "lease") return lease || `<span class="muted">no lease price</span>`;
+  if (term === "short") return stay || `<span class="muted">no furnished stay</span>`;
+  if (term === "long") return lease || `<span class="muted">no lease price</span>`;
   if (lease + stay) return lease + stay;
   const [am, amv] = mark("price_month", p.min_price_month, () => true);
   return `<span${am}><b>${money(p.min_price_month)}</b>/mo${amv}</span>`;
@@ -1260,6 +1494,7 @@ function statusBlock(s) {
 /* ---------------------------------------------------------------- boot */
 async function loadPlaces() {
   S.places = await api("api/places");
+  if (S.draft && draftDirty()) previewDraft(); // a draft keeps showing over the fresh saved results
   renderList();
 }
 
@@ -1267,34 +1502,21 @@ async function boot() {
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
   S.meta = await api("api/meta");
   $("#dbname").textContent = S.meta.db;
-  const gs = $("#goal-switch");
-  // start on the lease goal when there is one, else All
-  S.goal = S.meta.goals.some((g) => g.id === "lease") ? "lease" : "all";
-  gs.innerHTML = [`<button data-goal="all">All</button>`, ...S.meta.goals.map((g) => `<button data-goal="${esc(g.id)}" title="${esc(g.label)}">${esc(g.id)}</button>`)].join("");
-  $$("button", gs).forEach((x) => x.classList.toggle("on", x.dataset.goal === S.goal));
-  $$("button", gs).forEach((b) => b.addEventListener("click", () => {
-    S.goal = b.dataset.goal;
-    $$("button", gs).forEach((x) => x.classList.toggle("on", x === b));
-    if (S.goal === "temp") $("#sort").value = "price"; // temp: cheaper is better within the ~$4k budget
-    renderList();
-    if (S.selected && !$("#drawer").classList.contains("hidden")) openPlace(S.selected); // show only this goal
-  }));
   $("#target").innerHTML = S.meta.targets.map((t) => `<option value="${esc(t)}">${esc(t.split(":")[1])}</option>`).join("");
   $("#mode").innerHTML = S.meta.modes.map((m) => `<option value="${esc(m)}">${esc(MODE_LABEL[m])}</option>`).join("");
   if (S.meta.default_target) $("#target").value = S.meta.default_target; // the target a goal commutes to
   $("#mode").value = "bike";
-  // the saved set; if it cannot be read, the page opens with this browser's copy or the defaults
-  S.savedFilters = await api("api/view/filters").catch((e) => { console.warn(e); return null; });
-  loadFilters();
-  $("#add-limit").addEventListener("click", addLimit);
-  $("#save-filters").addEventListener("click", saveFiltersForEveryone);
-  $("#reset-filters").addEventListener("click", resetFilters);
+  loadView();
+  S.goalsData = await api("api/goals");
+  S.legacyFilters = legacyFilters();
   initMap();
+  // start on the lease goal when there is one, else All
+  selectGoal(savedGoal("lease") ? "lease" : "all");
   $$("#base-switch button").forEach((b) => b.addEventListener("click", () => setBase(b.dataset.base)));
   $("#q").addEventListener("input", renderList);
-  ["#sort", "#target", "#mode", "#minbeds", "#maxppb", "#inactive", "#outzone", "#limit-keep-unknown", ...$$(".st")].forEach((el) => {
+  ["#sort", "#target", "#mode", "#inactive", "#outzone", ...$$(".st")].forEach((el) => {
     const node = typeof el === "string" ? $(el) : el;
-    node.addEventListener("input", () => { filtersChanged(); renderList(); });
+    node.addEventListener("input", () => { saveView(); renderList(); });
   });
   $$("[data-close]").forEach((b) => b.addEventListener("click", () => {
     $("#" + b.dataset.close).classList.add("hidden");

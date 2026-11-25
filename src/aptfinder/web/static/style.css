@@ -155,13 +155,20 @@ td.nowrap { white-space: nowrap; }
 .area-key { display: inline-flex; align-items: center; gap: 4px; margin-right: 14px; }
 .area-key span { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
 
-/* commute limits (list filters) */
-.commute-limits { flex-wrap: wrap; gap: 6px; align-items: center; }
-.commute-limits .limit { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; margin: 2px 0; }
-.commute-limits #commute-limits { display: contents; }
-.commute-limits .limit { max-width: 100%; }
-.commute-limits .limit select { width: auto; max-width: 10.5em; min-width: 0; }
-.commute-limits .limit select[data-k=mode] { max-width: 7em; }
+/* goal editor: the filter panel edits the selected goal's rules */
+.goal-editor { font-size: 12px; }
+.goal-editor summary { cursor: pointer; padding: 2px 0; }
+.goal-editor details[open] summary { margin-bottom: 4px; }
+.goal-editor .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 4px 0; }
+.goal-editor .rule { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; padding: 3px 0;
+  border-bottom: 1px dashed var(--line); max-width: 100%; }
+.goal-editor .rule-kind { color: var(--muted); min-width: 7.5em; }
+.goal-editor .rule .rm { margin-left: auto; }
+.goal-editor .sub { display: inline-flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+.goal-editor select { max-width: 11em; min-width: 0; }
+.goal-editor button.small, .goal-editor .g-add { padding: 1px 8px; font-size: 12px; }
+.goal-editor .g-add { margin: 3px 0 6px; }
+.goal-editor .err { color: var(--bad); }
 
 /* Pipeline panel: compute one attribute */
 .compute { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
