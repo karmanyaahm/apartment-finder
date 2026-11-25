@@ -172,7 +172,7 @@ function drawMarkers(list) {
 }
 
 /* ---------------------------------------------------------------- view controls (this browser only) */
-// Sort, net, the status ticks, inactive and outside walk zones are view controls, kept per browser in
+// Sort, net, the status ticks and inactive are view controls, kept per browser in
 // localStorage. What a place must have is the selected goal's rules (the goal editor below), stored on the server.
 const VIEW_KEY = "aptf.view";
 const lsGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
@@ -181,7 +181,7 @@ function readView() {
   return {
     sort: $("#sort").value, agg: $("#agg").value,
     statuses: $$(".st").filter((c) => c.checked).map((c) => c.value),
-    inactive: $("#inactive").checked, outzone: $("#outzone").checked,
+    inactive: $("#inactive").checked,
   };
 }
 function applyView(f) {
@@ -190,7 +190,6 @@ function applyView(f) {
   if (has("#agg", f.agg)) $("#agg").value = f.agg;
   if (Array.isArray(f.statuses)) $$(".st").forEach((c) => { c.checked = f.statuses.includes(c.value); });
   if (f.inactive != null) $("#inactive").checked = !!f.inactive;
-  if (f.outzone != null) $("#outzone").checked = !!f.outzone;
 }
 function loadView() {
   let v = null;
@@ -607,12 +606,10 @@ function filtered() {
   const q = $("#q").value.trim().toLowerCase();
   const sts = new Set($$(".st").filter((c) => c.checked).map((c) => c.value));
   const showInactive = $("#inactive").checked;
-  const showOutside = $("#outzone").checked;
   // what a place must have is the goal's rules; the list shows the places whose status is ticked
   return S.places.filter((p) => {
     if (!sts.has(placeStatus(p))) return false;
     if (!showInactive && !p.n_active) return false;
-    if (!showOutside && !p.in_zone) return false;
     if (q) {
       const hay = [p.label, p.address, p.city, p.sources, p.title, p.operator].join(" ").toLowerCase();
       if (!hay.includes(q)) return false;
@@ -1585,7 +1582,7 @@ async function boot() {
   selectGoal(savedGoal("lease") ? "lease" : "all");
   $$("#base-switch button").forEach((b) => b.addEventListener("click", () => setBase(b.dataset.base)));
   $("#q").addEventListener("input", renderList);
-  ["#sort", "#agg", "#inactive", "#outzone", ...$$(".st")].forEach((el) => {
+  ["#sort", "#agg", "#inactive", ...$$(".st")].forEach((el) => {
     const node = typeof el === "string" ? $(el) : el;
     node.addEventListener("input", () => { saveView(); renderList(); });
   });
