@@ -48,6 +48,7 @@ main { flex: 1; display: flex; min-height: 0; }
   cursor: pointer; }
 .card:hover, .card.sel { border-color: var(--accent); }
 .card.dim { opacity: .55; }
+.card.hl { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); opacity: 1; }
 .card h4 { margin: 0 0 2px; font-size: 14px; }
 .card .facts { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--muted); }
 .card .facts b { color: var(--ink); font-weight: 600; }

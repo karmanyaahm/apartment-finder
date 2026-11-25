@@ -126,6 +126,31 @@ function buildPointLayers() {
   L.control.layers(null, overlays, { collapsed: true, position: "topright" }).addTo(map);
 }
 
+// Hover link between the list and the map: a card under the mouse enlarges and outlines its marker; a marker under
+// the mouse outlines its card and, after 150 ms, scrolls it into view when it is off-screen. Mouse only, so a tap
+// does not leave anything highlighted. The marker's own style (status colour, fail dimming) is kept on it to restore.
+const CAN_HOVER = window.matchMedia("(hover: hover)").matches;
+let hoverScroll = null;
+function hiMarker(pk, on) {
+  const m = S.markers[pk];
+  if (!m) return;
+  if (!on) { m.setStyle(m.baseStyle); return; }
+  const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim();
+  m.setStyle({ radius: 13, weight: 4, color: accent, opacity: 1, fillOpacity: 0.95 });
+  m.bringToFront();
+}
+function hiCard(pk, on) {
+  const card = [...$$(".card")].find((c) => c.dataset.pk === pk);
+  clearTimeout(hoverScroll);
+  if (!card) return;
+  card.classList.toggle("hl", on);
+  if (!on) return;
+  hoverScroll = setTimeout(() => {
+    const box = $("#cards").getBoundingClientRect(), r = card.getBoundingClientRect();
+    if (r.top < box.top || r.bottom > box.bottom) card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, 150);
+}
+
 function drawMarkers(list) {
   S.placeLayer.clearLayers();
   S.markers = {};
@@ -138,7 +163,13 @@ function drawMarkers(list) {
       fillOpacity: st === "fail" ? 0.45 : 0.95, opacity: st === "fail" ? 0.5 : 1,
     }).bindTooltip(() => (p.photo ? `<img class="tip-photo" src="${esc(p.photo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : "")
       + `${esc(p.label)}<br>${esc(STATUS_LABEL[st])}`);
+    m.baseStyle = { radius: m.options.radius, weight: m.options.weight, color: m.options.color,
+      opacity: m.options.opacity, fillOpacity: m.options.fillOpacity };
     m.on("click", () => openPlace(p.place_key));
+    if (CAN_HOVER) {
+      m.on("mouseover", () => hiCard(p.place_key, true));
+      m.on("mouseout", () => hiCard(p.place_key, false));
+    }
     m.addTo(S.placeLayer);
     S.markers[p.place_key] = m;
   }
@@ -428,7 +459,13 @@ function renderList() {
       <div class="chips">${chips}${extra}</div>
     </div>`;
   }).join("");
-  $$(".card").forEach((el) => el.addEventListener("click", () => openPlace(el.dataset.pk)));
+  $$(".card").forEach((el) => {
+    el.addEventListener("click", () => openPlace(el.dataset.pk));
+    if (CAN_HOVER) {
+      el.addEventListener("mouseenter", () => hiMarker(el.dataset.pk, true));
+      el.addEventListener("mouseleave", () => hiMarker(el.dataset.pk, false));
+    }
+  });
 }
 
 /* ---------------------------------------------------------------- drawer */
