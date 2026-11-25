@@ -95,6 +95,18 @@ def _date(v: Any) -> str | None:
 
 
 # ------------------------------------------------------------------------------------------------- AvalonBay
+AVALON_MEDIA = "https://resource.avalonbay.com"  # host of the plan drawings (the page's own <img alt="Floorplan">)
+
+
+def avalon_drawing(fp: dict[str, Any] | None) -> dict[str, str]:
+    """{'floorplan_image': URL} from a unit's `floorPlan.highResolution` ('/floorplans/ca049/ca049-a1.png/1024/768'),
+    or {} when the unit has none."""
+    path = (fp or {}).get("highResolution") or (fp or {}).get("lowResolution")
+    if not path:
+        return {}
+    return {"floorplan_image": path if path.startswith("http") else f"{AVALON_MEDIA}/{path.lstrip('/')}"}
+
+
 def parse_avalon(item: dict[str, Any], site: dict[str, Any]) -> list[Parsed]:
     text = _script(item, lambda s: s["id"] == "fusion-metadata" or "Fusion.globalContent" in s["text"][:50000])
     if not text:
@@ -109,6 +121,7 @@ def parse_avalon(item: dict[str, Any], site: dict[str, Any]) -> list[Parsed]:
     out = []
     for u in g.get("units") or []:
         p = (u.get("startingAtPricesUnfurnished") or {})
+        drawing = avalon_drawing(u.get("floorPlan"))
         prices = p.get("prices") or {}
         fp = u.get("floorPlan") or {}
         # the unit as the site shows it: "00D-130" (building 00D, unit 130) from unitId "AVB-CA049-00D-130"
@@ -123,7 +136,8 @@ def parse_avalon(item: dict[str, Any], site: dict[str, Any]) -> list[Parsed]:
                                  extra={"site": site["id"], "platform": "avalon", "lease_term_months": p.get("leaseTerm"),
                                         "total_price": prices.get("totalPrice"),
                                         "net_effective_price": prices.get("netEffectivePrice"),
-                                        "unit_status": u.get("unitStatus"), "furnish_status": u.get("furnishStatus")})))
+                                        "unit_status": u.get("unitStatus"), "furnish_status": u.get("furnishStatus"),
+                                        **drawing})))
         # AvalonBay's own furnished option ("Furnished+") on the same unit: a separate offer with its own price
         fpr = u.get("startingAtPricesFurnished") or {}
         fprices = fpr.get("prices") or {}
@@ -138,7 +152,7 @@ def parse_avalon(item: dict[str, Any], site: dict[str, Any]) -> list[Parsed]:
                                             "lease_term_months": fpr.get("leaseTerm"),
                                             "total_price": fprices.get("totalPrice"),
                                             "unit_status": u.get("unitStatus"),
-                                            "furnish_status": u.get("furnishStatus")})))
+                                            "furnish_status": u.get("furnishStatus"), **drawing})))
     return out
 
 
@@ -188,7 +202,10 @@ def parse_prometheus(item: dict[str, Any], site: dict[str, Any]) -> list[Parsed]
                                         lat=ll.get("lat"), lon=ll.get("lon"), kind=SITE_INFO,
                                         property_name=apd.get("name") or site.get("name"), operator="Prometheus",
                                         extra={"site": site["id"], "platform": "prometheus", "images": photos,
-                                               "plan_drawings": sorted(apd.get("floorplanSvg") or {}),
+                                               # plan name -> drawing URL; plans.plan_image matches it to the
+                                               # plans a render reads from the same site
+                                               "plan_drawings": {k: v for k, v in (apd.get("floorplanSvg") or {})
+                                                                 .items() if isinstance(v, str) and v},
                                                "note": "community website: photos and link; offered plans load "
                                                        "via JavaScript"}))]
 
@@ -232,16 +249,53 @@ def site_photos(item: dict[str, Any], site: dict[str, Any] | None = None, limit:
     return out[:limit]
 
 
+DRAWING_HINT = re.compile(r"floor[\s_-]*plans?|floorplan", re.IGNORECASE)
+# not a drawing: a missing one, a page decoration, or a room photo captioned with the amenity "open floor plan"
+NOT_DRAWING = re.compile(r"coming[\s_-]*soon|placeholder|icon|logo|banner|hero|open[\s_-]*floor|^data:", re.IGNORECASE)
+WP_SIZE = re.compile(r"-(\d{2,4})x(\d{2,4})(?=\.)")  # WordPress copies: plan-300x249.png beside plan.png
+
+
+def plan_drawings(item: dict[str, Any]) -> dict[str, str]:
+    """Floor plan drawings among a page's images: {label: URL}, label = the image's alt text plus its file name.
+    Only images whose alt, class or URL says floor plan; one URL per drawing (the largest of a file's sized copies).
+    No plan is read from these: plans.plan_image gives a drawing to a plan only when exactly one label names it."""
+    from urllib.parse import unquote, urljoin
+
+    best: dict[str, tuple[int, str]] = {}  # file name without size suffix -> (size, URL) of its largest copy
+    alts: dict[str, list[str]] = {}  # every alt text the file's copies carry (WordPress gives it to one copy)
+    for im in item.get("images") or []:
+        srcset = re.split(r",\s+", (im.get("srcset") or "").strip())[-1].split(" ")[0]
+        raw = srcset if srcset.startswith(("http", "/")) else im.get("src") or ""
+        if not raw.startswith(("http", "/")) or im.get("from") == "style":  # background images are decoration
+            continue
+        u = urljoin(item.get("url") or "", raw.strip())
+        name = unquote(unquote(u.split("?")[0].rstrip("/").rsplit("/", 1)[-1]))
+        hint = " ".join(str(im.get(k) or "") for k in ("alt", "cls")) + " " + u
+        if not u.startswith("http") or not DRAWING_HINT.search(hint) or NOT_DRAWING.search(hint):
+            continue
+        sz = WP_SIZE.search(name)
+        size = int(sz.group(1)) * int(sz.group(2)) if sz else 10 ** 9
+        key = WP_SIZE.sub("", name)
+        if key not in best or size > best[key][0]:
+            best[key] = (size, u)
+        alt = (im.get("alt") or "").strip()
+        if alt and alt not in alts.setdefault(key, []):
+            alts[key].append(alt)
+    return {" ".join([*alts.get(k, []), k]): u for k, (_, u) in best.items()}
+
+
 def parse_photos(item: dict[str, Any], site: dict[str, Any]) -> list[Parsed]:
     """A site whose plans and prices we cannot read: one `site_info` row with its photos, on the site's address."""
     photos = site_photos(item, site)
     if not photos:
         return []
     street, city, zip_ = _ld_address(item)
+    drawings = plan_drawings(item)
     return [Parsed(source_id=f"{site['id']}:site", url=site["url"], price=None, price_basis=None,
                    data=ObservationData(address=site.get("address") or (f"{street}, {city}, CA {zip_}" if street else None),
                                         kind=SITE_INFO, property_name=site.get("name"),
                                         extra={"site": site["id"], "platform": "photos", "images": photos,
+                                               **({"plan_drawings": drawings} if drawings else {}),
                                                "note": "community website: photos and link only"}))]
 
 

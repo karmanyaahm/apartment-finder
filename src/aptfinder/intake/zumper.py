@@ -53,6 +53,20 @@ def _same(a: Any, b: Any) -> bool:
 
 
 # ------------------------------------------------------------------------------------------------ Zumper
+FLOORPLAN_MEDIA = 2  # Zumper media_type: 1 photo, 2 floor plan drawing, 3 video, 4 3D tour
+
+
+def _drawing(media: list[dict[str, Any]] | None) -> str | None:
+    """The first floor plan drawing among a plan's (or a unit's) media, as a Zumper CDN URL."""
+    m = next((m for m in media or [] if m.get("media_type") == FLOORPLAN_MEDIA and m.get("media_id")), None)
+    return f"https://img.zumpercdn.com/{m['media_id']}/1280x960" if m else None
+
+
+def _drawing_extra(media: list[dict[str, Any]] | None) -> dict[str, str]:
+    d = _drawing(media)
+    return {"floorplan_image": d} if d else {}  # absent, not null: rows without one keep their content hash
+
+
 def zumper_input(cfg: dict[str, Any], areas: list) -> dict[str, Any]:
     return {"Urls": [{"url": f"https://www.zumper.com/apartments-for-rent/{_slug(a.id)}"} for a in areas],
             # no proxy: through Apify's datacenter proxy Zumper served a page without its data (run 2026-11-24:
@@ -102,7 +116,8 @@ def zumper_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] | No
                                  sqft=f.get("square_feet") or None, available_from=_date(f.get("date_available")),
                                  extra={**extra, "plan_listing_id": f.get("listing_id"),
                                         "baths_full": f.get("bathrooms"), "baths_half": f.get("half_bathrooms"),
-                                        "plan_price_max": f.get("max_price"), "units_offered": ud.get("active")})))
+                                        "plan_price_max": f.get("max_price"), "units_offered": ud.get("active"),
+                                        **_drawing_extra(f.get("media"))})))
     if out:
         return out
     if item.get("detail_entity_data_floorplan_listings") is not None and item.get("floorplan_count", 0) > 1:
@@ -115,6 +130,7 @@ def zumper_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] | No
         lo, hi = _baths(*lo), _baths(*hi)
     else:
         lo, hi = item.get("min_bathrooms"), item.get("max_bathrooms")
+    extra = {**extra, **_drawing_extra(item.get("detail_entity_data_media"))}  # a single unit's own drawing
     return [_single(lid, url, base, extra, item.get("min_bedrooms"), item.get("max_bedrooms"),
                     lo, hi, item.get("min_square_feet"),
                     item.get("max_square_feet"), item.get("min_price"), item.get("date_available"), op, short,

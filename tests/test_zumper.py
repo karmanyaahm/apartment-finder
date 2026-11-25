@@ -23,7 +23,10 @@ ZUMPER_BUILDING = {
     "detail_entity_data_floorplan_listings": [
         {"listing_id": 18832950, "title": "1 Bedroom C", "bedrooms": 1, "bathrooms": 1, "half_bathrooms": 0,
          "square_feet": 694, "min_price": 3408, "max_price": 3535, "date_available": "2026/11/24", "listing_status": 1,
-         "unit_data": {"active": 2}},
+         "unit_data": {"active": 2},
+         # media as Brookside Oaks' "Plan 1C" carries it (run 145): a photo, then the floor plan drawing
+         "media": [{"media_id": 936696795, "media_type": 1, "name": "", "width": 810, "height": 1080},
+                   {"media_id": 908537559, "media_type": 2, "name": "", "width": 584, "height": 718}]},
         {"listing_id": 18832949, "title": "2 Bedrooms B", "bedrooms": 2, "bathrooms": 2, "half_bathrooms": 0,
          "square_feet": 874, "min_price": 4215, "max_price": 4215, "date_available": "2026/11/24", "listing_status": 1,
          "unit_data": {"active": 1}},
@@ -52,6 +55,9 @@ def test_zumper_building_gives_offered_plans_and_website():
     assert d.address == "870 E El Camino Real, Mountain View, CA 94040"
     assert d.extra["website"] == "https://equityapartments.com/san-francisco-bay/mountain-view/reserve-at-mountain-view-apartments/"
     assert out[0].url == "https://www.zumper.com/apartment-buildings/p12999/reserve-at-mountain-view-mountain-view-ca"
+    # the plan's drawing (media_type 2); a plan without one has no key at all (its content hash is unchanged)
+    assert d.extra["floorplan_image"] == "https://img.zumpercdn.com/908537559/1280x960"
+    assert "floorplan_image" not in out[1].data.extra
 
 
 def test_zumper_furnished_stay_and_summary():

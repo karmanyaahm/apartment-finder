@@ -20,6 +20,7 @@ from ..areas import in_walk_zone
 from ..areas import zones as area_zones
 from ..config import load_goals, load_point_sets, load_points
 from ..filter import best_trips, evaluate_all, nearest_by_set
+from ..plans import plan_image, site_drawings
 from ..plans import plan_key as _plan_key
 from ..store import append_annotation, append_check, append_link, connect, init_db
 from ..store.models import CHECKABLE_FIELDS
@@ -45,6 +46,7 @@ def _group_listings(conn) -> dict[str, list[dict[str, Any]]]:
 def group_plans(listings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Floor plans of a place: listings grouped by beds, baths and plan name across all sources. When the
     building's own site prices an offer, other sources' prices are only 'also listed' (own website wins)."""
+    drawings = site_drawings([l for l in listings if l["fields"].get("kind") == "site_info"])  # own-site drawings
     listings = [l for l in listings if l["fields"].get("kind") != "site_info"]  # photos and link only
     own_site = any(l["source"] == "direct" and l["active"] and l["fields"].get("price_month") for l in listings)
     listings = [l for l in listings if l["active"]] or listings  # inactive rows only if nothing is live
@@ -96,10 +98,8 @@ def group_plans(listings: list[dict[str, Any]]) -> list[dict[str, Any]]:
                             for src, pr in sorted(_by_source(ls).items())],
             # at a place whose own site prices offers, a plan only other sources list does not count for goals
             "not_on_own_site": own_site and not direct,
-            # the community's own drawing first; hotlink-blocked hosts last
-            "image": next((u for l in sorted(ls, key=lambda l: l["source"] != "direct")
-                           for u in [(l["data"].get("extra") or {}).get("floorplan_image")]
-                           if u and not any(h in u for h in HOTLINK_BLOCKED)), None),
+            # one drawing: the community's own site first, then any source; hotlink-blocked hosts never
+            "image": plan_image(ls, drawings, skip=HOTLINK_BLOCKED),
             "listing_ids": [f"{l['source']}|{l['source_id']}" for l in ls],
             # only the community's own plan list, no price: the plan exists, no unit in it is known to be offered
             "plan_only": all(l["source"] == "direct" and not l["fields"].get("price") for l in ls),

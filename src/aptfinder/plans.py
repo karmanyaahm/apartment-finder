@@ -8,6 +8,7 @@ Without a size, the plan name decides.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -55,3 +56,50 @@ def own_site_places(conn) -> set[str]:
     return {r[0] for r in conn.execute(
         "SELECT DISTINCT place_key FROM listings WHERE source = 'direct' AND active = 1 AND price IS NOT NULL "
         "AND kind IS NOT 'site_info' AND place_key IS NOT NULL")}
+
+
+# ------------------------------------------------------------------------------------------ floor plan drawings
+def _norm(s: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", s.lower()))
+
+
+def match_drawing(name: str | None, drawings: dict[str, str]) -> str | None:
+    """The drawing whose label names this plan, when exactly one does: `drawings` is {label: URL} (a page's alt
+    text and file name, or a site's own plan-name map). '1x1-770' names only '1x1-770 ... .png', not '1x1-763';
+    a name two or more labels share (e.g. '1x1') gets nothing."""
+    n = _norm(name or "")
+    if len(n) < 2:
+        return None
+    hits = {u for label, u in drawings.items() if f" {n} " in f" {_norm(label)} "}
+    return hits.pop() if len(hits) == 1 else None
+
+
+def plan_image(ls: list[dict[str, Any]], drawings: dict[str, str], skip: tuple[str, ...] = ()) -> str | None:
+    """One drawing for a plan (its listings `ls`, as dicts with `source` and `data`): the own website's first
+    (a row's `extra.floorplan_image`, else a drawing of the site's pages whose label names the plan), then any
+    other source's `extra.floorplan_image`. URLs on hosts in `skip` (they refuse hotlinking) are never shown."""
+    def ok(u: Any) -> bool:
+        return isinstance(u, str) and u.startswith("http") and not any(h in u for h in skip)
+
+    own = [l for l in ls if l["source"] == "direct"]
+    for l in own:
+        if ok(u := (l["data"].get("extra") or {}).get("floorplan_image")):
+            return u
+    for l in own + [l for l in ls if l["source"] != "direct"]:
+        if ok(u := match_drawing(l["data"].get("floor_plan") or (l.get("fields") or {}).get("floor_plan"), drawings)):
+            return u
+    for l in ls:
+        if ok(u := (l["data"].get("extra") or {}).get("floorplan_image")):
+            return u
+    return None
+
+
+def site_drawings(listings: list[dict[str, Any]]) -> dict[str, str]:
+    """{label: URL} from a place's own-site `site_info` rows (`extra.plan_drawings`; older rows kept a list of
+    names only, which carries no URL)."""
+    out: dict[str, str] = {}
+    for l in listings:
+        d = (l["data"].get("extra") or {}).get("plan_drawings") if l["source"] == "direct" else None
+        if isinstance(d, dict):
+            out.update({k: v for k, v in d.items() if isinstance(v, str)})
+    return out

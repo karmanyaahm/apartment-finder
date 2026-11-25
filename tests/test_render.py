@@ -155,3 +155,20 @@ def test_a_page_not_fetched_is_retried_only_a_missing_address_rejects(tmp_path, 
     log = 'WARN CheerioCrawler: Request blocked - received 403 status code. {"url":"https://x.example/"}'
     assert unfetched("https://x.example", log) | {"error": None} == {
         "outcome": "blocked", "http_status": 403, "error": None, "reason": "page not fetched: blocked (HTTP 403)"}
+
+
+def test_render_plans_get_a_drawing_only_from_the_page_images():
+    from aptfinder.intake.render import page_drawings
+    from aptfinder.plans import match_drawing
+
+    pages = [{"url": "https://www.sofiaaptliving.com/", "images": [
+        {"src": "https://cdn.prod.website-files.com/6a91/6b04_imgi_7_clara-770(2).png", "alt": "1x1-770",
+         "cls": "floor-plan-image"},
+        {"src": "https://cdn.prod.website-files.com/6a91/6b04_imgi_6_daniela(4).png", "alt": "1x1-763",
+         "cls": "floor-plan-image"},
+        {"src": "https://cdn.prod.website-files.com/6a91/kitchen.jpg", "alt": "1x1-770 kitchen", "cls": "gallery"}]},
+        {"url": "https://www.sofiaaptliving.com/floorplans", "text": "old raw file: no images"}]
+    d = page_drawings(pages)
+    assert match_drawing("1x1-770", d) == "https://cdn.prod.website-files.com/6a91/6b04_imgi_7_clara-770(2).png"
+    assert "https://cdn.prod.website-files.com/6a91/kitchen.jpg" not in d.values()  # a room photo, not a drawing
+    assert "images" in PAGE_FUNCTION and "alt" in PAGE_FUNCTION

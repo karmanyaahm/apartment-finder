@@ -36,6 +36,8 @@ from ..config import load_sites
 from ..store import append_observation, finish_run, start_run
 from ..store.models import ObservationData
 from .apify import browser_proxy, classify_failure, failed_requests, log_errors, run_actor, same_url
+from ..plans import match_drawing
+from .direct import plan_drawings
 from .discover import SECRET_ENV, Blocker
 from .lease import _avail
 
@@ -120,7 +122,12 @@ PAGE_FUNCTION = r"""async function pageFunction(context) {
     }
   }
   const text = await page.evaluate(() => document.body ? document.body.innerText : '');
-  return { site: ud.site || null, kind, child: kind !== 'start', requested: request.url, url: page.url(),
+  // images with their alt text and class, for floor plan drawings (render.page_drawings keeps only those whose
+  // alt, class or URL says floor plan, and a plan gets one only when exactly one label names it)
+  const images = await page.$$eval('img', (ims) => ims.map((i) => ({
+    src: i.currentSrc || i.src || i.getAttribute('data-src') || '', alt: i.alt || '', cls: i.className || '' }))
+    .filter((i) => i.src && !i.src.startsWith('data:')).slice(0, 300)).catch(() => []);
+  return { site: ud.site || null, kind, child: kind !== 'start', requested: request.url, url: page.url(), images,
            status: response ? (typeof response.status === 'function' ? response.status() : response.status) : null,
            title: await page.title(), clicked, followed, from: ud.from || null, label: ud.label || null,
            text: (text + (extra.length ? '\n\n[opened in place]\n' + extra.join('\n\n') : '')).slice(0, 80000) };
@@ -302,6 +309,15 @@ def site_outcome(start_url: str, pages: list[dict[str, Any]], failed: list[dict[
     return {"outcome": "not_returned", "http_status": None, "error": "the actor returned no item for this page"}
 
 
+def page_drawings(pages: list[dict[str, Any]]) -> dict[str, str]:
+    """{label: URL} of the floor plan drawings on a site's rendered pages (their `images`; raw files from before
+    2026-11-25 have none). A URL is only ever one the page itself showed."""
+    out: dict[str, str] = {}
+    for p in pages:
+        out.update(plan_drawings(p))
+    return out
+
+
 def site_text(pages: list[dict[str, Any]]) -> str:
     """The text Haiku reads for one site: the start page, its floor-plans page, then at most MAX_UNIT_PAGES unit
     pages, each cut to its budget so unit lists are not crowded out by a long start page."""
@@ -378,7 +394,9 @@ def render(conn, *, sites: list[str] | None = None, model: str = "haiku",
             plans = check_plans(answer, text)
             addr, _ = _site_address(conn, sid, s)
             url = next((i["url"] for i in its if i.get("child")), its[0]["url"])
+            drawings = page_drawings(its)
             for p in plans:
+                drawing = match_drawing(p.get("unit"), drawings) or match_drawing(p["name"], drawings)
                 key = _slug(p.get("unit") or p["name"])
                 avail = _avail(p["available"], date.today()) if p.get("available") else None
                 data = ObservationData(address=addr, kind="apartment", term="long", property_name=s.get("name"),
@@ -387,7 +405,8 @@ def render(conn, *, sites: list[str] | None = None, model: str = "haiku",
                                        furnished=p.get("furnished"),
                                        extra={"site": sid, "platform": "render", "area": f"{sid}#render",
                                               "available_label": p.get("available"), "model": model,
-                                              "clicked": sorted({c for i in its for c in i.get("clicked") or []})})
+                                              "clicked": sorted({c for i in its for c in i.get("clicked") or []}),
+                                              **({"floorplan_image": drawing} if drawing else {})})
                 append_observation(conn, run, "direct", f"{sid}:r:{key}", data, url=url, price=p.get("price"),
                                    price_basis="month" if p.get("price") else None, raw_path=str(raw_path),
                                    commit=False)

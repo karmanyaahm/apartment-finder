@@ -129,7 +129,11 @@ def zillow_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] | No
     ff = p.get("factsAndFeatures") or {}
     full, half = ff.get("fullBathroomCount"), ff.get("halfBathroomCount")
     baths = full + (half or 0) / 2 if isinstance(full, (int, float)) and full > 0 else p.get("bathrooms")
-    extra = {**extra, "baths_total": p.get("bathrooms"), "baths_full": full, "baths_half": half}
+    # a few single units carry Zillow's own floor plan drawing (richMedia[].rmxData[].floorPlan.heroImageUrl)
+    drawing = next((r["floorPlan"]["heroImageUrl"] for m in p.get("richMedia") or [] for r in m.get("rmxData") or []
+                    if (r.get("floorPlan") or {}).get("heroImageUrl")), None)
+    extra = {**extra, "baths_total": p.get("bathrooms"), "baths_full": full, "baths_half": half,
+             **({"floorplan_image": drawing} if drawing else {})}
     return [Parsed(source_id=str(zpid), url=url, price=money(price), price_basis="month",
                    data=ObservationData(address=addr, beds=p.get("bedrooms"), baths=baths,
                                         sqft=p.get("livingArea"), extra=extra, **base))]

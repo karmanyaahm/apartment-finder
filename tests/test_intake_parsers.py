@@ -192,3 +192,16 @@ def test_zillow_baths_from_full_and_half_counts():
     assert p.data.baths == 2.5 and p.data.extra["baths_total"] == 4  # not 4: 2 full + 1 half
     item["rawData"]["property"]["factsAndFeatures"] = {}
     assert ADAPTERS["zillow"].parse(item, {})[0].data.baths == 4  # no breakdown: the total
+    assert "floorplan_image" not in ADAPTERS["zillow"].parse(item, {})[0].data.extra
+
+
+def test_zillow_unit_floor_plan_drawing():
+    # trimmed from zpid 463499730 (run 4): Zillow's own floor plan drawing of a single unit
+    item = {"rawData": {"property": {"zpid": 463499730, "address": {"streetAddress": "1 A St", "city": "Mountain View",
+            "state": "CA", "zipcode": "94041"}, "bedrooms": 2, "bathrooms": 2, "price": 4000, "hasFloorPlan": True,
+            "richMedia": [{"rmxData": [{"floorPlan": {"heroImageUrl":
+                "https://www.zillowstatic.com/floor_map/b3ae4c27-8976-428b-8b44-accd62cf4a59/hero.png"},
+                "virtualTour": {"viewerUrl": "https://www.zillow.com/view-3d-home/0c7b3bcf"}}]}]}}}
+    (p,) = ADAPTERS["zillow"].parse(item, {})
+    assert p.data.extra["floorplan_image"] == \
+        "https://www.zillowstatic.com/floor_map/b3ae4c27-8976-428b-8b44-accd62cf4a59/hero.png"
