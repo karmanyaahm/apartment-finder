@@ -6,6 +6,7 @@ import json
 import re
 import sqlite3
 import tomllib
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -61,6 +62,9 @@ class Adapter:
     # fetch(source config, areas, max items per area, max usd, conn) -> ActorRun, replacing run_actor
     fetch: Callable[..., ActorRun] | None = None
     apify: bool = True  # False: no Apify credit check (the source is metered elsewhere)
+    # (raw items) -> area ids that one of the items says are incomplete (portfolio: a city whose operator page was
+    # blocked or not returned); only those areas are partial, the run's other areas keep their own state
+    area_failures: Callable[[list[dict[str, Any]]], list[str]] | None = None
 
 
 @dataclass
@@ -230,7 +234,8 @@ def run_source(conn: sqlite3.Connection, adapter: Adapter, areas: list[Area], *,
             else:
                 exhausted = len(run.items) + len(skipped) < cap_each * len(group) and not run.truncated
                 states = _area_states(per_area, cap_each, exhausted, ok)
-            for aid in run.truncated_areas or []:  # the source said there is more in this area than it returned
+            failing = adapter.area_failures(run.items) if adapter.area_failures else []
+            for aid in [*(run.truncated_areas or []), *failing]:  # more in this area than it returned, or a failed page
                 if states.get(aid) == "complete":
                     states[aid] = "partial"
             if run.items and not parsed:  # nothing usable came back: never coverage
@@ -348,7 +353,11 @@ def reparse(conn: sqlite3.Connection, adapter: Adapter, raw_file: str, covers: s
 
     `covers` ('complete' or 'partial') credits the file's areas in the coverage ledger: for a scrape made outside
     this database (a trial on a copy) whose areas were never recorded here. Without it a reparse is never coverage
-    (the original run already is)."""
+    (the original run already is). `covers='auto'` (adapters with `area_failures`) recomputes each area's state from
+    the file: partial if an item says so, else complete (empty when no item reached it), e.g. to correct a run
+    whose areas were all marked partial by one failed page."""
+    if covers == "auto" and not adapter.area_failures:
+        raise ValueError(f"--covers auto needs an adapter that reports failed areas; {adapter.name} does not")
     from pathlib import Path
 
     blob = json.loads(Path(raw_file).read_text())
@@ -393,7 +402,12 @@ def reparse(conn: sqlite3.Connection, adapter: Adapter, raw_file: str, covers: s
     except Exception as e:  # close the run (its commit keeps the rows appended so far), then re-raise
         finish_run(conn, run_id, "error", counts, est_cost=0.0, error=repr(e)[:500])
         raise
-    if covers:
+    if covers == "auto":
+        failing = set(adapter.area_failures(blob["items"]))
+        n_items = Counter(area_for(adapter, it, area_ids) for it in blob["items"])
+        counts["areas"] = {aid: {"items": n_items[aid], "state": "partial" if aid in failing else
+                                 "complete" if n_items[aid] else "empty"} for aid in area_ids}
+    elif covers:
         counts["areas"] = {aid: {"state": covers, "items": counts["items"]} for aid in area_ids}
     finish_run(conn, run_id, "ok", counts, est_cost=0.0)
     if rebuild_identity:

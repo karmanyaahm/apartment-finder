@@ -75,3 +75,47 @@ def test_residential_operators_get_their_own_run(monkeypatch):
     run = portfolio.fetch(cfg, area, 0, 1.0, None)
     assert len(runs) == 2 and runs[0] == {"useApifyProxy": True}
     assert {it["proxy"] for it in run.items} == {"datacenter", "residential"} and run.cost_usd == 0.02
+
+
+# r320 (2026-11-25): one Irvine Company page for Stanford failed and all 8 cities were marked partial
+def _pages():
+    sv = {**UDR_PAGE, "city": "Palo Alto", "operator": "UDR"}
+    stanford_ok = {**UDR_PAGE, "city": "Stanford", "operator": "UDR", "communities": [],
+                   "url": "https://www.udr.com/x/stanford", "status": 404, "page_state": "empty"}
+    stanford_failed = {"operator": "Irvine Company", "city": "Stanford", "requested": "https://irvine.example/stanford",
+                       "url": "https://irvine.example/stanford", "status": None, "page_state": "failed"}
+    return [sv, stanford_ok, stanford_failed]
+
+
+def test_a_failed_page_makes_only_its_city_partial(monkeypatch, tmp_path):
+    from aptfinder.intake import base
+    from aptfinder.intake.apify import ActorRun
+    from aptfinder.store import connect, init_db
+
+    assert portfolio.failed_cities(_pages()) == ["Stanford"]
+    monkeypatch.setattr(base, "account_remaining_usd", lambda: None)
+    monkeypatch.setattr(base.settings, "RAW_DIR", tmp_path / "raw")
+    fake = lambda *a, **kw: ActorRun(actor="x", run_id="r", status="SUCCEEDED", items=_pages(),  # noqa: E731
+                                     cost_usd=0.01, charged_events=None, console_url="")
+    monkeypatch.setattr(ADAPTERS["portfolio"], "fetch", fake)
+    conn = connect(tmp_path / "t.db")
+    init_db(conn)
+    areas = [Area(kind="city", id="Palo Alto", label=""), Area(kind="city", id="Stanford", label="")]
+    res = base.run_source(conn, ADAPTERS["portfolio"], areas, rebuild_identity=False)
+    assert {a: v["state"] for a, v in res.counts["areas"].items()} == {"Palo Alto": "complete", "Stanford": "partial"}
+
+
+def test_reparse_covers_auto_recomputes_each_city_for_free(tmp_path):
+    import json
+
+    from aptfinder.intake.base import coverage, reparse
+    from aptfinder.store import connect, init_db
+
+    raw = tmp_path / "run320.json"
+    raw.write_text(json.dumps({"actor": "apify/playwright-scraper", "areas": ["Palo Alto", "Stanford", "Los Altos"],
+                               "items": _pages()}))
+    conn = connect(tmp_path / "t.db")
+    init_db(conn)
+    reparse(conn, ADAPTERS["portfolio"], str(raw), covers="auto", rebuild_identity=False)
+    cov = {k[1]: v["state"] for k, v in coverage(conn).items() if k[0] == "portfolio"}
+    assert cov == {"Palo Alto": "complete", "Stanford": "partial", "Los Altos": "empty"}

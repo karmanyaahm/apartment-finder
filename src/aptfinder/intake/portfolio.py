@@ -15,8 +15,8 @@ and on the operator's own host. The community link is `extra.website` (a lead fo
 source_id, so a community shown on two city pages is one row.
 
 A page that answers 404 or shows no community gives nothing; a 403 / 429 / captcha page, or one the actor never
-returned, is unparsed, named in the run warnings and makes the run's areas partial (a blocker for that operator,
-not worked around).
+returned, is unparsed, named in the run warnings and makes that page's city partial (`failed_cities`; a blocker for
+that operator, not worked around); the run's other cities are complete.
 """
 
 from __future__ import annotations
@@ -187,8 +187,15 @@ def fetch(cfg: dict[str, Any], areas: list, cap_each: int, max_usd: float, conn)
         it["model"] = cfg.get("model", "haiku")
         claude_usd += c
     run.cost_usd = round((run.cost_usd or 0.0) + claude_usd, 4)
-    run.truncated = any(it["page_state"] in ("blocked", "failed") or it.get("communities_error") for it in run.items)
     return run
+
+
+def failed_cities(items: list[dict[str, Any]]) -> list[str]:
+    """The cities with a page that was blocked, never returned or not read: only those are partial (a failed Irvine
+    Company page for Stanford says nothing about Sunnyvale). Read from the raw items, so `reparse --covers auto`
+    recomputes it for free."""
+    return sorted({it.get("city") for it in items
+                   if (it.get("page_state") in ("blocked", "failed") or it.get("communities_error")) and it.get("city")})
 
 
 def check(item: dict[str, Any]) -> list[dict[str, Any]]:
@@ -248,4 +255,4 @@ def area_of(item: dict[str, Any], ids: list[str]) -> str | None:
 
 
 ADAPTER = Adapter(name="portfolio", build_input=build_input, parse=parse, area_kind="city", batch=True,
-                  area_of=area_of, required=(), fetch=fetch)
+                  area_of=area_of, required=(), fetch=fetch, area_failures=failed_cities)

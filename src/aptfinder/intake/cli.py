@@ -3,7 +3,7 @@
   aptf-intake coverage                         # what's done and what's left, per source and area
   aptf-intake run zillow                       # every not-yet-covered area of the source's kind, one batched run
   aptf-intake run zillow --area 94301 --area 94025 [--reload]
-  aptf-intake reparse <source> <raw file> [--covers complete|partial]   # re-ingest saved output (free)
+  aptf-intake reparse <source> <raw file> [--covers complete|partial|auto]   # re-ingest saved output (free)
   aptf-intake discover-sites [--limit 5] [--dry-run]   # find websites of buildings in a station walk zone
   aptf-intake promote-sites [--limit 100] [--retry-failed] [--dry-run]
   aptf-intake render [--site ID] [--retry-failed] [--dry-run]   # every site in the list by default
@@ -84,8 +84,9 @@ def main(argv: list[str] | None = None) -> None:
     rp = sub.add_parser("reparse", help="re-ingest a saved raw file with the current parser (no new scrape)")
     rp.add_argument("source", choices=sorted(ADAPTERS))
     rp.add_argument("raw_file")
-    rp.add_argument("--covers", choices=["complete", "partial"],
-                    help="credit the file's areas in the coverage ledger (a trial scraped on another copy)")
+    rp.add_argument("--covers", choices=["complete", "partial", "auto"],
+                    help="credit the file's areas in the coverage ledger (a trial scraped on another copy); auto: "
+                         "each area's state from the file (portfolio: only a city with a failed page is partial)")
     rp.add_argument("--no-followup", action="store_true", help="do not rebuild identity or estimate commutes afterwards")
     ds = sub.add_parser("discover-sites", help="find community websites with a local headless Claude (web search "
                                                "only), then fetch and address-check them through Apify")
