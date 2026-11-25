@@ -181,15 +181,38 @@ def check_answer(ans: dict[str, Any], text: str) -> dict[str, Any]:
              for k, f in (ans.get("facts") or {}).items() if k in FACTS and _fact_ok(k, f, t)}
     if facts:
         out["facts"] = facts
-    rx = ans.get("restriction")
-    if isinstance(rx, dict) and rx.get("value") == "none":
-        out["restriction"] = {"value": "none"}
-    elif isinstance(rx, dict) and rx.get("value") in RESTRICTIONS:  # a limit needs its quote ('55+' -> '55')
-        q = _norm(rx.get("evidence") or "")
-        # whole words, except a long quote may touch a word the scrape glued on ('Educator HousingAt least one ...')
-        if len(q) >= 2 and (f" {q} " in f" {t} " or (len(q) >= 20 and q in t)):
-            out["restriction"] = {"value": rx["value"], "evidence": rx["evidence"]}
+    rx = check_restriction(ans.get("restriction"), text)
+    if rx:
+        out["restriction"] = rx
     return out
+
+
+# labels of entry lines that are no description: a name, a title, an amenity list or a source extra says nothing about
+# who may rent, so 'none' read from them alone is unknown (Villa Montgomery's plans '1 Bedroom/1 bath', $1,012)
+_THIN = ("Title: ", "Name: ", "Amenities: ", *(f"{k.replace('_', ' ').capitalize()}: " for k in TEXT_EXTRAS))
+MIN_DESCRIBED = 40  # normalized characters of other text before a 'none' counts
+
+
+def described(text: str) -> bool:
+    """True when the entry has real text (a description, an about text, a detail page) beyond its title, name,
+    amenity list and source extras: text that would state a limit on who may rent if there were one."""
+    rest = " ".join(line for line in text.splitlines() if not line.startswith(_THIN))
+    return len(_norm(rest)) >= MIN_DESCRIBED
+
+
+def check_restriction(rx: Any, text: str) -> dict[str, Any] | None:
+    """{value, evidence} of a limit whose quote is in `text`; {value: 'none'} only when `text` is `described`;
+    else None (unknown). Shared by extract and render's page reading."""
+    if not isinstance(rx, dict) or rx.get("value") not in RESTRICTIONS:
+        return None
+    if rx["value"] == "none":
+        return {"value": "none"} if described(text) else None
+    q = _norm(rx.get("evidence") or "")  # a limit needs its quote ('55+' -> '55')
+    t = _norm(text)
+    # whole words, except a long quote may touch a word the scrape glued on ('Educator HousingAt least one ...')
+    if len(q) >= 2 and (f" {q} " in f" {t} " or (len(q) >= 20 and q in t)):
+        return {"value": rx["value"], "evidence": rx["evidence"]}
+    return None
 
 
 def amenities_from(facts: dict[str, Any]) -> list[str]:
@@ -428,10 +451,13 @@ def _pending(conn, source: str, reread: bool = False, pages: set[str] | None = N
 def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: str = "haiku", max_usd: float = 1.0,
             workers: int = 8, dry_run: bool = False, reread: bool = False, cached_only: bool = False,
             ask_fn: Callable | None = None, rebuild_identity: bool = True,
-            id_like: str | None = None) -> dict[str, Any]:
+            id_like: str | None = None, recheck_none: bool = False) -> dict[str, Any]:
     """Read the whole entry of every unread active listing of `source`. `cached_only`: apply cached answers, ask
     nothing (after a reparse). `ask_fn` replaces `ask` (tests). `rebuild_identity=False`: the caller rebuilds it.
-    `id_like`: only source_ids matching this SQL LIKE pattern."""
+    `id_like`: only source_ids matching this SQL LIKE pattern. `recheck_none`: only listings whose current reading
+    says restriction 'none' from a text that is not `described` (cached answers applied again, free)."""
+    if recheck_none:
+        reread = cached_only = True
     if source not in TEXT_SOURCES:
         raise SystemExit(f"extract supports {', '.join(TEXT_SOURCES)} or all")
     pages = None
@@ -453,6 +479,11 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
             lines = raw_lines(source, item) if item else None
         t["text"] = entry_text(t["data"], lines)
         t["hash"] = hashlib.sha1(f"v{VERSION}\n{model}\n{t['text']}".encode()).hexdigest()
+    if recheck_none:
+        said_none = {r[0] for r in conn.execute(
+            "SELECT source_id FROM listings WHERE source = ? "
+            "AND json_extract(data, '$.extra.extracted.restriction.value') = 'none'", (source,))}
+        todo = [t for t in todo if t["row"]["source_id"] in said_none and not described(t["text"])]
     cache = load_cache()
     uniq: dict[str, str] = {}
     for t in todo:

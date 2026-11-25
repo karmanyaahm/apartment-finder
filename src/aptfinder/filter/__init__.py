@@ -89,19 +89,22 @@ def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> dic
     own = {r["place_key"] for r in listings if r["place_key"] and is_own_priced(r)}
     # amenities belong to the building: every listing at a place is judged on all its sources' amenity lists
     # (an own-site plan row has none; Apartments.com lists the building's "Fitness Center")
-    # so is a limit on who may rent ('restriction', read by `aptf-intake extract`): a limit any listing or site_info
-    # row states ('PBV - Belovida (VASH)') holds for every listing at the place; otherwise each listing's own reading
-    # ('none'), or None when it has not been read (unknown: an `equals restriction none` rule says needs_check)
+    # so is a limit on who may rent ('restriction', read by `aptf-intake extract` and from an own site's pages by
+    # render): a limit any listing or site_info row states ('PBV - Belovida (VASH)') holds for every listing at the
+    # place; otherwise each listing's own reading ('none'), or None when it has not been read (unknown: an `equals
+    # restriction none` rule says needs_check). Your answer in Verify (annotation place / restriction) beats both.
     pooled: dict[str, set[str]] = {}
     rx_of: dict[tuple[str, str], dict[str, Any]] = {}
     limits: dict[str, list[dict[str, Any]]] = {}
     for r in conn.execute("SELECT source, source_id, place_key, amenities, "
-                          "json_extract(data, '$.extra.extracted.restriction') AS rx FROM listings"):
+                          "json_extract(data, '$.extra.extracted.restriction') AS rx, "
+                          "json_extract(data, '$.extra.page_restriction') AS prx FROM listings"):
         pk, am = r["place_key"], r["amenities"]
         if pk and am and am != "[]":
             pooled.setdefault(pk, set()).update(json.loads(am) if isinstance(am, str) else am)
-        if r["rx"]:
-            rx = {**json.loads(r["rx"]), "source": r["source"]}
+        rx = row_restriction(json.loads(r["rx"]) if r["rx"] else None, json.loads(r["prx"]) if r["prx"] else None,
+                             r["source"])
+        if rx:
             rx_of[(r["source"], r["source_id"])] = rx
             if pk and rx.get("value") not in (None, "none"):
                 limits.setdefault(pk, []).append(rx)
@@ -111,9 +114,26 @@ def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> dic
             r["amenities"] = sorted(pooled[r["place_key"]] | set(own_am))
         mine = rx_of.get((r["source"], r["source_id"])) or {}
         rx = mine if mine.get("value") not in (None, "none") else (limits.get(r["place_key"]) or [mine])[0]
+        rx = annotated_restriction(anns.get(r["place_key"] or "", {})) or rx
         r["restriction"] = rx.get("value")
         r["restriction_evidence"] = restriction_note(rx)
     return {"listings": listings, "trips": trips, "anns": anns, "low": low, "own": own}
+
+
+def row_restriction(extracted: dict[str, Any] | None, page: dict[str, Any] | None,
+                    source: str) -> dict[str, Any] | None:
+    """One row's reading of who may rent: a limit from extract's reading or from its own site's pages (render,
+    `extra.page_restriction`, source '<source> page') first, then either's 'none'; None when neither read it."""
+    got = [({**x, "source": src}) for x, src in ((extracted, source), (page, f"{source} page"))
+           if isinstance(x, dict) and x.get("value")]
+    return next((x for x in got if x["value"] != "none"), got[0] if got else None)
+
+
+def annotated_restriction(anns: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    """Your answer on who may rent a place (Verify: annotation place / restriction, comment the value), else None."""
+    a = anns.get("restriction")
+    v = (a.get("comment") or "").strip().lower() if a else ""
+    return {"value": v, "evidence": "marked in Verify", "source": "you"} if v else None
 
 
 def restriction_note(rx: dict[str, Any] | None) -> str | None:
@@ -123,13 +143,19 @@ def restriction_note(rx: dict[str, Any] | None) -> str | None:
     return f'"{rx.get("evidence") or ""}" ({rx.get("source")})'
 
 
-def place_restriction(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """The limit on who may rent that any of a place's listings states ({value, evidence, source}), else None.
-    `rows`: listings with `data` parsed."""
+def place_restriction(rows: list[dict[str, Any]], anns: dict[str, dict[str, Any]] | None = None
+                      ) -> dict[str, Any] | None:
+    """The limit on who may rent that any of a place's listings states ({value, evidence, source}), else None; your
+    Verify answer (`anns`: the place's latest annotations) first. `rows`: listings with `data` parsed."""
+    mark = annotated_restriction(anns or {})
+    if mark:
+        return mark if mark["value"] != "none" else None
     for x in rows:
-        rx = (((x.get("data") or {}).get("extra") or {}).get("extracted") or {}).get("restriction") or {}
-        if rx.get("value") not in (None, "none"):
-            return {**rx, "source": x["source"]}
+        extra = (x.get("data") or {}).get("extra") or {}
+        rx = row_restriction((extra.get("extracted") or {}).get("restriction"), extra.get("page_restriction"),
+                             x["source"])
+        if rx and rx["value"] != "none":
+            return rx
     return None
 
 

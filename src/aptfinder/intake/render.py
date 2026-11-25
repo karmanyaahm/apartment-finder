@@ -21,6 +21,11 @@ units. An answer counts only if what it states is on the page: the plan or unit 
 without the comma) and the sqft must appear in the text; anything else is dropped. Rows are stored as source `direct`
 (the building's own site), tagged with the area `<site>#render`, so the next render of a site retires its plans that
 are no longer offered without touching the site's other rows (photos).
+
+The same call reads who may rent the community (`restriction`, extract's values: income, senior, ...), kept only with
+its verbatim quote from the pages (`extract.check_restriction`), or 'none'; it is stored on every plan row of the
+site as `extra.page_restriction` {value, evidence, url}, which the place's restriction pooling reads beside extract's
+reading. `aptf-intake render-restriction` reads it again from the raw page text of sites already rendered (no Apify).
 """
 
 from __future__ import annotations
@@ -42,6 +47,7 @@ from .apify import (RESIDENTIAL_USD_PER_PAGE, browser_proxy, classify_failure, f
 from ..plans import match_drawing
 from .direct import plan_drawings
 from .discover import SECRET_ENV, Blocker
+from .extract import RESTRICTION, check_restriction
 from .lease import _avail
 from .precheck import precheck_many
 
@@ -141,9 +147,17 @@ PAGE_FUNCTION = r"""async function pageFunction(context) {
 SYSTEM = ("You read an apartment community's own website (rendered page text) and list the floor plans or units it "
           "currently offers. Use only what the text states; never infer. Copy names, prices, square feet and "
           "availability exactly as written. Skip other communities shown on the page (e.g. 'nearby' or 'other "
-          "properties'). Answer in the requested JSON.")
+          "properties'). Also say who may rent this community (restriction). Answer in the requested JSON.")
+# who may rent: extract's field, worded for a whole website (a limit must hold for this community as a whole)
+PAGE_RESTRICTION = {**RESTRICTION, "description": RESTRICTION["description"] + (
+    " The limit must hold for this community as a whole: 'This community is income restricted', 'affordable "
+    "apartments', 'income limits', 'AMI', 'tax credit', 'BMR', 'senior community 62+', 'project-based Section 8'. "
+    "none when the pages describe the community and set no such limit; also none for a few BMR units in an "
+    "otherwise market-rate building, other properties of the same operator, 'Section 8 accepted' and equal "
+    "housing notices.")}
 _S = {"type": ["string", "null"]}
-SCHEMA = {"type": "object", "required": ["plans"], "properties": {"plans": {"type": "array", "items": {
+SCHEMA = {"type": "object", "required": ["plans", "restriction"], "properties": {
+  "restriction": PAGE_RESTRICTION, "plans": {"type": "array", "items": {
     "type": "object", "required": ["name"],
     "properties": {
         "name": {**_S, "description": "plan or unit name as written, e.g. 'North 2CR', 'Plan B2', 'Unit 204'"},
@@ -193,25 +207,49 @@ def check_plans(answer: list[dict[str, Any]], text: str) -> list[dict[str, Any]]
     return out
 
 
-def argv(model: str, max_usd: float) -> list[str]:
-    return ["claude", "-p", "--system-prompt", SYSTEM, "--tools", "", "--strict-mcp-config", "--setting-sources",
+# the restriction alone, for `reread_restrictions` (pages already rendered: their plans are stored)
+RX_SYSTEM = ("You read an apartment community's own website (rendered page text) and say who may rent there. Use only "
+             "what the text states; never infer. Answer in the requested JSON.")
+RX_SCHEMA = {"type": "object", "required": ["restriction"], "properties": {"restriction": PAGE_RESTRICTION}}
+
+
+def argv(model: str, max_usd: float, system: str = SYSTEM, schema: dict[str, Any] = SCHEMA) -> list[str]:
+    return ["claude", "-p", "--system-prompt", system, "--tools", "", "--strict-mcp-config", "--setting-sources",
             "", "--disable-slash-commands", "--model", model, "--no-session-persistence", "--output-format", "json",
-            "--json-schema", json.dumps(SCHEMA), "--max-budget-usd", f"{max_usd:.2f}"]
+            "--json-schema", json.dumps(schema), "--max-budget-usd", f"{max_usd:.2f}"]
 
 
-def ask(name: str, text: str, model: str, max_usd: float) -> tuple[list[dict[str, Any]], float]:
+def _call(name: str, text: str, model: str, max_usd: float, system: str, schema: dict[str, Any]
+          ) -> tuple[dict[str, Any], float]:
     prompt = f"Community: {name}\n\nRendered page text:\n{text}"
     env = {k: v for k, v in os.environ.items() if k not in SECRET_ENV}
     with tempfile.TemporaryDirectory() as cwd:
-        proc = subprocess.run(argv(model, max_usd) + [prompt], capture_output=True, text=True, cwd=cwd, env=env,
-                              timeout=600)
+        proc = subprocess.run(argv(model, max_usd, system, schema) + [prompt], capture_output=True, text=True,
+                              cwd=cwd, env=env, timeout=600)
     try:
         out = json.loads(proc.stdout)
     except ValueError:
         raise Blocker(f"claude gave no JSON (exit {proc.returncode}): {(proc.stderr or proc.stdout)[:300]}")
     if out.get("is_error") or out.get("subtype") != "success" or not out.get("structured_output"):
         raise Blocker(f"claude call failed: {out.get('subtype')} {str(out.get('result'))[:200]}")
-    return out["structured_output"].get("plans") or [], float(out.get("total_cost_usd") or 0)
+    return out["structured_output"], float(out.get("total_cost_usd") or 0)
+
+
+def ask(name: str, text: str, model: str, max_usd: float) -> tuple[list[dict[str, Any]], Any, float]:
+    """(plans, restriction as answered, cost)."""
+    out, cost = _call(name, text, model, max_usd, SYSTEM, SCHEMA)
+    return out.get("plans") or [], out.get("restriction"), cost
+
+
+def ask_restriction(name: str, text: str, model: str, max_usd: float) -> tuple[Any, float]:
+    out, cost = _call(name, text, model, max_usd, RX_SYSTEM, RX_SCHEMA)
+    return out.get("restriction"), cost
+
+
+def page_restriction(rx: Any, text: str, url: str) -> dict[str, Any] | None:
+    """The page's answer, checked like extract's (a limit needs its quote on the page), with the site's URL."""
+    got = check_restriction(rx, text)
+    return {**got, "url": url} if got else None
 
 
 def _line(p: dict[str, Any]) -> str:
@@ -442,11 +480,12 @@ def render(conn, *, sites: list[str] | None = None, model: str = "haiku",
                 report[sid] = "Claude budget reached"
                 continue
             text = site_text(its)
-            answer, cost = ask(s.get("name") or sid, text, model, min(0.3, max_claude_usd - spent + 0.05))
+            answer, rx, cost = ask(s.get("name") or sid, text, model, min(0.3, max_claude_usd - spent + 0.05))
             spent += cost
             plans = check_plans(answer, text)
             addr, _ = _site_address(conn, sid, s)
             url = next((i["url"] for i in its if i.get("child")), its[0]["url"])
+            prx = page_restriction(rx, text, s["url"])
             drawings = page_drawings(its)
             for p in plans:
                 drawing = match_drawing(p.get("unit"), drawings) or match_drawing(p["name"], drawings)
@@ -459,7 +498,8 @@ def render(conn, *, sites: list[str] | None = None, model: str = "haiku",
                                        extra={"site": sid, "platform": "render", "area": f"{sid}#render",
                                               "available_label": p.get("available"), "model": model,
                                               "clicked": sorted({c for i in its for c in i.get("clicked") or []}),
-                                              **({"floorplan_image": drawing} if drawing else {})})
+                                              **({"floorplan_image": drawing} if drawing else {}),
+                                              **({"page_restriction": prx} if prx else {})})
                 append_observation(conn, run, "direct", f"{sid}:r:{key}", data, url=url, price=p.get("price"),
                                    price_basis="month" if p.get("price") else None, raw_path=str(raw_path),
                                    commit=False)
@@ -468,6 +508,9 @@ def render(conn, *, sites: list[str] | None = None, model: str = "haiku",
             oc = "ok" if plans else "no_plans"
             per_area[f"{sid}#render"] = {"state": STATE_OF[oc], "items": len(plans), "outcome": oc, **info}
             report[sid] = [_line(p) for p in plans] if plans else "no plans on the page"
+            if prx and plans:
+                report[sid].append(f"who may rent: {prx['value']}"
+                                   + (f' "{prx["evidence"]}"' if prx.get("evidence") else ""))
     except (Blocker, subprocess.TimeoutExpired) as e:
         conn.commit()
         finish_run(conn, run, "error", {"areas": per_area, "observations": n_obs, **paid, "apify_usd": settle(paid["apify_runs"])},
@@ -486,3 +529,101 @@ def render(conn, *, sites: list[str] | None = None, model: str = "haiku",
             "outcomes": {sid: {k: v for k, v in a.items() if k != "state"} for sid, a in
                          ((k[: -len("#render")], a) for k, a in per_area.items())},
             "sites": report}
+
+
+def reread_restrictions(conn, *, sites: list[str] | None = None, model: str = "haiku", max_usd: float = 1.0,
+                        workers: int = 4, dry_run: bool = False) -> dict[str, Any]:
+    """Who may rent, read again from the raw page text of sites already rendered (no Apify): for each site with
+    active rendered plan rows (`<site>:r:%`), the pages of its newest raw file go to Haiku (`ask_restriction`);
+    each plan row gets a new observation, its scraped data plus `extra.page_restriction` (append-only; run
+    component `render_restriction`), then the cached extract answers are applied over them (free), so the plan
+    rows' own readings stay current. `sites`: only these. A site whose raw file is gone is reported, not read."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .extract import extract
+
+    rows: dict[str, list[Any]] = {}
+    for r in conn.execute("SELECT * FROM listings WHERE source = 'direct' AND active = 1 AND source_id LIKE '%:r:%' "
+                          "ORDER BY source_id"):
+        sid = r["source_id"].split(":r:")[0]
+        if not sites or sid in sites:
+            rows.setdefault(sid, []).append(r)
+    texts: dict[str, tuple[str, str]] = {}
+    report: dict[str, Any] = {}
+    files: dict[str, Any] = {}
+    all_sites = load_sites(duplicates=True)
+    for sid, rs in rows.items():
+        raw = max((x["raw_path"] for x in rs if x["raw_path"]), default=None,
+                  key=lambda p: int(re.sub(r"\D", "", p.rsplit("/", 1)[-1]) or 0))
+        path = raw and next((c for c in (raw, settings.RAW_DIR / "render" / raw.rsplit("/", 1)[-1])
+                             if os.path.isfile(c)), None)
+        if not path:
+            report[sid] = f"raw file missing: {raw}"
+            continue
+        if path not in files:
+            files[path] = json.loads(open(path).read()).get("items") or []
+        its = [i for i in files[path] if not i.get("#error") and i.get("site") == sid]
+        if not its:
+            report[sid] = f"no pages of this site in {raw}"
+            continue
+        texts[sid] = (site_text(its), (all_sites.get(sid) or {}).get("url") or its[0]["url"])
+    plan = {"sites": len(rows), "to_read": len(texts), "rows": sum(len(rows[s]) for s in texts),
+            "estimated_claude_usd": round(0.004 * len(texts), 2)}
+    if dry_run or not texts:
+        return {**plan, "report": report}
+    run = start_run(conn, "render_restriction", "direct", {"model": model, "sites": len(texts)})
+    spent, n_obs, counts = 0.0, 0, {}
+    err = None
+
+    def one(sid: str) -> tuple[str, Any, float]:
+        name = (all_sites.get(sid) or {}).get("name") or rows[sid][0]["property_name"] or sid
+        rx, cost = ask_restriction(name, texts[sid][0], model, 0.2)
+        return sid, rx, cost
+
+    try:
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            futs = []
+            for sid in texts:
+                futs.append(pool.submit(one, sid))
+            for f in futs:  # in order; the database is written only here, in this thread
+                try:
+                    sid, rx, cost = f.result()
+                except (Blocker, subprocess.TimeoutExpired, OSError) as e:
+                    err = err or e
+                    continue
+                spent += cost
+                text, url = texts[sid]
+                prx = page_restriction(rx, text, url)
+                v = prx["value"] if prx else "unknown"
+                counts[v] = counts.get(v, 0) + 1
+                report[sid] = f"{v}" + (f': "{prx["evidence"]}"' if prx and prx.get("evidence") else "")
+                if not prx:
+                    continue
+                for r in rows[sid]:
+                    base = conn.execute(  # the scraped observation, not an extract reading
+                        "SELECT * FROM observations WHERE source = 'direct' AND source_id = ? "
+                        "AND json_extract(data, '$.extra.extracted') IS NULL ORDER BY id DESC LIMIT 1",
+                        (r["source_id"],)).fetchone() or r
+                    d = json.loads(base["data"])
+                    d["extra"] = {**(d.get("extra") or {}), "page_restriction": prx}
+                    append_observation(conn, run, "direct", r["source_id"], ObservationData(**d), url=base["url"],
+                                       price=base["price"], price_basis=base["price_basis"],
+                                       raw_path=base["raw_path"], commit=False)
+                    n_obs += 1
+                conn.commit()
+                if spent >= max_usd:
+                    err = err or Blocker(f"--max-usd {max_usd} spent")
+                    for g in futs:
+                        g.cancel()
+    except Exception as e:
+        conn.commit()
+        finish_run(conn, run, "error", {**plan, "observations": n_obs, "restriction": counts},
+                   est_cost=round(spent, 4), error=repr(e)[:500])
+        raise
+    finish_run(conn, run, "error" if err else "ok", {**plan, "observations": n_obs, "restriction": counts},
+               est_cost=round(spent, 4), error=str(err)[:500] if err else None)
+    ex = extract(conn, "direct", cached_only=True, rebuild_identity=False, id_like="%:r:%") if n_obs else None
+    identity.run(conn)
+    return {"run_id": run, "claude_usd": round(spent, 4), "observations": n_obs, "restriction": counts,
+            "extract_cached": {k: ex.get(k) for k in ("listings", "observations", "restriction")} if ex else None,
+            "error": str(err) if err else None, "report": report}

@@ -7,6 +7,7 @@
   aptf-intake discover-sites [--limit 5] [--dry-run]   # find websites of buildings in a station walk zone
   aptf-intake promote-sites [--limit 100] [--retry-failed] [--dry-run]
   aptf-intake render [--site ID] [--retry-failed] [--dry-run]   # every site in the list by default
+  aptf-intake render-restriction [--site ID] [--dry-run]   # who may rent, re-read from rendered pages (no Apify)
   aptf-intake prometheus [--site ID] [--dry-run]   # Prometheus sites: one availability-JSON request each, free
   aptf-intake precheck [--site ID] [--dry-run]   # free: DNS + one plain GET per site; records dead / challenge
   aptf-intake extract <text source>|all [--workers 8] [--dry-run]   # Haiku reads each listing's whole entry
@@ -119,6 +120,9 @@ def main(argv: list[str] | None = None) -> None:
     ex.add_argument("--dry-run", action="store_true")
     ex.add_argument("--reread", action="store_true", help="apply cached answers again to listings already read "
                                                           "(free; after a change to the checks)")
+    ex.add_argument("--recheck-none", action="store_true", help="only listings read as restriction 'none' from a "
+                                                                "name or title alone: apply cached answers again "
+                                                                "(free), so they become unknown")
     ex.add_argument("--id-like", help="only listings whose source_id matches this SQL LIKE pattern "
                                       "(e.g. '%%:%%': Zillow buildings' bedroom rows)")
     zd = sub.add_parser("zillow-detail", help="fetch the detail page of every active Zillow listing without one "
@@ -138,6 +142,13 @@ def main(argv: list[str] | None = None) -> None:
     rd.add_argument("--residential", action="store_true", help="through Apify's residential proxy (sites that block "
                                                               "the datacenter one; billed by traffic, images skipped)")
     rd.add_argument("--dry-run", action="store_true")
+    rr = sub.add_parser("render-restriction", help="read who may rent (income, senior, ...) again from the raw page "
+                                                   "text of sites already rendered (Claude Haiku, no Apify)")
+    rr.add_argument("--site", action="append", default=[], help="site id (repeatable); default every rendered site")
+    rr.add_argument("--model", default="haiku")
+    rr.add_argument("--max-usd", type=float, default=1.0, help="cap on Claude spend")
+    rr.add_argument("--workers", type=int, default=4, help="parallel Claude calls")
+    rr.add_argument("--dry-run", action="store_true")
     pm = sub.add_parser("prometheus", help="Prometheus own sites: units and prices from Prometheus's availability "
                                            "JSON, one direct request per site (no Apify, no page scraping)")
     pm.add_argument("--site", action="append", default=[], help="site id (repeatable); default every Prometheus site")
@@ -184,6 +195,16 @@ def main(argv: list[str] | None = None) -> None:
         print(json.dumps(res, indent=1, default=str))
         return
 
+    if args.cmd == "render-restriction":
+        from .render import reread_restrictions
+
+        res = reread_restrictions(conn, sites=args.site or None, model=args.model, max_usd=args.max_usd,
+                                  workers=args.workers, dry_run=args.dry_run)
+        print(json.dumps(res, indent=1, default=str))
+        if res.get("error"):
+            raise SystemExit(f"BLOCKED: render-restriction {res['error']} (sites read before it are stored)")
+        return
+
     if args.cmd == "precheck":
         from .precheck import run as precheck_run
 
@@ -215,7 +236,7 @@ def main(argv: list[str] | None = None) -> None:
             try:
                 res = extract(conn, src, limit=args.limit, batch=args.batch, model=args.model, max_usd=left,
                               workers=args.workers, dry_run=args.dry_run, reread=args.reread,
-                              id_like=args.id_like)
+                              id_like=args.id_like, recheck_none=args.recheck_none)
             except Blocker as e:
                 raise SystemExit(f"BLOCKED: extract {e}")
             print(json.dumps(res, indent=1, default=str), flush=True)
