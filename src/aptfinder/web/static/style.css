@@ -47,7 +47,17 @@ main { flex: 1; display: flex; min-height: 0; }
 .controls { padding: 8px 12px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
 .controls .row { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; font-size: 12px; }
 #q { width: 100%; }
-#count { padding: 4px 12px; }
+.count-line { padding: 4px 12px; }
+/* loading spinner, CSS only: it always holds its space (visibility), so showing it moves nothing; never takes clicks.
+   .on shows it; body.busy-goal (a goal preview or save in flight, after 150 ms) shows the editor's and the count
+   line's and dims the list; body.busy-list (the list came from an out-of-date snapshot) shows the count line's. */
+.spin { display: inline-block; width: 11px; height: 11px; margin: 0 5px; vertical-align: -1px; border: 2px solid var(--line);
+  border-top-color: var(--accent); border-radius: 50%; visibility: hidden; pointer-events: none; animation: spin .7s linear infinite; }
+.spin.on, body.busy-goal .spin-goal, body.busy-goal .spin-list, body.busy-list .spin-list { visibility: visible; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation-duration: 2.5s; } }
+#cards { transition: opacity .15s; }
+body.busy-goal #cards { opacity: .6; }
 #count .n-pass { color: var(--pass); } #count .n-check { color: var(--check); } #count .n-fail { color: var(--fail); }
 #cards { overflow-y: auto; flex: 1; padding: 0 8px 16px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 6px 0;

@@ -39,6 +39,7 @@ async function api(path, opts = {}, attempt = 0) {
     if (typeof detail !== "string") detail = JSON.stringify(detail);
     throw new Error(`${name}: HTTP ${r.status}${r.statusText ? " " + r.statusText : ""}${detail ? ": " + detail : ""}`);
   }
+  UPDATING[name] = !!r.headers.get("X-Updating");
   if (!opts.method) {
     if (r.headers.get("X-Updating")) noteUpdating(r.headers.get("X-Snapshot-Age"));
     else if (name === "api/places") noteUpdating(null);
@@ -48,6 +49,22 @@ async function api(path, opts = {}, attempt = 0) {
 // The server answers from its last computed results while it rebuilds them after a change (X-Updating): say so in
 // the header and fetch the list (and an open drawer) again a few seconds later, until it answers fresh.
 let updatingTimer = null;
+const UPDATING = {};  // path -> did its last answer say X-Updating (KNN status and Pipeline show a spinner meanwhile)
+const SPIN = '<span class="spin on" aria-hidden="true"></span>';
+// A spinner for work in flight, shown only after 150 ms so a quick answer never flickers: busy(key) puts the class
+// busy-<key> on <body> (the CSS shows that key's spinners and dims the list); the end() it returns takes it off once
+// every request of that key has ended. Spinners always hold their space (visibility), so nothing moves.
+const BUSY = {};
+function busy(key) {
+  const b = (BUSY[key] ||= { n: 0, t: null });
+  if (b.n++ === 0) b.t = setTimeout(() => document.body.classList.add("busy-" + key), 150);
+  let ended = false;
+  return () => {
+    if (ended) return;
+    ended = true;
+    if (--b.n === 0) { clearTimeout(b.t); document.body.classList.remove("busy-" + key); }
+  };
+}
 function noteUpdating(age) {
   let b = $("#updating");
   if (!b) {
@@ -56,7 +73,8 @@ function noteUpdating(age) {
     b.className = "muted small";
     $("#status-strip")?.before(b);
   }
-  b.textContent = age == null ? "" : "updating…";
+  b.innerHTML = age == null ? "" : `${SPIN}updating…`;
+  document.body.classList.toggle("busy-list", age != null); // the count line's spinner until the list answers fresh
   b.title = age == null ? "" : `showing results computed ${age} s ago while the server recomputes them`;
   if (age == null || updatingTimer) return;
   updatingTimer = setTimeout(() => {
@@ -454,7 +472,7 @@ function renderGoalEditor() {
     const tmpl = ruleTemplates().map(([l], i) => `<option value="${i}">${esc(l)}</option>`).join("");
     const add = (part) => ro ? "" : `<select class="g-add" data-part="${part}"><option value="">+ add…</option>${tmpl}</select>`;
     box.innerHTML = `<details id="g-details"${S.editorOpen ? " open" : ""}>
-      <summary><b>${esc(g.label)}</b> <span class="muted small">${g.rules.length} must, ${g.nice.length} nice${dirty ? " · unsaved draft" : ""}</span></summary>
+      <summary><b>${esc(g.label)}</b> <span class="muted small">${g.rules.length} must, ${g.nice.length} nice${dirty ? " · unsaved draft" : ""}</span><span class="spin spin-goal" aria-hidden="true"></span></summary>
       <div class="row small"><label>Name <input id="g-label" value="${esc(g.label)}" style="width:16em"></label>
         <span class="muted">id ${esc(g.id)} · ${esc(savedGoal(g.id)?.origin || "")}</span></div>
       <div class="small"><b>Must have</b> <span class="muted">(fail = any rule fails; needs check = a value is unknown)</span></div>
@@ -560,6 +578,7 @@ async function previewDraft() {
   if (!draftDirty()) { applyGoalResults(g.id, null); S.previewMsg = ""; refreshEditorState(); renderList(); return; }
   const seq = (previewDraft.seq = (previewDraft.seq || 0) + 1);
   S.previewMsg = "previewing the draft…"; refreshEditorState();
+  const end = busy("goal");
   try {
     const r = await post("api/goals/preview", { label: g.label, rules: g.rules, nice: g.nice });
     if (seq !== previewDraft.seq || S.draft !== g) return; // a newer edit is on its way
@@ -568,7 +587,7 @@ async function previewDraft() {
   } catch (e) {
     if (seq !== previewDraft.seq) return;
     S.previewMsg = "!" + e.message.replace(/^api\/goals\/preview: HTTP 400[^:]*: /, "");
-  }
+  } finally { end(); }
   refreshEditorState();
   renderList();
 }
@@ -617,19 +636,21 @@ async function reloadGoals(selectId) {
 }
 async function saveGoal() {
   const g = S.draft;
+  const end = busy("goal");
   try {
     await api(`api/goals/${encodeURIComponent(g.id)}`, { method: "PUT", body: JSON.stringify({ label: g.label, rules: g.rules, nice: g.nice }) });
     toast(`Saved "${g.label}" for everyone`);
     await reloadGoals(g.id);
-  } catch (e) { toast("Not saved: " + e.message, 6000); }
+  } catch (e) { toast("Not saved: " + e.message, 6000); } finally { end(); }
 }
 async function createGoal(body) {
+  const end = busy("goal");
   try {
     const r = await post("api/goals", body);
     toast(`Created "${body.label}"`);
     S.draft = null; // the old draft is kept as the new goal; nothing to confirm
     await reloadGoals(r.goal);
-  } catch (e) { toast("Not created: " + e.message, 6000); }
+  } catch (e) { toast("Not created: " + e.message, 6000); } finally { end(); }
 }
 async function saveGoalAsNew() {
   const label = prompt("Name of the new goal", `${S.draft.label} (copy)`);
@@ -1596,6 +1617,7 @@ async function openPipeline() {
   body.innerHTML = '<p class="muted">Loading…</p>';
   let d;
   try { d = await api("api/pipeline"); } catch (e) { body.innerHTML = `<p class="reason fail">Failed: ${esc(e.message)}</p>`; return; }
+  const updating = UPDATING["api/pipeline"];
   await loadQueueStatus().catch(() => {});
   const stages = `<p class="small">${apifyCredit(d.apify)}</p><div class="scroll-x"><table class="stages">
     <tr><th>stage</th><th>state</th><th>where it stands</th><th>last run</th><th>cost</th><th>to run the rest</th></tr>
@@ -1635,7 +1657,7 @@ async function openPipeline() {
   const anchors = d.stages.find((s) => s.id === "anchors").anchors;
   const stuck = d.stuck_runs.length ? `<p class="reason fail small">Runs never closed (still 'running'): ${d.stuck_runs.map((r) => `#${r.id} ${esc(r.component)}/${esc(r.source || "")} ${day(r.started_at)}`).join(", ")}</p>` : "";
   body.innerHTML = `<div class="pipe">
-    <h2>Pipeline status</h2>
+    <h2>Pipeline status ${updating ? `<span id="pipe-upd" class="muted small">${SPIN}updating…</span>` : ""}</h2>
     <p class="muted small">Computed now from the logs (${esc(d.now.slice(0, 16).replace("T", " "))} UTC). Website, own-site and Google counts are over places inside a station walk zone. Stale = older than ${d.stale_days} days.
       ${["done", "partial", "stale", "todo", "blocked"].map((s) => stChip(s)).join(" ")}</p>
     ${stuck}${statusBlock(S.status)}
@@ -1651,7 +1673,22 @@ async function openPipeline() {
       ${anchors.map((a) => `<tr><td>${esc(a.station)}</td><td>${esc(a.target)}</td><td>${a.routed ? esc(a.routed === true ? "Google" : a.routed) : '<span class="muted">estimate</span>'}</td></tr>`).join("")}</table></div></details>
   </div>`;
   wireCompute();
+  if (updating) pollPipeline();
   drawAreasMap().catch((e) => { $("#areas-legend").textContent = `Area map failed: ${e.message}`; });
+}
+
+// The panel came from an out-of-date snapshot: ask again every 5 s while it is open; when the answer is fresh the
+// spinner becomes a button that redraws the panel (not redrawn unasked: that would drop a half-filled compute form).
+function pollPipeline() {
+  clearTimeout(pollPipeline.t);
+  pollPipeline.t = setTimeout(async () => {
+    const el = $("#pipe-upd");
+    if (!el || $("#pipeline").classList.contains("hidden")) return;
+    try { await api("api/pipeline"); } catch (_) { pollPipeline(); return; }
+    if (UPDATING["api/pipeline"]) { pollPipeline(); return; }
+    el.innerHTML = '<button type="button" class="small">fresh results: show</button>';
+    el.querySelector("button").addEventListener("click", openPipeline);
+  }, 5000);
 }
 
 /* ---------------------------------------------------------------- compute one attribute (Pipeline panel) */
@@ -1715,14 +1752,22 @@ function statusHtml(d) {
     route 0; KNN range: leave-one-out error of ranges as wide; estimate only: measured estimate vs Google). Undecided: places
     whose goal status waits only on this commute. Done = 0 undecided and p99 ≤ ${d.done_p99} min.</p>`;
 }
-async function loadKnnStatus() {
+// While the server answers from an out-of-date snapshot (X-Updating) the table shows a spinner and asks again 5 s
+// later, quietly (no "checking" text), until it answers fresh; a newer call wins.
+async function loadKnnStatus(quiet = false) {
   const box = $("#k-status");
   if (!box) return;
-  box.textContent = "checking what still needs a sample…";
+  const seq = (loadKnnStatus.seq = (loadKnnStatus.seq || 0) + 1);
+  clearTimeout(loadKnnStatus.t);
+  if (!quiet) box.textContent = "checking what still needs a sample…";
   try {
     const d = await post("api/knn/status", { place_keys: filtered().map((p) => p.place_key) });
-    box.innerHTML = Object.keys(d.zone.cells).length ? statusHtml(d) : "Tick a cell below to see whether it still needs a sample.";
-  } catch (e) { box.textContent = "Status failed to load: " + e.message; }
+    if (seq !== loadKnnStatus.seq || !box.isConnected) return;
+    const upd = UPDATING["api/knn/status"];
+    box.innerHTML = (upd ? `<p class="muted small">${SPIN}updating…</p>` : "")
+      + (Object.keys(d.zone.cells).length ? statusHtml(d) : "Tick a cell below to see whether it still needs a sample.");
+    if (upd) loadKnnStatus.t = setTimeout(() => loadKnnStatus(true), 5000);
+  } catch (e) { if (seq === loadKnnStatus.seq) box.textContent = "Status failed to load: " + e.message; }
 }
 // Per checked cell over the chosen scope: how places get their time, and KNN accuracy by leave-one-out (/api/knn/accuracy)
 function accuracyHtml(cells, scope, pad = 0.5, R = KNN_META?.radius_m ?? 400) {
