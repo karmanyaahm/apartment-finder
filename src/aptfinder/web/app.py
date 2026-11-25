@@ -326,7 +326,8 @@ def goal_view(r: dict[str, Any], commute: list[dict[str, Any]] | None = None) ->
             "commute_off": [d for d in commute or [] if d.get("off")], "status": r["status"], "nice_score": r["nice_score"],
             "reasons": [t for s, t, *_ in r["reasons"] if s != "pass"],
             "fails": r["fails"],  # the attribute of each reason, for red/amber facts
-            "unit_key": r["unit_key"], "source": r["source"], "source_id": r["source_id"]}
+            "unit_key": r["unit_key"], "source": r["source"], "source_id": r["source_id"],
+            **({"why": r["why"]} if r.get("why") else {})}  # no_listings: none / no_price / unavailable
 
 
 def _parse_value(v: Any) -> Any:

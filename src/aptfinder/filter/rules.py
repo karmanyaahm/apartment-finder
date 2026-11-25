@@ -9,7 +9,9 @@ from typing import Any
 from ..plans import baths_note
 
 PASS, FAIL, CHECK = "pass", "fail", "needs_check"
-RANK = {PASS: 0, CHECK: 1, FAIL: 2}
+# a place-level outcome only (filter.place_outcome): nothing known for rent that fits; never a listing's status
+NO_LISTINGS = "no_listings"
+RANK = {PASS: 0, CHECK: 1, NO_LISTINGS: 2, FAIL: 3}
 
 # A straight-line estimate decides a commute rule only when clearly on one side of the threshold.
 EST_PASS_RATIO = 0.67

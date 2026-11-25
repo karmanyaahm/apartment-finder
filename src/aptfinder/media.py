@@ -204,7 +204,10 @@ def photo_jobs(conn: sqlite3.Connection, ranked: bool = True) -> list[dict[str, 
         from .filter import evaluate_all
 
         for pres in evaluate_all(conn)["places"].values():
-            good |= {pk for pk, r in pres.items() if r["status"] in ("pass", "needs_check")}
+            # a place with a fitting plan but no price or no availability ('no listings', not 'no offers known') is
+            # still worth its photos, as it was when it counted as needs_check
+            good |= {pk for pk, r in pres.items()
+                     if r["status"] in ("pass", "needs_check") or r.get("why") in ("no_price", "unavailable")}
     jobs: dict[str, dict[str, Any]] = {}
     for r in conn.execute("SELECT source, source_id, place_key, url, active, data FROM listings"):
         group = r["place_key"] or f"{r['source']}|{r['source_id']}"

@@ -113,8 +113,10 @@ def test_evaluate_all_place_takes_best_listing(conn):
     places = res["places"]["lease"]
     by_addr = {conn.execute("SELECT address FROM places WHERE place_key=?", (pk,)).fetchone()[0]: v["status"]
                for pk, v in places.items()}
+    # 3 C St: a 3bd/2ba that fits but has no price: no listings, not needs_check (filter.place_outcome)
     assert by_addr == {"1 A St, Mountain View": PASS, "2 B St, Mountain View": FAIL,
-                       "3 C St, Mountain View": CHECK}
+                       "3 C St, Mountain View": "no_listings"}
+    assert places[next(pk for pk in places if places[pk]["status"] == "no_listings")]["why"] == "no_price"
     # filters report, they do not drop: every listing has a result
     assert len(res["listings"]["lease"]) == 4
 
@@ -498,4 +500,100 @@ def test_a_gone_listing_never_holds_a_place_open_over_an_active_one():
            "trips": {}, "anns": {}, "low": set(), "own": set()}
     _, places = evaluate_goal(inp, goal)
     assert (places["p1"]["status"], places["p1"]["source_id"]) == ("fail", "cl")
-    assert (places["p2"]["status"], places["p2"]["source_id"]) == ("needs_check", "old")
+    # p2: 'old' (no beds, no price) is no plan, so the place's only plan, a 2bd, fails (filter.place_outcome)
+    assert (places["p2"]["status"], places["p2"]["source_id"]) == ("fail", "older")
+
+
+def _nl_goal():
+    from aptfinder.config import Goal
+
+    return Goal(label="g", people=3, rules=[
+        {"type": "size_options", "options": [{"beds": 3, "min_baths": 2}]},
+        {"type": "max", "field": "price_per_person", "value": 2500}])
+
+
+def _nl_row(sid, pk, beds=None, baths=None, price=None, unavailable=None, source="x", active=1):
+    return {"source": source, "source_id": sid, "place_key": pk, "unit_key": None, "active": active, "beds": beds,
+            "baths": baths, "price": price, "price_month": price, "unavailable": unavailable}
+
+
+def _nl_eval(listings, unpriced=(), places=None):
+    from aptfinder.filter import evaluate_goal
+
+    inp = {"listings": list(listings), "unpriced": list(unpriced), "trips": {}, "anns": {}, "low": set(),
+           "own": set(), "places": set(places or [])}
+    return evaluate_goal(inp, _nl_goal())
+
+
+def test_no_listings_when_nothing_is_known_for_rent():
+    """Case 1: a place with no offer at all (only site_info rows, or a building row with no beds and no price) is
+    'no listings: no offers known', not needs_check."""
+    lres, places = _nl_eval([_nl_row("bldg", "p1")], places={"p1", "p2"})
+    for pk in ("p1", "p2"):  # p2 has no row a goal reads at all (site_info only)
+        assert places[pk]["status"] == "no_listings" and places[pk]["why"] == "none"
+        assert places[pk]["reasons"][0][1] == "no offers known"
+    assert lres[("x", "bldg")]["status"] == "needs_check"  # listings keep pass / needs_check / fail
+
+
+def test_no_listings_when_every_fitting_plan_has_no_price_or_is_unavailable():
+    """Case 2: a 3bd/2ba fits but has no price (or the source says it is unavailable): no listings, even when a
+    priced 1bd fails beside it; an unpriced own-site plan (goal_inputs' `unpriced`) counts as a fitting plan."""
+    _, places = _nl_eval([_nl_row("a", "p1", 3, 2), _nl_row("b", "p1", 1, 1, 3000)])
+    assert (places["p1"]["status"], places["p1"]["why"]) == ("no_listings", "no_price")
+    assert places["p1"]["reasons"][0][1].startswith("no price for a fitting plan")
+    _, places = _nl_eval([_nl_row("a", "p1", 3, 2, 6000, unavailable="0 Available units"),
+                          _nl_row("b", "p1", 3, None, unavailable="0 Available units")])
+    assert (places["p1"]["status"], places["p1"]["why"]) == ("no_listings", "unavailable")
+    assert '"0 Available units"' in places["p1"]["reasons"][0][1]
+    # beds unknown fits too (unknown never rejects); a fitting plan the own site lists without a price
+    _, places = _nl_eval([_nl_row("b", "p1", 1, 1, 3000)],
+                         unpriced=[_nl_row("own", "p1", 3, 2, source="direct", unavailable="Call for details")])
+    assert (places["p1"]["status"], places["p1"]["why"]) == ("no_listings", "unavailable")
+
+
+def test_place_fails_when_no_plan_fits_beds_baths():
+    """Case 3: plans exist and none fits beds/baths: fail, whether priced or not, and a building row with nothing
+    known beside them does not hold the place open."""
+    _, places = _nl_eval([_nl_row("a", "p1", 2, 1, 3000), _nl_row("bldg", "p1")],
+                         unpriced=[_nl_row("own", "p1", 1, 1, source="direct")])
+    assert places["p1"]["status"] == "fail"
+    _, places = _nl_eval([], unpriced=[_nl_row("own", "p1", 3, 1, source="direct")])
+    assert places["p1"]["status"] == "fail"  # 3bd/1ba: baths fail
+
+
+def test_priced_fitting_offer_keeps_pass_and_needs_check():
+    """Case 4: one fitting priced offer decides as before: pass, or needs_check on some other unknown."""
+    _, places = _nl_eval([_nl_row("a", "p1", 3, 2, 6000), _nl_row("b", "p1", 3, 2)])
+    assert places["p1"]["status"] == "pass" and "why" not in places["p1"]
+    _, places = _nl_eval([_nl_row("a", "p1", 3, None, 6000), _nl_row("b", "p1", 3, 2)])
+    assert places["p1"]["status"] == "needs_check"  # priced, baths unknown: a real check
+    _, places = _nl_eval([_nl_row("a", "p1", 3, 2, 9000)])
+    assert places["p1"]["status"] == "fail"  # $3,000/person over $2,500: the plan fits beds/baths but fails price
+
+
+def test_near_misses_fail_never_check():
+    """A known value just over a limit is a fail, never needs_check: the limits already allow the margin (user,
+    2026-11-25). Only an estimate or KNN range that cannot tell is needs_check."""
+    from aptfinder.filter.rules import Ctx, evaluate
+
+    _, places = _nl_eval([_nl_row("a", "p1", 3, 2, 7836)])  # $2,612/person vs $2,500
+    assert places["p1"]["status"] == "fail"
+    rule = {"type": "commute_any", "target": "commute_targets:x", "options": [{"mode": "walk", "max": 21}]}
+    google = Ctx(trips={("commute_targets:x", "walk"): {"minutes": 21.1, "provider": "google"}})
+    assert evaluate(rule, {}, google)[0] == FAIL
+
+    def knn(lo, hi):
+        return Ctx(trips={("commute_targets:x", "walk"): {"minutes": lo, "provider": "knn", "min": lo, "max": hi,
+                                                          "neighbors": [1, 2, 3]}})
+    assert evaluate(rule, {}, knn(30, 31))[0] == FAIL
+    # a KNN range is not this place's own time: near the limit it cannot tell (KNN_FAIL_MARGIN), an unknown
+    assert evaluate(rule, {}, knn(22, 23))[0] == CHECK
+
+
+def test_an_active_failing_plan_beats_a_gone_fitting_offer():
+    """Active listings decide (372b6eb): a gone 3bd/2ba priced offer does not pass a place whose active plan, a 2bd,
+    fails; with nothing active, the gone offer decides."""
+    _, places = _nl_eval([_nl_row("a", "p1", 2, 1, 3000), _nl_row("g", "p1", 3, 2, 6000, active=0)])
+    assert (places["p1"]["status"], places["p1"]["source_id"]) == ("fail", "a")
+    _, places = _nl_eval([_nl_row("g", "p1", 3, 2, 6000, active=0)])
+    assert places["p1"]["status"] == "pass"

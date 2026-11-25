@@ -13,7 +13,7 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="aptf-filter")
     ap.add_argument("--db", default=str(settings.DB_PATH))
     ap.add_argument("--goal", help="only this goal")
-    ap.add_argument("--status", choices=["pass", "fail", "needs_check"])
+    ap.add_argument("--status", choices=["pass", "fail", "needs_check", "no_listings"])
     args = ap.parse_args(argv)
     conn = connect(args.db)
     init_db(conn)
@@ -26,7 +26,7 @@ def main(argv: list[str] | None = None) -> None:
         for pk, r in sorted(places.items(), key=lambda kv: kv[1]["status"]):
             if args.status and r["status"] != args.status:
                 continue
-            print(f"  {r['status']:12s} {addr.get(pk, pk)[:60]}  [{r['source']}]")
+            print(f"  {r['status']:12s} {addr.get(pk, pk)[:60]}  [{r['source'] or '-'}]")
             for s, text, *_ in r["reasons"]:
                 if s != "pass":
                     print(f"      {s}: {text}")

@@ -453,7 +453,8 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None, *, places: l
     # 11. filter (computed on every read)
     per_goal = {g: dict(Counter(r["status"] for r in pres.values())) for g, pres in res["places"].items()}
     stage("filter", "Filter (goals, live)", "done",
-          "; ".join(f"{g}: {c.get('pass', 0)} pass, {c.get('needs_check', 0)} check, {c.get('fail', 0)} fail"
+          "; ".join(f"{g}: {c.get('pass', 0)} pass, {c.get('needs_check', 0)} check, {c.get('fail', 0)} fail, "
+                       f"{c.get('no_listings', 0)} no listings"
                     for g, c in per_goal.items()),
           [f"nix run .#filter -- --goal {g} --status pass" for g in per_goal], counts=per_goal)
 
