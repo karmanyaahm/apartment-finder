@@ -225,13 +225,14 @@ def run_source(conn: sqlite3.Connection, adapter: Adapter, areas: list[Area], *,
                     continue
                 for q in p if isinstance(p, list) else [p]:
                     parsed.append((q, aid))
-            exhausted = len(run.items) + len(skipped) < cap_each * len(group) and not run.truncated
-            states = _area_states(per_area, cap_each, exhausted, ok)
+            if run.complete is not None:  # the fetch judged it (Airbnb: every search ended under the cap)
+                states = _area_states(per_area, float("inf"), run.complete, ok)
+            else:
+                exhausted = len(run.items) + len(skipped) < cap_each * len(group) and not run.truncated
+                states = _area_states(per_area, cap_each, exhausted, ok)
             for aid in run.truncated_areas or []:  # the source said there is more in this area than it returned
                 if states.get(aid) == "complete":
                     states[aid] = "partial"
-            if adapter.name in RANKED_SOURCES:
-                states = {a: ("partial" if s == "complete" else s) for a, s in states.items()}
             if run.items and not parsed:  # nothing usable came back: never coverage
                 states = {aid: "failed" for aid in gids}
                 warnings.append(f"{', '.join(gids)}: no item could be parsed; areas not credited")
@@ -290,10 +291,12 @@ def _overlap(a: list[float], b: list[float]) -> float:
     return (n - s) * (e - w) / ((a[2] - a[0]) * (a[3] - a[1]))
 
 
-LEGACY_PARTIAL = {"craigslist"}  # its whole-city run hit the 300-item cap
-# Sources whose area search returns a ranked subset, not everything in the area: a run never proves the area
-# complete (Airbnb's Mountain View box run 61 returned 33 of the 51 listings known inside the box).
-RANKED_SOURCES = {"airbnb"}
+# Craigslist's whole-city run hit the 300-item cap; Airbnb's (tri_angle) box runs were ranked subsets
+LEGACY_PARTIAL = {"craigslist", "airbnb"}
+# Actors whose area search returned a ranked subset, not everything in the area: their runs never count as complete
+# (tri_angle's Mountain View box run 61 returned 33 of the 51 listings known inside the box). Airbnb through kaix
+# (2026-11-25) is complete when every search of the box ended on its own (intake/airbnb.py fetch).
+RANKED_ACTORS = {"tri_angle/airbnb-scraper"}
 
 
 def coverage(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
@@ -318,7 +321,7 @@ def coverage(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
             per = counts.get("areas") or {aid: {"state": "complete", "items": None} for aid in params["areas"]}
             for aid, a in per.items():
                 if a.get("state") in ("complete", "empty", "partial"):
-                    st = "partial" if r["source"] in RANKED_SOURCES and a["state"] == "complete" else a["state"]
+                    st = "partial" if params.get("actor") in RANKED_ACTORS and a["state"] == "complete" else a["state"]
                     out[(r["source"], aid)] = {**base, "state": st, "items": a.get("items"),
                                                "legacy": False}
             continue
@@ -328,7 +331,7 @@ def coverage(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
                        and any(c.endswith(" box") for c in cities) and _overlap(a.bbox, legacy_box) >= 0.9]
         else:
             covered = [a.id for a in areas if a.kind == kind and a.city in (cities & LEGACY_CITY_COVERS)]
-        state = "partial" if r["source"] in LEGACY_PARTIAL | RANKED_SOURCES else "complete"
+        state = "partial" if r["source"] in LEGACY_PARTIAL else "complete"
         for aid in covered:
             out[(r["source"], aid)] = {**base, "state": state, "items": None, "legacy": True}
     return out

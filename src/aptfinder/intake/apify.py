@@ -30,6 +30,9 @@ class ActorRun:
     truncated: bool = False  # the source said there was more than it returned: every area of the run is partial
     truncated_areas: list[str] | None = None  # ... or only these areas (Places: a box whose query hit 60 results)
     log: str | None = None  # the run's log, when asked for (`with_log`): why requests failed
+    # set by a fetch that judges its own completeness (Airbnb's split box search): True when the search ended on its
+    # own everywhere, replacing the item-cap test (a split search returns more items than one search's cap)
+    complete: bool | None = None
 
 
 def _client() -> httpx.Client:

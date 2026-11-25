@@ -216,3 +216,80 @@ def test_skipped_source_is_refused_and_left_out_of_coverage(conn, monkeypatch, t
     d = pipeline.overview(conn)
     assert "padmapper" not in d["intake"]["sources"]["city"] and "zumper" in d["intake"]["sources"]["city"]
     assert not any("padmapper" in c for c in next(s for s in d["stages"] if s["id"] == "intake")["commands"])
+
+
+AIRBNB_BOX = Area(kind="box", id="mv", label="mv", bbox=[37.38, -122.10, 37.42, -122.06])
+
+
+def airbnb_run(monkeypatch, tmp_path, conn, searches):
+    """Run the real Airbnb adapter against a fake kaix: `searches(input) -> (items, page sizes in the log)`."""
+    from aptfinder.intake import airbnb
+
+    calls = []
+
+    def run_actor(actor, run_input, *, max_items, max_charge_usd, memory_mb=None, with_log=False, **kw):
+        calls.append(run_input)
+        items, pages = searches(run_input)
+        log = "\n".join(f"Search: found {p} listings, accepted {p} (total so far: 0)" for p in pages)
+        return ActorRun(actor, f"r{len(calls)}", "SUCCEEDED", items[:max_items], 0.0, {"listing": len(items)}, "u",
+                        log=log)
+
+    monkeypatch.setattr(airbnb.apify, "run_actor", run_actor)
+    monkeypatch.setattr(base, "event_cost", lambda actor, ev: 0.0001 * sum((ev or {}).values()))
+    monkeypatch.setattr(base, "account_remaining_usd", lambda: 5.0)
+    monkeypatch.setattr(base, "load_sources", lambda: {"spend": {"max_usd_per_run": 1.0}, "airbnb": {
+        "actor": "kaix/airbnb-listing-scraper", "max_items": 4, "checkin": "2027-01-11", "checkout": "2027-02-15"}})
+    monkeypatch.setattr(base.settings, "RAW_DIR", tmp_path / "raw")
+    monkeypatch.setattr("aptfinder.config.load_areas", lambda: [AIRBNB_BOX])
+    monkeypatch.setattr("aptfinder.intake.base.load_areas", lambda: [AIRBNB_BOX])
+    return calls, run_source(conn, airbnb.ADAPTER, [AIRBNB_BOX])
+
+
+def kaix_item(i, lat, lon):
+    return {"id": str(i), "roomType": "private_room", "sharingTitle": "Home · 1 bedroom · 1 bed · 1 shared bath",
+            "location": {"lat": lat, "lng": lon}, "price": {"amount": "$2,000", "qualifier": "monthly"}}
+
+
+def test_airbnb_box_under_the_cap_is_complete(conn, monkeypatch, tmp_path):
+    calls, res = airbnb_run(monkeypatch, tmp_path, conn, lambda inp: (
+        [kaix_item(1, 37.39, -122.09), kaix_item(2, 37.41, -122.07), kaix_item(3, 37.5, -122.0)], [18, 3]))
+    assert len(calls) == 1  # the search ended on its own (last page short): no split
+    assert res.counts["areas"]["mv"]["state"] == "complete" and res.counts["areas"]["mv"]["items"] == 2
+    assert coverage(conn)[("airbnb", "mv")]["state"] == "complete"
+
+
+def test_airbnb_capped_box_is_split_into_quadrants(conn, monkeypatch, tmp_path):
+    def searches(inp):
+        if len(calls_seen) == 0:  # the whole box: cap (4) hit
+            calls_seen.append(1)
+            return [kaix_item(i, 37.39, -122.09) for i in range(4)], [18, 18]
+        calls_seen.append(1)  # each quadrant: 2 listings (one shared with the box search), search ended
+        q = len(calls_seen)
+        return [kaix_item(0, 37.39, -122.09), kaix_item(100 + q, inp["latitude"], inp["longitude"])], [2]
+
+    calls_seen: list = []
+    calls, res = airbnb_run(monkeypatch, tmp_path, conn, searches)
+    assert len(calls) == 5  # the box, then its 4 quadrants
+    assert calls[1]["maxLocationDeviation"] < calls[0]["maxLocationDeviation"]
+    assert res.counts["areas"]["mv"] == {"items": 8, "state": "complete", "cost_usd": 0.0012}  # merged by id
+    assert res.cost_usd == 0.0012  # every search's events
+    assert coverage(conn)[("airbnb", "mv")]["state"] == "complete"
+
+
+def test_airbnb_still_capped_at_max_depth_is_partial(conn, monkeypatch, tmp_path):
+    from aptfinder.intake.airbnb import MAX_SPLIT_DEPTH
+
+    calls, res = airbnb_run(monkeypatch, tmp_path, conn, lambda inp: (
+        [kaix_item(f"{inp['latitude']}-{i}", inp["latitude"], inp["longitude"]) for i in range(4)], [18]))
+    assert len(calls) == sum(4 ** d for d in range(MAX_SPLIT_DEPTH + 1))  # 1 + 4 + 16
+    assert res.counts["areas"]["mv"]["state"] == "partial"
+    assert coverage(conn)[("airbnb", "mv")]["state"] == "partial"
+
+
+def test_airbnb_search_ended_needs_a_short_last_page():
+    from aptfinder.intake.airbnb import search_ended
+
+    assert search_ended("Search: found 18 listings\nSearch: found 2 listings", 128, 270)
+    assert not search_ended("Search: found 18 listings", 128, 270)  # stopped on a full page: capped
+    assert not search_ended("", 10, 270)  # no log: unknown, never complete
+    assert not search_ended("Search: found 3 listings", 270, 270)  # item cap reached

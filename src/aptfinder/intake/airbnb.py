@@ -10,6 +10,8 @@ import re
 from typing import Any
 
 from ..store.models import ObservationData
+from . import apify
+from .apify import ActorRun
 from .base import Adapter, Parsed, money
 
 # Airbnb words a stay of 28+ nights as "monthly" (2026-11-24 runs on) or "month" (earlier): a price per month,
@@ -17,13 +19,18 @@ from .base import Adapter, Parsed, money
 BASIS = {"month": "month", "monthly": "month", "night": "night", "week": "week", "total": "stay"}
 
 
-def build_input(cfg: dict[str, Any], areas: list) -> dict[str, Any]:
-    """One coordinate search per box (the adapter is not batched). kaix searches a square of half-width
-    `maxLocationDeviation` around the point and drops results farther than that, so the deviation is half the box's
-    diagonal: the corners are reached, and results outside the box are attributed by `area_of`."""
-    if len(areas) != 1:
-        raise ValueError(f"airbnb searches one box per actor run, not {len(areas)}")
-    s, w, n, e = areas[0].bbox
+# A search that does not end on its own is split into 4 quadrants, each searched the same way, down to this depth
+# (1 box -> 4 -> 16 searches at most); a quadrant still capped at the last depth leaves the box partial.
+MAX_SPLIT_DEPTH = 2
+PAGE_SIZE = 18  # Airbnb search results per page; kaix logs "Search: found N listings" per page
+SEARCH_PAGE = re.compile(r"Search: found (\d+) listings")
+
+
+def search_input(cfg: dict[str, Any], bbox: list[float]) -> dict[str, Any]:
+    """kaix searches a square of half-width `maxLocationDeviation` around the point and drops results farther than
+    that, so the deviation is half the box's diagonal: the corners are reached, and results outside the box are
+    attributed by `area_of`."""
+    s, w, n, e = bbox
     lat, lon = (s + n) / 2, (w + e) / 2
     half_ns = (n - s) / 2 * 111.0
     half_ew = (e - w) / 2 * 111.0 * math.cos(math.radians(lat))
@@ -32,6 +39,67 @@ def build_input(cfg: dict[str, Any], areas: list) -> dict[str, Any]:
             "checkIn": cfg["checkin"], "checkOut": cfg["checkout"], "adults": cfg.get("adults", 1),
             "currency": "USD", "maxListings": cfg.get("max_items", 270), "maxSearchPages": 15,
             "includeReviews": False}
+
+
+def build_input(cfg: dict[str, Any], areas: list) -> dict[str, Any]:
+    """One coordinate search per box (the adapter is not batched)."""
+    if len(areas) != 1:
+        raise ValueError(f"airbnb searches one box per actor run, not {len(areas)}")
+    return search_input(cfg, areas[0].bbox)
+
+
+def search_ended(log: str | None, n_items: int, cap: int) -> bool:
+    """The search ran out of results on its own: its last page was short and the item cap was not reached. The
+    item count alone cannot say so: kaix drops results beyond the radius, so a capped search can return fewer."""
+    pages = [int(x) for x in SEARCH_PAGE.findall(log or "")]
+    return bool(pages) and pages[-1] < PAGE_SIZE and n_items < cap
+
+
+def quadrants(bbox: list[float]) -> list[list[float]]:
+    s, w, n, e = bbox
+    ms, mw = (s + n) / 2, (w + e) / 2
+    return [[s, w, ms, mw], [s, mw, ms, e], [ms, w, n, mw], [ms, mw, n, e]]
+
+
+def fetch(cfg: dict[str, Any], areas: list, cap_each: int, max_usd: float, conn=None) -> ActorRun:
+    """Search the box; a search that hit the cap is split into quadrants (recursively, to MAX_SPLIT_DEPTH) so the
+    whole box gets searched. Returns one run: the items merged by listing id, `complete` when every leaf search
+    ended on its own. Items are still attributed to boxes by their coordinates (`area_of`)."""
+    from .base import event_cost
+
+    if len(areas) != 1:
+        raise ValueError(f"airbnb searches one box per actor run, not {len(areas)}")
+    items: dict[Any, dict[str, Any]] = {}
+    events: dict[str, int] = {}
+    runs: list[ActorRun] = []
+    state = {"spent": 0.0, "status": "SUCCEEDED", "complete": True}
+
+    def search(bbox: list[float], depth: int) -> None:
+        left = max_usd - state["spent"]
+        if left <= 0.02:
+            state["status"], state["complete"] = f"BUDGET_REACHED: ${left:.2f} left of ${max_usd:.2f}", False
+            return
+        run = apify.run_actor(cfg["actor"], search_input(cfg, bbox), max_items=cap_each, max_charge_usd=left,
+                              memory_mb=cfg.get("memory_mb"), with_log=True)
+        runs.append(run)
+        state["spent"] += event_cost(cfg["actor"], run.charged_events) or (run.cost_usd or 0.0)
+        for k, v in (run.charged_events or {}).items():
+            events[k] = events.get(k, 0) + v
+        for it in run.items:
+            items.setdefault(it.get("id") or len(items), it)
+        if run.status != "SUCCEEDED":
+            state["status"], state["complete"] = run.status, False
+        elif not search_ended(run.log, len(run.items), cap_each):
+            if depth >= MAX_SPLIT_DEPTH:
+                state["complete"] = False
+            else:
+                for q in quadrants(bbox):
+                    search(q, depth + 1)
+
+    search(areas[0].bbox, 0)
+    return ActorRun(actor=cfg["actor"], run_id=",".join(r.run_id for r in runs), status=state["status"],
+                    items=list(items.values()), cost_usd=round(state["spent"], 4), charged_events=events,
+                    console_url=runs[0].console_url if runs else "", complete=state["complete"])
 
 
 def _num(pattern: str, text: str) -> float | None:
@@ -177,4 +245,4 @@ def area_of(item: dict[str, Any], ids: list[str]) -> str | None:
     return None
 
 
-ADAPTER = Adapter(name="airbnb", build_input=build_input, parse=parse, area_kind="box", area_of=area_of)
+ADAPTER = Adapter(name="airbnb", build_input=build_input, parse=parse, area_kind="box", area_of=area_of, fetch=fetch)
