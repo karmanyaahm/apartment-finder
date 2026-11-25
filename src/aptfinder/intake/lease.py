@@ -279,7 +279,7 @@ def craigslist_parse(item: dict[str, Any], cfg: dict[str, Any]) -> Parsed | None
         furnished=True if at.get("furnished") else None,
         available_from=_avail(at.get("available"), datetime.fromisoformat(item["postedAt"]).date()
                               if item.get("postedAt") else None),
-        title=item.get("title"), description=(item.get("description") or "")[:3000] or None,
+        title=item.get("title"), description=(item.get("description") or "")[:6000] or None,
         amenities=[v for k, v in at.items() if k in ("laundry", "parking", "airconditioning", "ev_charging")
                    and v] or None,
         extra={"posted_at": item.get("postedAt"), "updated_at": item.get("updatedAt"),

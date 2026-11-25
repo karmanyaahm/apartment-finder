@@ -377,3 +377,77 @@ def test_a_stop_added_to_a_set_gets_estimates_and_becomes_the_nearest(conn, tmp_
     assert trips.estimate_missing(conn, db)["new_trips"] == 1
     near = nearest_by_set(best_trips(conn)["p_a"])[("google_bus_stops", "walk")]
     assert near["point_id"] == "google_bus_stops:New" and near["provider"] == "estimate"
+
+def test_address_street_line_found_past_a_name_list_or_range():
+    # real Haiku answers on Craigslist posts (2026-11-25) that the old first-comma-part check refused
+    cases = [
+        ("Extended Stay America Suites - 3 Circle Star Way, San Carlos, CA 94070",
+         "Extended Stay America Suites - 3 Circle Star Way, San Carlos, CA 94070", "3 Circle Star Way, San Carlos, CA 94070"),
+        ("848, 850, 852, 854 Jordan Ave, Los Altos, CA 94022",
+         "1 Bed / 1 Bath\n848, 850, 852, 854 Jordan Ave, Los Altos, CA 94022", "854 Jordan Ave, Los Altos, CA 94022"),
+        ("11720-11780 San Pablo Ave - El Cerrito, CA 94530",
+         "Community Location:\n11720-11780 San Pablo Ave - El Cerrito, CA 94530", "11720-11780 San Pablo Ave, El Cerrito, CA 94530"),
+        ("1325 40th St Emeryville, CA 94608", "Lofts\n1325 40th St Emeryville, CA 94608", "1325 40th St Emeryville, CA 94608"),
+        ("153a Haas Ave, San Leandro, CA, 94577", "Linvale Townhomes\n153a Haas Ave, San Leandro, CA, 94577",
+         "153a Haas Ave, San Leandro, CA, 94577"),
+    ]
+    for ans, text, want in cases:
+        assert check_answer({"address": ans}, text).get("address") == want
+    # still verbatim: a street line the text does not hold is refused
+    assert "address" not in check_answer({"address": "Suites - 3 Circle Star Way"}, "Suites at Circle Star Way")
+
+
+def test_address_missing_asks_again_only_rows_without_an_address(conn, tmp_path, monkeypatch):
+    import json
+    from aptfinder import settings
+    from aptfinder.intake import extract as ex
+    monkeypatch.setattr(settings, "DATA_DIR", tmp_path)
+    _listings(conn, "craigslist", [
+        ("cl1", {"title": "Tuscany", "lat": 37.35, "lon": -121.98,
+                 "description": "Tuscany\n3229 El Camino Real, Santa Clara, CA, 95051\nCall Now"}),
+        ("cl2", {"title": "Sharon Grove", "lat": 37.42, "lon": -122.2, "address": "680 Sharon Park Drive #19",
+                 "description": "Sharon Grove | 680 Sharon Park Drive #19 , Menlo Park, CA"})])
+    answers = {"Tuscany": None}
+    stub = lambda batch, model, cap: ([{"key": b["key"], "address": answers.get(b["text"].split("\n")[0][7:])}  # noqa: E731
+                                       for b in batch], 0.0)
+    ex.extract(conn, "craigslist", ask_fn=stub)  # first reading: Haiku missed it (a real cached null)
+    assert json.loads(conn.execute("SELECT data FROM latest_obs WHERE source_id = 'cl1'").fetchone()[0]).get("address") is None
+    answers["Tuscany"] = "3229 El Camino Real, Santa Clara, CA, 95051"
+    res = ex.extract(conn, "craigslist", address_missing=True, ask_fn=stub)
+    assert res["listings"] == 1 and res["calls"] == 1  # only cl1; cl2 has its address
+    d = json.loads(conn.execute("SELECT data FROM latest_obs WHERE source_id = 'cl1'").fetchone()[0])
+    assert d["address"] == "3229 El Camino Real, Santa Clara, CA, 95051"
+    # the fresh answer replaced the cached null: a later cached re-apply keeps the address, and --address-missing
+    # with --cached-only applies the cache without asking
+    ex.extract(conn, "craigslist", reread=True, cached_only=True, ask_fn=stub)
+    res = ex.extract(conn, "craigslist", address_missing=True, cached_only=True,
+                     ask_fn=lambda *a: (_ for _ in ()).throw(AssertionError("asked")))
+    assert res["listings"] == 0  # cl1 has its address now
+    d = json.loads(conn.execute("SELECT data FROM latest_obs WHERE source_id = 'cl1'").fetchone()[0])
+    assert d["address"] == "3229 El Camino Real, Santa Clara, CA, 95051"
+
+
+def test_a_text_address_never_moves_a_row_off_the_building_its_pin_joined(conn, tmp_path, monkeypatch):
+    import json
+    from aptfinder import identity, settings
+    from aptfinder.intake import extract as ex
+    monkeypatch.setattr(settings, "DATA_DIR", tmp_path)
+    _listings(conn, "zillow", [("z1", {"address": "100 Toscana Drive, American Canyon, CA 94503", "lat": 38.1668,
+                                       "lon": -122.2553, "property_name": "Napa Cove Apartments", "kind": "apartment"})])
+    _listings(conn, "craigslist", [
+        ("cl1", {"title": "Napa Cove 2x1", "lat": 38.1668, "lon": -122.2553, "description":
+                 "Applications at our office: 100 Roja Lane American Canyon, CA 94503"}),
+        ("cl2", {"title": "Napa Cove 1x1", "lat": 38.1668, "lon": -122.2553, "description":
+                 "Napa Cove, 100 Toscana Drive, American Canyon"})])
+    identity.run(conn)
+    pk = conn.execute("SELECT place_key FROM listings WHERE source_id = 'z1'").fetchone()[0]
+    assert conn.execute("SELECT place_key FROM listings WHERE source_id = 'cl1'").fetchone()[0] == pk
+    said = {"Napa Cove 2x1": "100 Roja Lane American Canyon, CA 94503", "Napa Cove 1x1": "100 Toscana Drive, American Canyon"}
+    stub = lambda batch, model, cap: ([{"key": b["key"], "address": said[b["text"].split("\n")[0][7:]]}  # noqa: E731
+                                       for b in batch], 0.0)
+    ex.extract(conn, "craigslist", ask_fn=stub)
+    d1 = json.loads(conn.execute("SELECT data FROM latest_obs WHERE source_id = 'cl1'").fetchone()[0])
+    d2 = json.loads(conn.execute("SELECT data FROM latest_obs WHERE source_id = 'cl2'").fetchone()[0])
+    assert d1.get("address") is None and d1["extra"]["extracted"]["conflicts"] == {"address": "100 Roja Lane American Canyon, CA 94503"}
+    assert d2["address"] == "100 Toscana Drive, American Canyon"  # the same street line: filled
+    assert conn.execute("SELECT place_key FROM listings WHERE source_id = 'cl1'").fetchone()[0] == pk

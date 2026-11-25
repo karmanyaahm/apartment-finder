@@ -161,8 +161,10 @@ SCHEMA = {"type": "object", "required": ["results"], "properties": {"results": {
     "type": "object", "required": ["key", "restriction", "parking"],
     "properties": {
         "key": {"type": "string"},
-        "address": {**_STR, "description": "street address of the rental as written, e.g. '231 Grant Ave, "
-                                           "Palo Alto, CA 94306'; null if the text gives none"},
+        "address": {**_STR, "description": "street address of the rental (house number and street) wherever the "
+                                           "text gives it: title, body, a 'Community Location' or office line, or "
+                                           "a signature; copy it as written, e.g. '231 Grant Ave, Palo Alto, CA "
+                                           "94306'; null only if the text gives no street number"},
         "property_name": {**_STR, "description": "name of the apartment community or building, if named"},
         "website": {**_STR, "description": "a URL in the text for the property or its manager"},
         "facts": {"type": "object", "properties": FACTS},
@@ -203,14 +205,23 @@ def _fact_ok(name: str, f: Any, t: str) -> bool:
     return 0 < v <= 3650
 
 
+def street_from(addr: str) -> str | None:
+    """The answer from its street line on: the first comma or ' - ' part that starts with a house number (a letter
+    suffix '153a', a range '11720-11780') and a word. 'Extended Stay America Suites - 3 Circle Star Way, San Carlos'
+    -> '3 Circle Star Way, San Carlos'; '848, 850, 852, 854 Jordan Ave, Los Altos' -> '854 Jordan Ave, Los Altos';
+    '1325 40th St' stays; None when no part does ('California St, Mountain View')."""
+    parts = [p.strip() for p in re.split(r",|\s+-\s+", addr)]
+    i = next((i for i, p in enumerate(parts) if re.match(r"^\d+[a-z]?(?:-\d+[a-z]?)?\s+[a-z0-9]", p, re.I)), None)
+    return None if i is None else ", ".join(p for p in parts[i:] if p)
+
+
 def check_answer(ans: dict[str, Any], text: str) -> dict[str, Any]:
     """Only facts the text supports: verbatim street address, name and URL; every other fact with a verbatim
     quote. Returns flat values plus `facts` {name: {value, evidence}}."""
     out: dict[str, Any] = {}
     t = _norm(text)
-    addr = (ans.get("address") or "").strip()
-    street = addr.split(",")[0].strip()
-    if re.match(r"^\d+\s+\S", street) and f" {_norm(street)} " in f" {t} ":
+    addr = street_from(ans.get("address") or "")
+    if addr and f" {_norm(addr.split(',')[0])} " in f" {t} ":
         out["address"] = addr
     name = (ans.get("property_name") or "").strip()
     if name and _norm(name) and _norm(name) in t:
@@ -462,7 +473,7 @@ def entry_text(data: dict[str, Any], raw: list[str] | None = None, own: bool = F
              f"Name: {data['property_name']}" if data.get("property_name") else "",
              f"Floor plan: {data['floor_plan']}" if own and data.get("floor_plan") else "",
              f"Unit: {data['unit']}" if own and data.get("unit") else "",
-             (data.get("description") or "").strip()[:3000],
+             (data.get("description") or "").strip()[:MAX_TEXT],
              f"Amenities: {'; '.join(am)}" if am else "",
              *(f"{k.replace('_', ' ').capitalize()}: {_flat(extra[k])}" for k in TEXT_EXTRAS
                if _flat(extra.get(k))),
@@ -650,14 +661,17 @@ def _pending(conn, source: str, reread: bool = False, pages: set[str] | None = N
 def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: str = "haiku", max_usd: float = 1.0,
             workers: int = 8, dry_run: bool = False, reread: bool = False, cached_only: bool = False,
             ask_fn: Callable | None = None, rebuild_identity: bool = True,
-            id_like: str | None = None, recheck_none: bool = False, recheck: str | None = None, units_missing: bool = False) -> dict[str, Any]:
+            id_like: str | None = None, recheck_none: bool = False, recheck: str | None = None, units_missing: bool = False,
+            address_missing: bool = False) -> dict[str, Any]:
     """Read the whole entry of every unread active listing of `source`. `cached_only`: apply cached answers, ask
     nothing (after a reparse). `ask_fn` replaces `ask` (tests). `rebuild_identity=False`: the caller rebuilds it.
     `id_like`: only source_ids matching this SQL LIKE pattern. `recheck_none`: only listings whose current reading
     says restriction 'none' from a text that is not `described` (cached answers applied again, free).
     `units_missing`: only rows whose source left beds or baths empty (`units_wanted`), read again (their own plan
-    and unit lines make a new text, so only they are asked; a Zillow single unit gets its page's values)."""
-    if units_missing:
+    and unit lines make a new text, so only they are asked; a Zillow single unit gets its page's values).
+    `address_missing`: only rows whose address is still empty (after the user's corrections), asked again even when
+    an answer is cached (the fresh answer replaces it); with `cached_only`, those rows get the cached answers."""
+    if units_missing or address_missing:
         reread = True
     if recheck_none or recheck:
         reread = cached_only = True
@@ -671,7 +685,12 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
         pages = load_pages()
         buildings = load_buildings()
     todo = [t for t in _pending(conn, source, reread, set(pages or ()), id_like)
-            if not units_missing or units_wanted(source, t["row"]["source_id"], t["data"])][:limit]
+            if not units_missing or units_wanted(source, t["row"]["source_id"], t["data"])]
+    if address_missing:
+        no_addr = {r[0] for r in conn.execute("SELECT source_id FROM listings WHERE source = ? AND active = 1 AND "
+                                              "COALESCE(trim(address), '') = ''", (source,))}
+        todo = [t for t in todo if t["row"]["source_id"] in no_addr]
+    todo = todo[:limit]
     raws = RawIndex(source) if source in RAW_SOURCES else None
     raw_missing = 0
     for t in todo:
@@ -706,7 +725,7 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
         todo = [t for t in todo if t["row"]["source_id"] in said]
     uniq: dict[str, str] = {}
     for t in todo:
-        if t["hash"] not in cache:
+        if t["hash"] not in cache or (address_missing and not cached_only):
             uniq.setdefault(t["hash"], t["text"])
     plan = {"source": source, "listings": len(todo), "texts": len({t["hash"] for t in todo}), "to_ask": len(uniq),
             "calls_planned": -(-len(uniq) // batch), "raw_missing": raw_missing,
@@ -728,6 +747,12 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
         cache.update(new)
         save_cache(new)
 
+    # a row with no address whose pin joined an address-keyed building (identity's geo_near_address): that
+    # building's address, so a text address naming another street line goes to the conflicts, never moves the row
+    joined = {r[0]: r[1] for r in conn.execute(
+        "SELECT l.source_id, p.address FROM listings l JOIN places p ON p.place_key = l.place_key "
+        "WHERE l.source = ? AND l.active = 1 AND COALESCE(trim(l.address), '') = '' AND l.place_key LIKE 'p\\_%' "
+        "ESCAPE '\\' AND p.address IS NOT NULL", (source,))}
     n_obs = 0
     try:  # the Claude calls write nothing to the database; the answers are applied after them
         res = ask_parallel(groups, lambda g, cap: one([{"key": x["key"], "text": x["text"]} for x in g], model, cap),
@@ -765,6 +790,10 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
                         extra[k] = v
                         got.append(k)
                 elif d.get(k) is None:
+                    on = joined.get(t["row"]["source_id"]) if k == "address" else None
+                    if on and _disagrees(k, on, v):
+                        conflicts[k] = v  # e.g. Napa Cove's office '100 Roja Lane' vs its building, 100 Toscana Dr
+                        continue
                     if k == "address" and "," not in v and d.get("city"):
                         v = f"{v}, {str(d['city']).title()}"  # "850 Calderon Ave" -> "..., Mountain View"
                     d[k] = v

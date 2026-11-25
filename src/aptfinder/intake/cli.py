@@ -134,6 +134,10 @@ def main(argv: list[str] | None = None) -> None:
                                                                "(not rooms, building info or Zillow building rows): "
                                                                "read again; a Zillow single unit gets its page's "
                                                                "beds, baths, sqft and price")
+    ex.add_argument("--address-missing", action="store_true", help="only rows whose address is still empty: ask "
+                                                                 "again even when an answer is cached (with "
+                                                                 "--cached-only: apply the cache, ask nothing)")
+    ex.add_argument("--cached-only", action="store_true", help="apply cached answers only, ask nothing")
     ex.add_argument("--id-like", help="only listings whose source_id matches this SQL LIKE pattern "
                                       "(e.g. '%%:%%': Zillow buildings' bedroom rows)")
     zd = sub.add_parser("zillow-detail", help="fetch the detail page of every active Zillow listing without one "
@@ -303,7 +307,8 @@ def main(argv: list[str] | None = None) -> None:
                 res = extract(conn, src, limit=args.limit, batch=args.batch, model=args.model, max_usd=left,
                               workers=args.workers, dry_run=args.dry_run, reread=args.reread,
                               id_like=args.id_like, recheck_none=args.recheck_none, recheck=args.recheck_restriction,
-                              units_missing=args.units_missing)
+                              units_missing=args.units_missing, address_missing=args.address_missing,
+                              cached_only=args.cached_only)
             except Blocker as e:
                 raise SystemExit(f"BLOCKED: extract {e}")
             print(json.dumps(res, indent=1, default=str), flush=True)
