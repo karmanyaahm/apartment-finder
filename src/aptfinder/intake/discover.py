@@ -173,7 +173,12 @@ def vouched(site: dict[str, Any], item: dict[str, Any], website_hosts: set[str] 
     # is not Sunnyvale's Villa Oaks
     parts = [p.strip() for p in (site.get("address") or "").split(",")]
     city = parts[1].lower() if len(parts) > 2 else None
-    if not toks or not city or city not in (title + " " + (item.get("text") or "")).lower():
+    # ...outside JSON blobs: rentvillaoaks.com's text carries its operator's portfolio JSON, Sunnyvale buildings
+    # included
+    text = item.get("text") or ""
+    for _ in range(4):
+        text = re.sub(r"\{[^{}]*\}", " ", text)
+    if not toks or not city or city not in (title + " " + text).lower():
         return None
     where = re.sub(r"[^a-z0-9]", "", host + urlsplit(url).path.lower())
     if all(t in where for t in toks):

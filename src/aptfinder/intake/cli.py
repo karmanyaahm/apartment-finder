@@ -173,6 +173,7 @@ def main(argv: list[str] | None = None) -> None:
     fp.add_argument("--limit", type=int, help="the first N items of the own-site list")
     fp.add_argument("--max-apify-usd", type=float, default=0.6)
     fp.add_argument("--max-claude-usd", type=float, default=2.0)
+    fp.add_argument("--no-search", action="store_true", help="no web search: the click agent from the known site")
     fp.add_argument("--dry-run", action="store_true", help="print the targets and start URLs only")
     pm = sub.add_parser("prometheus", help="Prometheus own sites: units and prices from Prometheus's availability "
                                            "JSON, one direct request per site (no Apify, no page scraping)")
@@ -229,7 +230,8 @@ def main(argv: list[str] | None = None) -> None:
             print(json.dumps([{**t, "own_hosts": sorted(t["own_hosts"])} for t in ts], indent=1))
             return
         try:
-            res = pilot(ts, max_apify_usd=args.max_apify_usd, max_claude_usd=args.max_claude_usd)
+            res = pilot(ts, max_apify_usd=args.max_apify_usd, max_claude_usd=args.max_claude_usd,
+                        search=not args.no_search)
         except Blocker as e:
             raise SystemExit(f"BLOCKED: {e}")
         print(json.dumps({k: res[k] for k in ("raw", "apify_usd", "claude_usd", "pages", "found")}, indent=1))

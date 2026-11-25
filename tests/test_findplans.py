@@ -100,3 +100,27 @@ def test_units_of_other_buildings_on_a_managers_page_are_dropped():
     assert not other_address("1010 Noel Drive #12", noel)
     assert not other_address("A7", noel) and not other_address("2 Bedroom", noel)
     assert not other_address("1055 Laurel Street", "1041 Laurel St #1055, Menlo Park, CA 94025")
+
+
+def test_click_starts_put_the_known_site_before_a_name_only_pick():
+    from aptfinder.intake.findplans import click_starts
+
+    # pilot 1: Claude's pick for Encore was a Salem 'Encore'; The Martin's Google pick a builder's site
+    assert click_starts([None, "https://encoremdi.prospectportal.com/salem/encore/"],
+                        "https://www.encoreredwoodcity.com/", set())[0] == "https://www.encoreredwoodcity.com/"
+    assert click_starts(["https://themartingroup.com/projects", None], "https://livethemartin.com/",
+                        {"livethemartin.com"})[0] == "https://livethemartin.com/"
+    # a pick on the building's own host comes first (The Colton's floor-plans page)
+    fp = "https://www.thecoltonapts.com/apartments/ca/redwood-city/floor-plans"
+    assert click_starts([fp, None], "https://www.thecoltonapts.com/", {"thecoltonapts.com"}) == [
+        fp, "https://www.thecoltonapts.com/"]
+    # no known site: the picks in order (Domus)
+    assert click_starts(["https://www.liveatdomus.com/x", "https://www.willowbridgepc.com/y"], None, set())[0] \
+        == "https://www.liveatdomus.com/x"
+
+
+def test_a_city_named_only_in_page_json_does_not_count():
+    s = {"name": "Villa Oaks Apartments", "address": "158 N Sunnyvale Ave, Sunnyvale, CA 94086", "url": "x"}
+    it = {"url": "https://www.rentvillaoaks.com/", "title": "Santa Rosa Townhomes & Apartments for Rent",
+          "text": TEXT + ' Villa Oaks, Santa Rosa {"display_name":"Birchwood","city":"Sunnyvale"}'}
+    assert vouched(s, it) is None

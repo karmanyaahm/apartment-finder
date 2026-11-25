@@ -199,6 +199,15 @@ def pick_result(results: list[dict[str, str]], name: str, own_hosts: set[str], c
     return None, "no result on the building's own host or naming it"
 
 
+def click_starts(picks: list[str | None], known: str | None, own_hosts: set[str]) -> list[str]:
+    """Where the click agent starts, in order: a search pick on a host the building's known sites use, then the
+    known site, then the other picks. A pick named only by the name (a Salem 'Encore' on prospectportal.com,
+    themartingroup.com for The Martin; pilot 2026-11-25) never comes before a site the building is known by."""
+    own = [u for u in picks if u and _host(u) in own_hosts]
+    other = [u for u in picks if u and _host(u) not in own_hosts]
+    return list(dict.fromkeys(own + ([known] if known else []) + other))
+
+
 def names_city(page: dict[str, Any], city: str) -> bool:
     return not city or city.lower() in ((page.get("title") or "") + " " + (page.get("text") or "")).lower()
 
@@ -404,14 +413,14 @@ def _priced(res: dict[str, Any] | None) -> bool:
 
 
 def pilot(targets: list[dict[str, Any]], *, max_apify_usd: float = 0.6, max_claude_usd: float = 2.0,
-          model: str = "haiku") -> dict[str, Any]:
+          model: str = "haiku", search: bool = True) -> dict[str, Any]:
     """targets: [{key, name, city, start (known own-site URL or None), own_hosts}]. Returns the per-site report;
     writes data/raw/findplans/pilot<ts>.json with every page's text, links, hops and readings (no screenshots)."""
     pager, claude = Pager(max_apify_usd), 0.0
     out: dict[str, dict[str, Any]] = {t["key"]: {"name": t["name"], "start": t.get("start"), "search": {},
                                                  "google": {}, "click": {"hops": []}} for t in targets}
-    # 1. search (no Apify)
-    for t in targets:
+    # 1. search (no Apify); `search=False`: the click agent from the known site only
+    for t in (targets if search else []):
         q = f"{t['name']} {t['city']} floor plans"
         try:
             results, c = web_search(q, model)
@@ -424,6 +433,8 @@ def pilot(targets: list[dict[str, Any]], *, max_apify_usd: float = 0.6, max_clau
     # 1b. the same queries through Google (Apify), one run for all
     queries = {t["key"]: f"{t['name']} {t['city']} floor plans" for t in targets}
     try:
+        if not search:
+            raise Blocker("search off (--no-search)")
         g, grec = google_search(list(queries.values()))
         pager.runs.append(grec)
         pager.spent += grec.get("usd") or 0.0
@@ -438,22 +449,37 @@ def pilot(targets: list[dict[str, Any]], *, max_apify_usd: float = 0.6, max_clau
     # (pilot 2026-11-25: Noel Oaks' known URL with a trailing slash was not returned, its Google pick loaded; a
     # search pick's home page led the agent off into an operator's Texas pages)
     state: dict[str, dict[str, Any]] = {}
+    trusted: dict[str, set[str]] = {}
     for t in targets:
         o = out[t["key"]]
-        starts = list(dict.fromkeys(u for u in (o["google"].get("pick"), o["search"].get("pick"), t.get("start"))
-                                    if u))
+        starts = click_starts([o["google"].get("pick"), o["search"].get("pick")], t.get("start"), t["own_hosts"])
+        trusted[t["key"]] = {u for u in starts if u == t.get("start") or _host(u) in t["own_hosts"]}
         o["click"]["starts"] = starts
         if starts:
             o["click"]["start"] = starts[0]
             state[t["key"]] = {"url": starts[0], "click": None, "tried": [], "done": False, "starts": starts[1:]}
     pager.fetch([(o[a]["pick"], None) for o in out.values() for a in ("search", "google") if o[a].get("pick")]
                 + [(s["url"], None) for s in state.values()])
-    for k, s in state.items():  # a failed start: the next start page (fetched with hop 1's round)
-        if (pager.get(s["url"]).get("error") or not pager.get(s["url"]).get("text")) and s["starts"]:
-            out[k]["click"]["hops"].append({"url": s["url"], "action": "stop", "reason": "start page failed: "
-                                            + str(pager.get(s["url"]).get("error") or "no text")[:120]})
-            s["url"] = s["starts"].pop(0)
-    pager.fetch([(s["url"], None) for s in state.values()])
+    city = {t["key"]: t["city"] for t in targets}
+    for _ in range(2):  # a failed start, or one that does not name the city: the next start page
+        moved = False
+        for k, s in state.items():
+            pg = pager.get(s["url"])
+            # a pick named only by the name (not on a host the building is known by) must name its city
+            bad = (pg.get("error") or "no text") if (pg.get("error") or not pg.get("text")) else \
+                (None if s["url"] in trusted[k] or names_city(pg, city[k]) else f"does not name {city[k]}")
+            if not bad:
+                continue
+            out[k]["click"]["hops"].append({"url": s["url"], "action": "stop",
+                                            "reason": f"start page failed: {str(bad)[:120]}"})
+            if s["starts"]:
+                s["url"] = s["starts"].pop(0)
+                moved = True
+            else:
+                s["done"] = True
+        if not moved:
+            break
+        pager.fetch([(s["url"], None) for s in state.values()])
     # the search arms: read their page (one reading per URL, shared by both arms)
     reads: dict[str, dict[str, Any]] = {}
     for t in targets:
@@ -503,7 +529,7 @@ def pilot(targets: list[dict[str, Any]], *, max_apify_usd: float = 0.6, max_clau
             hops.append({"url": pg.get("url"), "click": s["click"], "clicked": pg.get("clicked"),
                          "refused": pg.get("refused"), **c})
             if c["action"] in ("read", "stop"):
-                if c["action"] == "read" or hop == MAX_HOPS:
+                if c["action"] == "read":
                     r, rc = read_page(names[k], pg, model, addrs[k])
                     claude += rc
                     out[k]["click"]["read"] = r
