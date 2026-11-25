@@ -52,8 +52,9 @@ def rentcafe_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] | 
              "application_fee": item.get("applicationFee"), "pet_deposit": item.get("petDeposit"),
              "pet_rent": item.get("petRent"), "cats_allowed": item.get("catsAllowed"),
              "dogs_allowed": item.get("dogsAllowed"), "year_built": item.get("yearBuilt"),
-             "stories": item.get("stories"), "details_missing": item.get("detailsMissing"),
-             "site_total": item.get("siteTotal")}
+             "stories": item.get("stories"), "details_missing": item.get("detailsMissing")}
+    # siteTotal (the search's rental count) stays in the raw file: on a row it would change every row's content hash
+    # whenever the city's count moves
     out = []
     for f in item.get("floorPlans") or []:
         if not f.get("rentMin"):  # "Ask for pricing": not an offer

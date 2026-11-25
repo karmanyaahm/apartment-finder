@@ -88,8 +88,9 @@ operators = [
 
 [rentcafe]
 # RentCafe (Yardi), per city, chosen 2026-11-25 by a Mountain View probe (design.md): pages through the whole city
-# search (siteTotal 462 for Mountain View) and opens each property for its floor plans. One item per property.
+# search (Mountain View: 72 properties; the site's '462 rentals' are units) and opens each property for its floor
+# plans. One item per property.
 # $0.00135 per item on the Bronze tier until 2026-11-28, $0.00081 after; $0.00005 per start. azzouzana/rentcafe-scraper
-# returns the raw search cards (base vs total rent label, units available) but stopped after 25 of 462.
+# returns the raw search cards (base vs total rent label, units available) but returned only 25 of 72.
 actor = "benthepythondev/rentcafe-apartments-scraper"
 max_items = 600          # properties per city
