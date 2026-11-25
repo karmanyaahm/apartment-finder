@@ -8,6 +8,7 @@
   aptf-intake promote-sites [--limit 100] [--retry-failed] [--dry-run]
   aptf-intake render [--site ID] [--retry-failed] [--dry-run]   # every site in the list by default
   aptf-intake extract <text source>|all [--workers 8] [--dry-run]   # Haiku reads each listing's whole entry
+  aptf-intake zillow-detail --max-usd 1.0 [--batch 150] [--limit N] [--dry-run]   # Zillow detail pages (raw only)
   (`run` of a text source then reads its rows automatically, `--no-extract` skips; `reparse` applies cached readings)
   (then, after any `run` or `reparse` that wrote rows: geocode new addresses (not on reparse), identity, free commute
    estimates for places without any; `--no-followup` skips)
@@ -113,6 +114,13 @@ def main(argv: list[str] | None = None) -> None:
     ex.add_argument("--dry-run", action="store_true")
     ex.add_argument("--reread", action="store_true", help="apply cached answers again to listings already read "
                                                           "(free; after a change to the checks)")
+    zd = sub.add_parser("zillow-detail", help="fetch the detail page of every active Zillow listing without one "
+                                              "(Apify; raw only, read by `extract zillow`)")
+    zd.add_argument("--max-usd", type=float, required=True, help="cap on Apify spend for this command")
+    zd.add_argument("--batch", type=int, default=150, help="zpids per actor run")
+    zd.add_argument("--limit", type=int, help="at most this many zpids")
+    zd.add_argument("--refetch", action="store_true", help="also zpids that already have a page")
+    zd.add_argument("--dry-run", action="store_true")
     rd = sub.add_parser("render", help="render buildings' own sites in a browser (Apify) and read offered plans "
                                        "and prices with Claude Haiku")
     rd.add_argument("--site", action="append", default=[], help="site id (repeatable); default every site")
@@ -152,6 +160,16 @@ def main(argv: list[str] | None = None) -> None:
         except Blocker as e:
             raise SystemExit(f"BLOCKED: {e}")
         print(json.dumps(res, indent=1, default=str))
+        return
+
+    if args.cmd == "zillow-detail":
+        from .zillow_detail import fetch
+
+        res = fetch(conn, max_usd=args.max_usd, batch=args.batch, limit=args.limit, refetch=args.refetch,
+                    dry_run=args.dry_run)
+        print(json.dumps(res, indent=1, default=str))
+        if res.get("warnings"):
+            print("\nWARNINGS:\n  " + "\n  ".join(res["warnings"]))
         return
 
     if args.cmd == "extract":

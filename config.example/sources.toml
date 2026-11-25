@@ -7,8 +7,8 @@ max_usd_per_run = 1.0
 reserve_usd = 0.30
 
 [airbnb]
-actor = "kaix/airbnb-listing-scraper"   # coordinate search around each box + full listing pages, $0.0001 per listing
-max_items = 270          # Airbnb's own ceiling per search (15 pages of 18); the Mountain View box returned 131 (2026-11-25)
+actor = "tri_angle/airbnb-scraper"
+max_items = 150          # the box held ~130 listings for these dates (2026-11-24); beyond that Airbnb spills outside it
 # Real dates at least 28 days apart so the returned price is the monthly-discounted one.
 checkin = "2026-12-01"
 checkout = "2027-01-01"
