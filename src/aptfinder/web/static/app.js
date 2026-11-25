@@ -713,7 +713,7 @@ function priceFacts(p, fails = []) {
 const RESTRICTION_LABEL = { income: "income-restricted", senior: "seniors only", veterans: "veterans only",
   student: "students only", employer: "employees only", other: "restricted" };
 function restrictionBadge(rx, fails = []) {
-  if (!rx) return "";
+  if (!rx || rx.value === "none") return "";
   const mk = markFor(fails, (x) => x.f === "restriction");
   return `<span class="chip rx-chip"${mk || ` title="${esc(`"${rx.evidence || ""}" (${rx.source})`)}"`}>${esc(RESTRICTION_LABEL[rx.value] || rx.value)}</span>`;
 }
@@ -724,7 +724,9 @@ function whoMayRent(d, p) {
   const vals = S.goalsData?.equals_fields?.restriction;
   if (!vals || S.meta.readonly) return "";
   const mine = [...d.annotations].reverse().find((a) => a.attribute === "restriction" && a.comment)?.comment;
-  const read = p.restriction ? `read: ${RESTRICTION_LABEL[p.restriction.value] || p.restriction.value} ("${p.restriction.evidence || ""}", ${p.restriction.source})` : "no limit read from any source";
+  const rx = p.restriction;  // a limit, a 'none' with its basis (market-rate quote or operator), or nothing stated
+  const read = rx && rx.value !== "none" ? `read: ${RESTRICTION_LABEL[rx.value] || rx.value} ("${rx.evidence || ""}", ${rx.source})`
+    : `no limit stated — assumed none${rx ? ` ("${rx.evidence || ""}", ${rx.source})` : ""}`;
   return `<div class="small">Who may rent: <select id="rx-set"><option value="">${mine ? "" : "not answered"}</option>
     ${vals.map((v) => opt(v, v === "none" ? "no limit (anyone)" : RESTRICTION_LABEL[v] || v, mine)).join("")}</select>
     <span class="muted">${mine ? "your answer" : esc(read)}</span></div>`;

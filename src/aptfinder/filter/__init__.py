@@ -110,7 +110,9 @@ def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None, trips:
     # restriction none` rule says needs_check). Your answer in Verify (annotation place / restriction) beats both.
     # The place's operator (`config.operator_restriction`: its own site's domain or the operator field) fills in
     # below a quoted limit: an affordable-housing one says income (unless a page there says market-rate in so many
-    # words), over a listing's none; a market-rate one says none where nothing was read (unknown).
+    # words), over a listing's none; a market-rate one says none where nothing was read (unknown). Nothing read at
+    # all: assumed none (`ASSUMED_NONE`, the user's decision 2026-11-25: no limit unless one is stated), so an
+    # `equals restriction none` rule passes; only a stated limit, an affordable operator or your answer restricts.
     # parking: a row's own reading (extract's, then its site's pages) first, field by field; what it leaves unknown
     # comes from a building statement at the place (an own site's pages, a building-level source: `parking_pool`)
     pooled: dict[str, set[str]] = {}
@@ -157,6 +159,8 @@ def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None, trips:
             rx = op_income[r["place_key"]]
         elif rx.get("value") is None and r["place_key"] in op_market:
             rx = op_market[r["place_key"]]
+        if rx.get("value") is None:
+            rx = ASSUMED_NONE
         rx = annotated_restriction(anns.get(r["place_key"] or "", {})) or rx
         r["restriction"] = rx.get("value")
         r["restriction_evidence"] = restriction_note(rx)
@@ -172,6 +176,9 @@ def row_restriction(extracted: dict[str, Any] | None, page: dict[str, Any] | Non
     got = [({**x, "source": src}) for x, src in ((extracted, source), (page, f"{source} page"))
            if isinstance(x, dict) and x.get("value")]
     return next((x for x in got if x["value"] != "none"), got[0] if got else None)
+
+
+ASSUMED_NONE = {"value": "none", "evidence": "no limit stated — assumed none", "source": "assumed"}
 
 
 def own_site_urls(source: str, url: str | None, website: str | None) -> list[str]:
@@ -262,22 +269,26 @@ def restriction_note(rx: dict[str, Any] | None) -> str | None:
 def place_restriction(rows: list[dict[str, Any]], anns: dict[str, dict[str, Any]] | None = None
                       ) -> dict[str, Any] | None:
     """The limit on who may rent that any of a place's listings states ({value, evidence, source}), else an
-    affordable-housing operator's (`config.operator_restriction`) unless a page there says market-rate, else None;
-    your Verify answer (`anns`: the place's latest annotations) first. `rows`: listings with `data` parsed."""
+    affordable-housing operator's (`config.operator_restriction`) unless a page there says market-rate, else a
+    'none' with its basis (a page's market-rate quote, a market-rate operator), else None (nothing stated: the goals
+    assume none); your Verify answer (`anns`: the place's latest annotations) first. `rows`: listings with `data`
+    parsed. The card shows a badge only for a limit."""
     mark = annotated_restriction(anns or {})
     if mark:
         return mark if mark["value"] != "none" else None
-    op, market = None, False
+    op, market = None, None
     for x in rows:
         extra = (x.get("data") or {}).get("extra") or {}
         rx = row_restriction((extra.get("extracted") or {}).get("restriction"), extra.get("page_restriction"),
                              x["source"])
         if rx and rx["value"] != "none":
             return rx
-        market = market or bool(rx and rx.get("evidence"))
+        market = market or (rx if rx and rx.get("evidence") else None)
         got = operator_restriction(own_site_urls(x["source"], x.get("url"), extra.get("website")), [x.get("operator")])
         op = op if op and op["value"] != "none" else got or op
-    return op if op and op["value"] != "none" and not market else None
+    if op and op["value"] != "none" and not market:
+        return op
+    return market or (op if op and op["value"] == "none" else None)
 
 
 def evaluate_goal(inp: dict[str, Any], goal: Goal) -> tuple[dict[tuple[str, str], Any], dict[str, Any]]:

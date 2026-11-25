@@ -89,9 +89,10 @@ def test_name_only_rows_are_read_and_a_place_limit_holds_for_all_its_listings(co
     assert '"(VASH)" (rentcafe)' in res[("rentcafe", "plan:1")]["reasons"][0][1]
     assert res[("rentcafe", "plan:1")]["fails"] == [{"s": FAIL, "f": "restriction", "v": "veterans",
                                                       "ev": '"(VASH)" (rentcafe)'}]
-    assert res[("rentcafe", "plan:2")]["status"] == CHECK
+    # nothing read (a RentCafe /housing/ row, a name alone): assumed none, so the rule passes
+    assert res[("rentcafe", "plan:2")]["status"] == PASS
     assert res[("rentcafe", "plan:3")]["status"] == PASS
-    assert res[("rentcafe", "plan:4")]["status"] == CHECK
+    assert res[("rentcafe", "plan:4")]["status"] == PASS
     assert res[("direct", "laurel:r:a1")]["status"] == FAIL
 
 
@@ -113,8 +114,8 @@ def test_restriction_fact_rule_editor_and_web_badge(tmp_path):
     assert r.status_code == 200, r.text
     places = c.get("/api/places").json()
     assert places and all("restriction" in p for p in places)
-    # nothing in the seed is read: the rule says needs_check, never fail
-    assert {p["goals"]["lease"]["status"] for p in places if "lease" in p["goals"]} == {CHECK}
+    # nothing in the seed is read: assumed none, so the rule passes
+    assert {p["goals"]["lease"]["status"] for p in places if "lease" in p["goals"]} == {PASS}
     assert "restriction" in c.get(f"/api/places/{places[0]['place_key']}").json()["place"]
 
 
@@ -220,7 +221,7 @@ def test_verify_income_answer_sets_the_place_restriction_and_resolves_too_cheap(
     pk = conn.execute("SELECT place_key FROM listings WHERE source_id = 'vm:r:studio-1-bath'").fetchone()[0]
     assert {c["listings"][0]["source_id"] for c in cheap_queue(conn, 1000)} == {"vm:r:2-bedrooms-1-bath",
                                                                                 "vm:r:studio-1-bath"}
-    assert evaluate_all(conn, _goal())["listings"]["g"][("direct", "vm:r:studio-1-bath")]["status"] == CHECK
+    assert evaluate_all(conn, _goal())["listings"]["g"][("direct", "vm:r:studio-1-bath")]["status"] == PASS
     append_annotation(conn, "user", "place", pk, "restriction", comment="income")
     assert cheap_queue(conn, 1000) == []
     res = evaluate_all(conn, _goal())["listings"]["g"][("direct", "vm:r:studio-1-bath")]
@@ -307,15 +308,18 @@ def test_operators_fill_in_who_may_rent_below_a_quoted_limit(conn):
         res[("direct", "rc:r:a")]["reasons"][0][1]
     assert res[("direct", "mr:r:a")]["status"] == PASS  # the page says market-rate: it beats the operator
     assert res[("direct", "sr:r:a")]["fails"][0]["v"] == "senior"  # a quoted limit wins
-    assert res[("direct", "pl:r:a")]["status"] == CHECK  # host suffix, not substring
+    assert res[("direct", "pl:r:a")]["status"] == PASS  # host suffix, not substring: nothing read, assumed none
+    assert res[("direct", "pl:r:a")]["fails"] == []
     assert res[("direct", "av:r:a")]["status"] == PASS  # AvalonBay's domain: market-rate
     assert res[("direct", "hi:r:a")]["status"] == PASS  # the operator field names Prometheus
     assert res[("direct", "ab:r:a")]["fails"][0]["v"] == "income"
     by = {r["source_id"]: {**dict(r), "data": json.loads(r["data"])} for r in conn.execute("SELECT * FROM listings")}
     assert place_restriction([by["rc:r:a"]])["source"] == "operator"
-    assert place_restriction([by["mr:r:a"]]) is None
+    assert place_restriction([by["mr:r:a"]])["evidence"] == "All homes are market-rate."
+    assert place_restriction([by["pl:r:a"]]) is None
     assert place_restriction([by["sr:r:a"]])["value"] == "senior"
     assert place_restriction([by["rc:r:a"]], {"restriction": {"comment": "none"}}) is None
-    assert place_restriction([by["av:r:a"]]) is None and place_restriction([by["ab:r:a"]])["value"] == "income"
+    assert place_restriction([by["av:r:a"]])["evidence"] == "operator: AvalonBay (market-rate)"
+    assert place_restriction([by["ab:r:a"]])["value"] == "income"
     from aptfinder.config import operator_restriction
     assert operator_restriction(["https://www.avaloncommunities.com/x"])["evidence"] == "operator: AvalonBay (market-rate)"
