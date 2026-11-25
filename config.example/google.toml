@@ -2,10 +2,11 @@
 # monthly caps before it is made (calendar month, UTC).
 # Pricing read 2026-11-24 from developers.google.com/maps/billing-and-pricing (sku-details/routes):
 #   Compute Routes Essentials $5 / 1,000, first 10,000 a month free (walk, transit, traffic-unaware drive).
-#   Enterprise $15 / 1,000, first 1,000 free: "two-wheeled vehicle routing". Whether BICYCLE counts as
-#   that is not stated, so bicycle calls get their own cap under the Enterprise free tier until confirmed.
+#   Bicycle bills as Essentials too (read 2026-11-25): Enterprise's "two-wheeled vehicle routing" is TWO_WHEELER
+#   (motorized), not BICYCLE, and our requests use no Pro/Enterprise feature (no traffic-aware routing, <= 10 waypoints).
 monthly_call_cap = 5000
-monthly_cap_by_mode = { bike = 900 }
+# Optional per-mode caps, e.g. { bike = 900 }; none needed, every mode shares the total cap.
+monthly_cap_by_mode = {}
 price_per_1000_usd = 5.0
 free_calls_per_month = 10000
 
