@@ -1034,15 +1034,35 @@ function conflictBlock(e) {
     </table></div></div>`;
 }
 
+/* the conflict filter: a goal ("" = all conflicts) and the walk zones; remembered per browser, else the header goal */
+function conflictFilter() {
+  const goals = (S.goalsData?.goals || []).map((g) => g.id);
+  let goal = lsGet("aptf.conflictGoal");
+  if (goal == null) goal = S.goal && S.goal !== "all" ? S.goal : "";
+  if (goal && !goals.includes(goal)) goal = "";  // a goal since deleted
+  return { goal, zone: lsGet("aptf.conflictZone") || "" };
+}
+
 async function renderConflicts() {
   const body = $("#verify-body");
   body.innerHTML = '<p class="muted">Loading…</p>';
-  const d = await api(`api/verify/batch?kind=conflict&skip=${S.conflictSkip}&n=${CONFLICT_PAGE}`);
+  const cf = conflictFilter();
+  const d = await api(`api/verify/batch?kind=conflict&skip=${S.conflictSkip}&n=${CONFLICT_PAGE}&goal=${encodeURIComponent(cf.goal)}&zone=${cf.zone}`);
   if (!d.items.length && S.conflictSkip > 0 && d.total > 0) { S.conflictSkip = Math.max(0, d.total - CONFLICT_PAGE); return renderConflicts(); }
-  if (!d.items.length) { S.verifyMode = "dup"; S.dupSkip = 0; return renderVerify(); }
-  const from = S.conflictSkip + 1, to = S.conflictSkip + d.items.length;
+  const filtered = cf.goal || cf.zone;
+  if (!d.items.length && !filtered) { S.verifyMode = "dup"; S.dupSkip = 0; return renderVerify(); }
+  const from = d.items.length ? S.conflictSkip + 1 : 0, to = S.conflictSkip + d.items.length;
   const more = to < d.total;
+  const gname = (id) => { const g = (S.goalsData?.goals || []).find((x) => x.id === id); return g ? g.label || g.id : id; };
+  const h = d.hidden || {}, nGoal = (h.irrelevant || 0) + (h.settled || 0);
+  const why = ["irrelevant", "settled"].filter((k) => h[k]).map((k) => `${h[k]} ${esc(d.hidden_labels[k])}`).join("; ");
+  const hid = [cf.goal ? `${nGoal} hidden as irrelevant to ${esc(gname(cf.goal))}${why ? ` (${why})` : ""}` : "",
+    cf.zone ? `${h.zone || 0} outside the station walk zones` : ""].filter(Boolean).join("; ");
+  const filterBar = `<p class="small v-filter">Relevant to goal: <select id="v-goal"><option value="">All conflicts</option>${(S.goalsData?.goals || []).map((g) => `<option value="${esc(g.id)}"${g.id === cf.goal ? " selected" : ""}>${esc(g.label || g.id)}</option>`).join("")}</select>
+    <label><input type="checkbox" id="v-zone"${cf.zone === "walk" ? " checked" : ""}> only within the station walk zones</label><br>
+    <span class="muted">Showing ${d.total} of ${d.all_total} conflicts${hid ? `: ${hid}` : ""}. A goal keeps a conflict only if one of its rules reads a disputed field and no rule fails on every reading (its commute limits included).</span></p>`;
   body.innerHTML = `<h2>${d.total} conflicts: ${d.actionable} to check (${d.cheap} priced too low per bedroom), ${d.pending} waiting for an own-site render</h2>
+    ${filterBar}
     <p class="small">Sources disagree on these units. Open each listing, then mark every stored value: ✓ correct, ✗ wrong (type the true value), ? cannot tell. Listings tagged <i>too cheap?</i> are priced below the per-bedroom floor: a per-room or misread price? Mark the price ✓ if it is real, ✗ with the true monthly rent if not. Conflicts tagged <i>own-site render pending</i> come last: the building's own site will be read again and will likely settle them.</p>
     <p class="muted small">Showing ${from}–${to} of ${d.total} · <a href="#" id="v-dups">possible duplicate buildings (${S.status?.queues?.duplicates ?? "…"})</a></p>
     ${d.items.map(conflictBlock).join("")}
@@ -1051,6 +1071,8 @@ async function renderConflicts() {
       <button id="v-rest" class="${more ? "" : "accent"}">${more ? "Skip to" : "Continue:"} possible duplicate buildings, then own sites and the sample</button></p>`;
   $$(".vbtns", body).forEach(wireVbtns);
   $$("[data-goto]", body).forEach((a) => a.addEventListener("click", (ev) => { ev.preventDefault(); gotoPlace(a.dataset.goto); }));
+  $("#v-goal").addEventListener("change", (ev) => { lsSet("aptf.conflictGoal", ev.target.value); S.conflictSkip = 0; renderConflicts(); });
+  $("#v-zone").addEventListener("change", (ev) => { lsSet("aptf.conflictZone", ev.target.checked ? "walk" : ""); S.conflictSkip = 0; renderConflicts(); });
   $("#v-prev").addEventListener("click", () => { S.conflictSkip = Math.max(0, S.conflictSkip - CONFLICT_PAGE); renderConflicts(); loadStatus(); });
   $("#v-more")?.addEventListener("click", () => {
     // a conflict whose every value got a verdict has left the queue, so the next page starts that much earlier

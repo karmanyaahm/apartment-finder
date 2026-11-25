@@ -396,3 +396,48 @@ def test_cheap_listing_goes_to_verify_until_its_price_is_checked(conn):
     append_check(conn, "user", "conflict", "price", "wrong", observation_id=z2, stored_value=900, true_value=2900)
     assert [c["listings"][0]["source_id"] for c in cheap_queue(conn, 1000)] == ["fl"]
     assert conn.execute("SELECT price FROM listings WHERE source_id = 'z2'").fetchone()[0] == 2900
+
+
+def test_conflicts_relevant_to_a_goal(conn):
+    """A goal keeps a conflict only when one of its rules reads a disputed field and no rule fails on every reading."""
+    from aptfinder.config import Goal, VerifyConfig
+    from aptfinder.filter import goal_inputs
+    from aptfinder.verify import all_conflicts, goal_relevance
+
+    r = start_run(conn, "intake", "zillow")
+    one = {"beds": 1, "baths": 1}
+    obs(conn, r, "zillow", "s1", 2400, address="1 Straddle St, Mountain View", **one)  # $/bed 2400 vs 2700: straddles
+    obs(conn, r, "apartments", "s2", 2700, address="1 Straddle St, Mountain View", **one)
+    obs(conn, r, "zillow", "f1", 3100, address="2 Fail St, Mountain View", **one)  # both over: settled
+    obs(conn, r, "apartments", "f2", 3300, address="2 Fail St, Mountain View", **one)
+    obs(conn, r, "zillow", "q1", 2000, address="3 Sqft St, Mountain View", sqft=700, **one)  # sqft: no rule reads it
+    obs(conn, r, "apartments", "q2", 2000, address="3 Sqft St, Mountain View", sqft=750, **one)
+    obs(conn, r, "zillow", "b1", 2400, address="4 Two Bed St, Mountain View", beds=2, baths=1)  # 2bd: size fails both
+    obs(conn, r, "apartments", "b2", 2700, address="4 Two Bed St, Mountain View", beds=2, baths=1)
+    obs(conn, r, "zillow", "u1", 2400, address="5 Unknown St, Mountain View", beds=1)  # baths unknown: still shown
+    obs(conn, r, "apartments", "u2", 2700, address="5 Unknown St, Mountain View", beds=1)
+    obs(conn, r, "zumper", "c1", 900, address="6 Cheap St, Mountain View", **one)  # too cheap, passes the price rule
+    obs(conn, r, "craigslist", "t1", 2000, address="7 Text St, Mountain View", furnished=False, **one,
+        extra={"extracted": {"conflicts": {"furnished": True}}})  # text says furnished, the goal wants furnished
+    identity.run(conn)
+    goal = Goal(label="1bd", rules=[{"type": "max", "field": "price_per_bed", "value": 2500, "strict": True},
+                                    {"type": "size_options", "options": [{"beds": 1, "min_baths": 1}]}])
+    furnished = Goal(label="furnished", rules=[{"type": "equals", "field": "furnished", "value": True}])
+    cfg = GoalsConfig(goals={"g": goal, "furn": furnished}, verify=VerifyConfig())
+    res = evaluate_all(conn, cfg)
+    rows = {(x["source"], x["source_id"]): x for x in goal_inputs(conn, cfg)["listings"]}
+
+    def verdicts(gid, g):
+        out = {}
+        for c in all_conflicts(conn):
+            for l in c["listings"]:
+                out[l["source_id"]] = goal_relevance(c, g.rules, res["listings"][gid], rows)
+        return out
+
+    v = verdicts("g", goal)
+    assert v["s1"] == "shown" and v["u1"] == "shown" and v["c1"] == "shown"
+    assert v["f1"] == "settled" and v["b1"] == "settled"
+    assert v["q1"] == "irrelevant" and v["t1"] == "irrelevant"
+    w = verdicts("furn", furnished)
+    assert w["t1"] == "shown"  # stored False fails, the text's True would pass
+    assert w["s1"] == "irrelevant"

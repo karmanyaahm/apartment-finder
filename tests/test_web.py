@@ -375,3 +375,33 @@ def test_compute_job_says_it_waits_for_the_database_lock(client):
     holder.execute("COMMIT")
     s = _wait_for_job(c)
     assert s["state"] == "done" and "note" not in s
+
+
+def test_verify_batch_filters_by_goal_and_zone_and_counts_cheap(client):
+    c, db = client
+    from aptfinder.store import append_observation, start_run
+
+    base = c.get("/api/verify/batch?kind=conflict").json()
+    assert base["hidden"] == {"irrelevant": 0, "settled": 0, "zone": 0} and base["all_total"] == base["total"]
+    n0 = c.get("/api/status").json()["queues"]["conflict"]
+    conn = connect(db)
+    r = start_run(conn, "intake", "zumper")
+    append_observation(conn, r, "zumper", "cheap1", {"address": "425 Oak Ave #A, Redwood City, CA 94061", "beds": 5,
+                                                      "baths": 3.5, "lat": 37.48, "lon": -122.23},
+                       price=1600, price_basis="month")
+    identity.run(conn)
+    c = TestClient(create_app(db))  # a fresh app: scraped rows refresh the cache only every SCRAPE_REFRESH_S
+    d = c.get("/api/verify/batch?kind=conflict").json()
+    assert d["cheap"] == 1 and d["total"] == base["total"] + 1
+    (e,) = [e for e in d["items"] if e["item"].get("cheap")]
+    assert e["fields"] == ["price", "beds"] and e["item"]["per_bed"] == 320
+    assert "$320 < $1,000" in e["item"]["reason"]
+    assert c.get("/api/status").json()["queues"]["conflict"] == n0 + 1
+    # the lease goal (3bd) cannot pass a 5bd whatever its price: hidden as settled
+    g = c.get("/api/verify/batch?kind=conflict&goal=lease").json()
+    assert g["all_total"] == d["total"] and g["total"] + sum(g["hidden"].values()) == g["all_total"]
+    assert not any(x["item"].get("cheap") for x in g["items"]) and g["hidden"]["settled"] >= 1
+    z = c.get("/api/verify/batch?kind=conflict&zone=walk").json()
+    assert z["total"] + z["hidden"]["zone"] == z["all_total"]
+    assert c.get("/api/verify/batch?kind=conflict&goal=nope").status_code == 400
+    assert c.get("/api/verify/batch?kind=conflict&zone=far").status_code == 400

@@ -568,14 +568,59 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         out["label"] = place_label(p) if p else None
         return out
 
+    def filtered_conflicts(goal: str, zone: str) -> tuple[list[dict[str, Any]], dict[str, int]]:
+        """The Verify conflicts that matter to one goal (verify.goal_relevance) and/or lie in a station walk zone,
+        plus how many each filter hid. goal '' and zone '' keep everything."""
+        items = cached("all_conflicts", lambda: verify.all_conflicts(conn))
+        hidden = {"irrelevant": 0, "settled": 0, "zone": 0}
+        if not goal and not zone:
+            return items, hidden
+
+        def compute() -> tuple[list[dict[str, Any]], dict[str, int]]:
+            keep = items
+            if goal:
+                g = effective().goals.get(goal)
+                if g is None:
+                    raise HTTPException(400, f"unknown goal {goal!r}")
+                lres = cached("evaluate_all", lambda: evaluate_all(conn))["listings"].get(goal, {})
+                rows = cached("goal_input_rows", lambda: {(r["source"], r["source_id"]): r for r in
+                                                          cached("goal_inputs", lambda: goal_inputs(conn))["listings"]})
+                out = []
+                for c in keep:
+                    v = verify.goal_relevance(c, g.rules, lres, rows)
+                    if v == "shown":
+                        out.append(c)
+                    else:
+                        hidden[v] += 1
+                keep = out
+            if zone == "walk":
+                places = all_places()
+                out = []
+                for c in keep:
+                    p = places.get(c["place_key"] or "")
+                    if p and in_walk_zone(p["lat"], p["lon"]):
+                        out.append(c)
+                    else:
+                        hidden["zone"] += 1
+                keep = out
+            return keep, hidden
+
+        return cached(f"conflicts|{goal}|{zone}", compute)
+
     @app.get("/api/verify/batch")
-    def verify_batch(kind: str = "conflict", skip: int = 0, n: int = 10) -> dict[str, Any]:
+    def verify_batch(kind: str = "conflict", skip: int = 0, n: int = 10, goal: str = "",
+                     zone: str = "") -> dict[str, Any]:
         """Up to n conflicts from `skip` (actionable first, those waiting for an own-site render last), each with
-        its observations, disagreeing fields and place label, plus the totals."""
+        its observations, disagreeing fields and place label, plus the totals. `goal`: only conflicts whose
+        resolution could change that goal's outcome (verify.goal_relevance); `zone=walk`: only places inside a
+        station walk zone. `all_total` counts every open conflict, `hidden` what each filter left out."""
         if kind != "conflict":
             raise HTTPException(400, "batch is for conflicts; use /api/verify/next for the rest")
+        if zone not in ("", "walk"):
+            raise HTTPException(400, "zone is '' or 'walk'")
         with lock:
-            items = cached("all_conflicts", lambda: verify.all_conflicts(conn))
+            all_items = cached("all_conflicts", lambda: verify.all_conflicts(conn))
+            items, hidden = filtered_conflicts(goal, zone)
             checked = verify.current_checks(conn)
         n = max(1, min(n, 50))
         pending = sum(c["pending_render"] for c in items)
@@ -584,7 +629,9 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             for o in e["observations"]:
                 o["checked"] = checked.get((o["source"], o["source_id"]), {})
         return {"kind": kind, "skip": skip, "n": n, "total": len(items), "actionable": len(items) - pending,
-                "pending": pending, "cheap": sum(bool(c.get("cheap")) for c in items), "items": page}
+                "pending": pending, "cheap": sum(bool(c.get("cheap")) for c in items), "items": page,
+                "goal": goal, "zone": zone, "all_total": len(all_items), "hidden": hidden,
+                "hidden_labels": {**verify.GOAL_HIDDEN, "zone": "outside the station walk zones"}}
 
     @app.get("/api/verify/own_sites")
     def verify_own_sites(skip: int = 0, n: int = 20) -> dict[str, Any]:

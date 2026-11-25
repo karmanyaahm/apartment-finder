@@ -538,3 +538,59 @@ def stored_value(row: sqlite3.Row, field: str) -> Any:
     if field == "price":
         return row["price"]
     return json.loads(row["data"]).get(field)
+
+
+PRICE_FIELDS = {"price", "price_month", "price_per_bed"}
+
+
+def rule_fields(rule: dict[str, Any]) -> set[str]:
+    """The listing fields a goal rule reads, named as conflicts name them (price_month for any price). Commute,
+    amenity and net-commute rules read none: no conflict field changes them."""
+    t = rule["type"]
+    if t in ("equals", "max", "min", "known"):
+        f = rule["field"]
+        return {f} | ({"price_month", "price"} if f in PRICE_FIELDS else set()) | ({"beds"} if f == "price_per_bed" else set())
+    if t == "size_options":
+        return {"beds", "baths"}
+    if t == "dates_cover":
+        return {"available_from", "available_to"}
+    return set()
+
+
+GOAL_HIDDEN = {"irrelevant": "no rule of this goal reads the conflicting fields",
+               "settled": "every reading fails a rule of this goal, so resolving it changes nothing"}
+
+
+def goal_relevance(item: dict[str, Any], rules: list[dict[str, Any]], lres: dict[tuple[str, str], Any],
+                   rows: dict[tuple[str, str], dict[str, Any]]) -> str:
+    """'shown', 'irrelevant' or 'settled' for one Verify conflict under one goal. A conflict matters when some hard
+    rule reads a conflicting field and no rule fails on every reading of it. The readings are each listing as stored
+    (its goal result, `lres`) and, for a text conflict, the same listing with the text's values (its touched rules
+    re-evaluated on `rows`, the goal_inputs row). So $2,400 vs $2,700 for 1 bed under a < $2,500/bed rule is shown,
+    $3,100 vs $3,300 is settled, and a 2-bed under a 3-bed goal is settled whatever its price. Unknown never hides:
+    needs_check is not a fail, and a conflict with no judged listing stays shown."""
+    from ..filter.rules import FAIL, Ctx, evaluate
+
+    fields = set(item["fields"])
+    touched = [i for i, r in enumerate(rules) if rule_fields(r) & fields]
+    if not touched:
+        return "irrelevant"
+    readings: list[list[str]] = []
+    for l in item["listings"]:
+        res = lres.get((l["source"], l["source_id"]))
+        if res is None:
+            continue
+        statuses = [s for s, _, _ in res["reasons"]]
+        readings.append(statuses)
+        row = rows.get((l["source"], l["source_id"]))
+        if item.get("text") and row is not None:
+            alt = {**row, **item["text"]}
+            alt_statuses = list(statuses)
+            for i in touched:
+                alt_statuses[i] = evaluate(rules[i], alt, Ctx())[0]
+            readings.append(alt_statuses)
+    if not readings:
+        return "shown"
+    if any(all(st[i] == FAIL for st in readings) for i in range(len(rules))):
+        return "settled"
+    return "shown"
