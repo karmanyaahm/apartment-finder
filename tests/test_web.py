@@ -135,6 +135,24 @@ def test_on_demand_estimate_routing(client, monkeypatch):
     assert r.status_code == 200 and r.json()["provider"] == "estimate"
 
 
+def test_route_shows_new_trips_at_once_and_never_falls_back_silently(tmp_path, monkeypatch):
+    # trips count as scraped rows, which the cache may reuse for SCRAPE_REFRESH_S: the user's own routing must
+    # still show in the drawer right away (it showed the old estimates for two minutes)
+    db = tmp_path / "seed.db"
+    seed_db(db, with_trips=False)
+    c = TestClient(create_app(db))
+    pk = c.get("/api/places").json()[0]["place_key"]
+    assert c.get(f"/api/places/{pk}").json()["matrix"] == {}  # warms the cache
+    monkeypatch.delenv("GOOGLE_MAPS_API_KEY", raising=False)
+    r = c.post(f"/api/trips/{pk}")
+    assert r.status_code == 400 and "GOOGLE_MAPS_API_KEY" in r.json()["detail"]
+    assert c.post(f"/api/trips/{pk}?provider=bogus").status_code == 400
+    r = c.post(f"/api/trips/{pk}?provider=estimate").json()
+    assert r["new_trips"] > 0 and r["provider"] == "estimate"
+    matrix = c.get(f"/api/places/{pk}").json()["matrix"]
+    assert matrix and all(v["provider"] == "estimate" for v in matrix.values())
+
+
 def test_static_and_sw(client):
     c, _ = client
     assert "Apartment Finder" in c.get("/").text

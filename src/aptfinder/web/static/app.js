@@ -894,6 +894,8 @@ async function openPlace(pk) {
     ${listingTable}
     <h3>Price history (per month)</h3>${historyChart([...d.listings].sort((a, b) => b.history.length - a.history.length).slice(0, 8))}
     <h3>Commute <button id="route-btn" class="small">${S.meta.google ? "Route with Google" : "Recompute (estimate)"}</button></h3>
+    <p id="route-status" class="small">${esc(S.routeMsg?.[pk] || "")}</p>
+    ${S.meta.google ? "" : '<p class="muted small">No GOOGLE_MAPS_API_KEY on the server: only straight-line estimates can be computed here.</p>'}
     ${S.meta.google ? `<p class="muted small">Routes every target by every mode (about 20 Google calls). Google is metered and capped per month (config/google.toml); when the cap is reached routing stops and the straight-line estimates stay.</p>` : ""}${matrixTable(d)}
     <h3>Nearby</h3>${nearestBlock(d)}
     <h3>Your notes & ratings</h3>${attributesBlock(d, pk)}
@@ -954,13 +956,27 @@ function wireDrawer(pk) {
     const r = await post("api/links", { source, source_id, place_key: null });
     toast("Split recorded"); await loadPlaces(); openPlace(r.place_key);
   }));
+  // the outcome stays on the drawer (S.routeMsg) across its re-render; the button always leaves "Routing…"
   $("#route-btn")?.addEventListener("click", async (e) => {
-    e.target.disabled = true; e.target.textContent = "Routing…";
+    const btn = e.target, label = btn.textContent;
+    const say = (msg) => { (S.routeMsg ||= {})[pk] = msg; const el = $("#route-status"); if (el && S.selected === pk) el.textContent = msg; };
+    btn.disabled = true; btn.textContent = "Routing…"; say("");
+    let r;
     try {
-      const r = await post(`api/trips/${encodeURIComponent(pk)}`);
-      toast(`${r.new_trips} new trips (${r.provider}, ${r.api_calls} API calls)`);
-      await refreshAfterWrite(pk);
-    } catch (err) { toast((/cap/i.test(err.message) ? "Google limit reached, estimates kept: " : "Routing failed: ") + err.message, 6000); e.target.disabled = false; e.target.textContent = "Retry routing"; }
+      r = await post(`api/trips/${encodeURIComponent(pk)}${S.meta.google ? "" : "?provider=estimate"}`);
+    } catch (err) {
+      say((/cap/i.test(err.message) ? "Google limit reached, estimates kept: " : "Routing failed: ") + err.message);
+      toast(S.routeMsg[pk], 6000);
+      btn.disabled = false; btn.textContent = "Retry routing";
+      return;
+    }
+    const src = r.provider === "google" ? "Google" : "estimate";
+    say(r.new_trips ? `Routed with ${src}: ${r.new_trips} new trips, ${r.api_calls} Google calls.`
+      : `Routed with ${src}: no changes (${r.api_calls} Google calls; cached routes already shown).`);
+    toast(S.routeMsg[pk]);
+    try { await refreshAfterWrite(pk); }
+    catch (err) { say(S.routeMsg[pk] + " Reloading the drawer failed: " + err.message); }
+    finally { const b = $("#route-btn"); if (b && b.textContent === "Routing…") { b.disabled = false; b.textContent = label; } }
   });
 }
 

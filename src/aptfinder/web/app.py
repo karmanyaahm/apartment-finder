@@ -855,7 +855,12 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         rows = q("SELECT place_key, lat, lon FROM places WHERE place_key = ?", (place_key,))
         if not rows:
             raise HTTPException(404, "no such place")
-        provider = provider or ("google" if settings.secret("GOOGLE_MAPS_API_KEY") else "estimate")
+        # never a silent fallback to estimates: without a key, Google routing is an error the button shows
+        provider = provider or "google"
+        if provider not in ("google", "estimate"):
+            raise HTTPException(400, "provider must be google or estimate")
+        if provider == "google" and not settings.secret("GOOGLE_MAPS_API_KEY"):
+            raise HTTPException(400, "GOOGLE_MAPS_API_KEY is not set on the server; nothing was routed")
         source = make_source(provider, max_calls=60)
         commute = build_commute(db_path, source)
         try:
@@ -865,6 +870,11 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             raise HTTPException(429, str(e))
         except RuntimeError as e:
             raise HTTPException(502, str(e))
+        finally:
+            # the user's own routing shows at once: trips count as scraped rows, which the cache may reuse for
+            # SCRAPE_REFRESH_S, so the drawer refreshed with the old estimates
+            with lock:
+                memo.clear()
         return {"new_trips": n, "provider": provider, "api_calls": getattr(source, "calls", 0)}
 
     # ------------------------------------------------------------------ compute one attribute (Pipeline panel)
