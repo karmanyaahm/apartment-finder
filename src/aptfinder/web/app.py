@@ -1052,7 +1052,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
     # routes; they are an annotations row like a goal edit (latest wins), shared by everyone.
     @app.get("/api/knn/cells")
     def knn_cells_get() -> dict[str, Any]:
-        from ..filter.knn import RADIUS_M, cells
+        from ..filter.knn import K, RADIUS_M, cells
 
         from ..trips import K_STATIONS, load_google_caps
 
@@ -1064,7 +1064,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                   "points": len(pts.get(k, []))} for k, v in sets.items() if k != "commute_targets"]
         caps = load_google_caps()
         return {"cells": [list(c) for c in cells(conn)], "rows": rows, "modes": KNN_MODES, "radius_m": RADIUS_M,
-                "k_stations": K_STATIONS, "matrix_cap": caps.get("matrix_monthly_element_cap", 0),
+                "knn_k": K, "typed_over": TYPED_CONFIRM_OVER, "k_stations": K_STATIONS, "matrix_cap": caps.get("matrix_monthly_element_cap", 0),
                 "matrix_free": caps.get("matrix_free_elements_per_month", 0)}
 
     @app.post("/api/knn/cells")

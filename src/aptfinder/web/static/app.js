@@ -1309,7 +1309,7 @@ async function openPipeline() {
     <p class="muted small">Computed now from the logs (${esc(d.now.slice(0, 16).replace("T", " "))} UTC). Website, own-site and Google counts are over places inside a station walk zone. Stale = older than ${d.stale_days} days.
       ${["done", "partial", "stale", "todo", "blocked"].map((s) => stChip(s)).join(" ")}</p>
     ${stuck}${statusBlock(S.status)}
-    <h3>Commute times: Google samples, KNN for the rest</h3>${computeBlock()}
+    <h3>Commute times: Google samples, KNN for the rest <button id="k-help" class="help-btn" title="How this works" aria-label="How this works">?</button></h3>${computeBlock()}
     <h3>Search areas</h3><div id="areas-map" class="areas-map"></div><div id="areas-legend" class="small"></div>
     <h3>Stages</h3>${stages}
     <h3>Intake coverage (aggregators)</h3>${matrix}
@@ -1373,6 +1373,54 @@ function rowNote(r) {
 const btbNote = (ks) => `per place: bike to the ${ks} nearest stations + bike the whole way for comparison = up to ${ks + 1} routes
   (the whole-way leg is the bike column's route); train time from the timetable plus wait; station→destination bike legs
   are shared by every place (routed once, then reused)`;
+// "How this works" for the commute grid: plain-language help, numbers from /api/knn/cells (config and constants)
+function knnHelpHtml(d = KNN_META) {
+  const num = (x) => Number(x).toLocaleString("en-US");
+  const R = d?.radius_m ?? 400, K = d?.knn_k ?? 3, ks = d?.k_stations ?? 2, over = d?.typed_over ?? 20;
+  const sets = (d?.rows || []).filter((r) => r.kind === "set").map((r) => `${esc(r.label)} ×${r.k > 0 ? r.k : r.points}${
+    r.paid ? "" : " (estimate only, never billed)"}`).join(", ");
+  return `<h3>How commute times work</h3>
+  <p><b>Ticking a cell</b> (destination × mode) turns on KNN times for it. Free: it only changes what is shown.
+    A place with its own Google route shows it (<b class="src-google">blue</b>). A place without one borrows the routes of up
+    to ${K} Google-routed places within ${R} m and shows their range (<b class="src-knn">violet</b>). With none that close it
+    keeps the straight-line estimate (<span class="src-estimate">grey ~</span>).</p>
+  <p><b>Sample</b> picks places to route with Google, for every ticked cell:</p>
+  <ul><li><b>cover</b>: the fewest places so that every place has a routed place within R m (places already routed count).
+      The best first step.</li>
+    <li><b>random X%</b>: X% of <i>all</i> places in the scope, one draw shared by every cell. A pick already routed for a
+      cell is dropped for that cell and costs nothing. Leaves gaps in sparse areas.</li>
+    <li><b>refine</b>, after a first sample: places whose time is too close to a goal's limit to call (a range straddling
+      it), plus the widest 10% of ranges.</li></ul>
+  <p><b>Of</b>: the current search results; every place in a walk zone; or search candidates (in a walk zone and can
+    still pass a goal), usually the right one.</p>
+  <p><b>Reading the dry run.</b> The first line's "N not yet routed, over all cells" adds up each cell's picks that
+    cell has no Google route for yet (a place counts once per cell). Per cell: <i>places</i> = picks minus those already
+    routed for that cell, shown × routes per place = the most it can cost; <i>elements</i> = Route Matrix elements still to pay for, one per
+    place × destination (a target ×1; ${sets || "point sets ×k nearest"}; bike+train ×up to ${ks + 1}: bike to the ${ks}
+    nearest stations + bike the whole way). Fewer elements than places × routes means some legs are cached or shared.
+    "With a routed place within ${R} m: before → after" is how many places in the scope get a KNN time.</p>
+  <p><b>Billing</b>: Google Route Matrix Essentials, ${num(d?.matrix_free ?? 10000)} elements free a month,
+    ${d?.matrix_cap ? `our cap ${num(d.matrix_cap)}` : "no cap set, so no matrix calls"}. A run of more than ${over} elements
+    asks you to type the element count and the elements left this month before Run unlocks, while fewer than 5,000 are left.</p>
+  <p><b>Tip</b>: bike+train already routes bike-the-whole-way, so also ticking plain bike for the same destination
+    shows that leg in both rows of the dry run, but it is routed and billed once (the total counts it once).</p>
+  <form method="dialog"><button class="accent">Close</button></form>`;
+}
+function openKnnHelp() {
+  let dlg = $("#k-help-dlg");
+  if (!dlg) {
+    dlg = document.createElement("dialog");
+    dlg.id = "k-help-dlg"; dlg.className = "help-dlg";
+    // a click on the backdrop (outside the dialog's box) closes it; Esc closes a modal dialog natively
+    dlg.addEventListener("click", (e) => {
+      const r = dlg.getBoundingClientRect();
+      if (e.target === dlg && (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom)) dlg.close();
+    });
+    document.body.appendChild(dlg);
+  }
+  dlg.innerHTML = knnHelpHtml();
+  dlg.showModal();
+}
 async function drawKnnGrid() {
   const box = $("#k-grid");
   const d = await api("api/knn/cells").catch((e) => { box.textContent = "Cells failed to load: " + e.message; return null; });
@@ -1414,6 +1462,7 @@ function wireCompute() {
     $("#c-hint").classList.toggle("hidden", !$("#c-run").disabled || $("#c-run").classList.contains("hidden"));
   };
   ["#c-n", "#c-left"].forEach((id) => $(id).addEventListener("input", lock));
+  $("#k-help").addEventListener("click", openKnnHelp);
   drawKnnGrid();
   loadComputeLog();
   ["#s-radius", "#s-pct", ...$$("input[name=s-method]"), ...$$("input[name=s-scope]")].forEach((el) =>
