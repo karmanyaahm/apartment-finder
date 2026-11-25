@@ -95,11 +95,38 @@ def zillow_amenities(p: dict[str, Any]) -> list[str]:
     return out + ([zov] if zov and zov not in out else [])
 
 
+def _zillow_fee_range(p: dict[str, Any]) -> tuple[Any, Any]:
+    # the search card carries them on `property` (buildings) or on `property.rental` (some single homes)
+    rental = p.get("rental") or {}
+    lo = p.get("totalRequiredMonthlyMinFee") or rental.get("totalRequiredMonthlyMinFee")
+    hi = p.get("totalRequiredMonthlyMaxFee") or rental.get("totalRequiredMonthlyMaxFee")
+    return lo, hi
+
+
 def zillow_fees(p: dict[str, Any]) -> str | None:
-    """The card's required monthly fees ('$100', '$50 to $75'), a line the text reading reads."""
+    """The card's required monthly fees ('$100', '$50 to $75'), a line the text reading reads. Only those on
+    `property.rental`: reading the ones on `property` too would change the text of 117 active rows (2026-11-25) and
+    drop their cached readings until a new text-reading pass."""
     rental = p.get("rental") or {}
     lo, hi = rental.get("totalRequiredMonthlyMinFee"), rental.get("totalRequiredMonthlyMaxFee")
     return (f"${lo}" if lo == hi or not hi else f"${lo} to ${hi}") if lo else None
+
+
+def zillow_included_fee(p: dict[str, Any]) -> float | None:
+    """The required monthly fee folded into the card's prices, when Zillow says its prices include it
+    (`rental.listPriceIncludesRequiredMonthlyFees`) and the fee is one amount: Landsby's 1 bd shows $4,221 =
+    base rent $4,175 + $46. Base rent is the price (decision log 2026-11-25), so this is taken off."""
+    if not (p.get("rental") or {}).get("listPriceIncludesRequiredMonthlyFees"):
+        return None
+    lo, hi = _zillow_fee_range(p)
+    return float(lo) if isinstance(lo, (int, float)) and lo > 0 and (hi in (None, lo)) else None
+
+
+def _less_fee(price: float | None, fee: float | None) -> tuple[float | None, dict[str, Any]]:
+    """(base rent, extras) of a fee-inclusive price: the total is kept beside it as `total_monthly`."""
+    if price is None or not fee:
+        return price, {}
+    return price - fee, {"total_monthly": price}
 
 
 def zillow_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] | None:
@@ -129,6 +156,7 @@ def zillow_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] | No
                          if u][:24]
                         or [((p.get("media") or {}).get("propertyPhotoLinks") or {}).get("highResolutionLink")])}
     url = item.get("listingUrl") or f"https://www.zillow.com/homedetails/{zpid}_zpid/"
+    fee = zillow_included_fee(p)
     groups = p.get("unitsGroup") or []
     if groups:
         # a building: one listing per bedroom count; the street line's unit is a placeholder, drop it
@@ -140,11 +168,13 @@ def zillow_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] | No
                 continue
             beds = g.get("bedrooms")
             label = "studio" if beds == 0 else f"{beds}bd"
+            gprice, tot = _less_fee(money(g.get("minPrice")), fee)
             out.append(Parsed(
-                source_id=f"{zpid}:{label}", url=url, price=money(g.get("minPrice")), price_basis="month",
+                source_id=f"{zpid}:{label}", url=url, price=gprice, price_basis="month",
                 data=ObservationData(address=addr, beds=beds, baths=None, floor_plan=label,
                                      extra={**extra, "building_min_price": p.get("minPrice"),
-                                            "building_max_price": p.get("maxPrice"), "from_units_group": True},
+                                            "building_max_price": p.get("maxPrice"), "from_units_group": True,
+                                            **tot},
                                      **base)))
         return out
     addr = f"{street}, {a.get('city')}, {a.get('state')} {a.get('zipcode')}"
@@ -156,9 +186,10 @@ def zillow_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] | No
     # a few single units carry Zillow's own floor plan drawing (richMedia[].rmxData[].floorPlan.heroImageUrl)
     drawing = next((r["floorPlan"]["heroImageUrl"] for m in p.get("richMedia") or [] for r in m.get("rmxData") or []
                     if (r.get("floorPlan") or {}).get("heroImageUrl")), None)
+    uprice, tot = _less_fee(money(price), fee)
     extra = {**extra, "baths_total": p.get("bathrooms"), "baths_full": full, "baths_half": half,
-             **({"floorplan_image": drawing} if drawing else {})}
-    return [Parsed(source_id=str(zpid), url=url, price=money(price), price_basis="month",
+             **({"floorplan_image": drawing} if drawing else {}), **tot}
+    return [Parsed(source_id=str(zpid), url=url, price=uprice, price_basis="month",
                    data=ObservationData(address=addr, beds=p.get("bedrooms"), baths=baths,
                                         sqft=p.get("livingArea"), extra=extra, **base))]
 
@@ -290,6 +321,17 @@ STAY_UNIT = re.compile(r"\b(?:FL\d+-)?ID\d+[A-Z]?\b")
 STAY_TEXT = "is the lowest available price, based on"
 
 
+def apartments_included_fee(item: dict[str, Any]) -> float | None:
+    """The building's required monthly fees that its 'Total Monthly Price' labels include, from `rentals`, which
+    give each plan's base `Rent` beside its `MinTotalMonthlyPrice` (Landsby: $4,175 and $4,221, fee $46).
+    Only when every rental agrees on one amount (all 37 such buildings in the raw files, 2026-11-25); 0 when the
+    label's total is the rent itself (707 Leahy)."""
+    fees = {r["MinTotalMonthlyPrice"] - r["Rent"] for r in item.get("rentals") or []
+            if isinstance(r.get("Rent"), (int, float)) and r["Rent"] > 0
+            and isinstance(r.get("MinTotalMonthlyPrice"), (int, float))}
+    return float(fees.pop()) if len(fees) == 1 and next(iter(fees)) >= 0 else None
+
+
 def apartments2_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] | None:
     pid = item.get("listingId")
     if not pid:
@@ -316,8 +358,14 @@ def apartments2_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed]
              "images": photos[:16]}
     url = item.get("url")
     out = []
+    fee = apartments_included_fee(item)
     for m in item.get("models") or []:
         beds, baths = _bed_bath(m.get("details"))
+        # a plan labelled 'Total Monthly Price' shows rent plus required monthly fees, on the label and its units
+        is_total = "total monthly price" in (m.get("rentLabel") or "").lower()
+        mfee = fee if is_total else None
+        # a total whose fee the rentals do not give is kept as it is, and said to be one (none in the raw files)
+        flag = {"price_includes_fees": True} if is_total and fee is None else {}
         plan = m.get("modelName")
         plan_key = re.sub(r"[^a-z0-9]+", "-", (plan or "plan").lower()).strip("-")[:40]
         sqft_plan = _first_num(next((d for d in m.get("details") or [] if "sq ft" in d.lower()), None))
@@ -326,18 +374,21 @@ def apartments2_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed]
         units = m.get("units") or []
         pextra = {**extra, "floorplan_image": m.get("imageLarge") or m.get("image")}
         for u in units:
+            uprice, tot = _less_fee(money(u.get("price")), mfee)
             out.append(Parsed(
-                source_id=f"{pid}:u:{u.get('type')}", url=url, price=money(u.get("price")), price_basis="month",
+                source_id=f"{pid}:u:{u.get('type')}", url=url, price=uprice, price_basis="month",
                 data=ObservationData(unit=u.get("type"), floor_plan=plan, beds=beds, baths=baths,
                                      sqft=_first_num(u.get("sqft")), available_from=_avail(u.get("availability")),
-                                     extra=pextra, **base)))
+                                     extra={**pextra, **tot, **flag}, **base)))
         if not units:
+            mprice, tot = _less_fee(money(m.get("rentLabel")), mfee)
             out.append(Parsed(
-                source_id=f"{pid}:m:{plan_key}", url=url, price=money(m.get("rentLabel")), price_basis="month",
+                source_id=f"{pid}:m:{plan_key}", url=url, price=mprice, price_basis="month",
                 data=ObservationData(floor_plan=plan, beds=beds, baths=baths,
                                      sqft=sqft_plan,
                                      available_from=_avail(m.get("availability")),
-                                     extra={**pextra, "availability": m.get("availability")}, **base)))
+                                     extra={**pextra, "availability": m.get("availability"), **tot, **flag},
+                                     **base)))
     if not item.get("models"):
         # a single unit, condo or house for rent: details live in `rentals`
         ptype = item.get("propertyType") or ""

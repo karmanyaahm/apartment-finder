@@ -155,6 +155,87 @@ def test_apartments_units_plans_and_single_rentals():
     assert s.data.property_name is None
 
 
+def _landsby_total_item():
+    # Landsby's memo23 item as stored (run 22, 2026-11-24): the plan labels show 'Total Monthly Price' (rent plus
+    # $46 of required monthly fees); `rentals` give each plan's base `Rent` beside its rounded-up total
+    return {"listingId": "8mzlqg0", "listingName": "Landsby", "listingAddress": "100 Aspen Way",
+            "listingCity": "Mountain View", "listingState": "CA", "listingZip": "94040", "location": {}, "url": "u",
+            "models": [{"modelName": "One Bedroom", "details": ["1 Bed", "1 Bath", "577 \u2013 729 Sq Ft"], "units": [],
+                        "rentLabel": "Starting at $4,221\n          \n     Total Monthly Price"},
+                       {"modelName": "Three Bedroom", "details": ["3 Beds", "2 Baths", "1,248 Sq Ft"], "units": [],
+                        "rentLabel": "Starting at $7,836\n     Total Monthly Price"}],
+            "rentals": [{"Name": "One Bedroom", "Rent": 4175, "MaxRent": 4985, "MinTotalMonthlyPrice": 4221,
+                         "MaxTotalMonthlyPrice": 5031, "MinTotalMonthlyPriceExact": 4220.06},
+                        {"Name": "Three Bedroom", "Rent": 7790, "MaxRent": 7790, "MinTotalMonthlyPrice": 7836,
+                         "MaxTotalMonthlyPrice": 7836, "MinTotalMonthlyPriceExact": 7835.06}]}
+
+
+def test_apartments_total_monthly_price_is_base_rent_plus_fees():
+    out = ADAPTERS["apartments_com"].parse(_landsby_total_item(), {})
+    one = next(p for p in out if p.data.beds == 1)
+    assert one.source_id == "8mzlqg0:m:one-bedroom-577" and one.data.sqft == 577
+    assert one.price == 4175 and one.data.extra["total_monthly"] == 4221
+    assert next(p for p in out if p.data.beds == 3).price == 7790
+
+
+def test_apartments_total_units_take_the_fee_off_plain_labels_untouched():
+    # The Clara's shape: a total-labelled plan with its units (each a total), fee $61; one plain plan beside it
+    item = {"listingId": "c1", "listingName": "The Clara", "listingAddress": "1 A St", "listingCity": "Mountain View",
+            "listingState": "CA", "listingZip": "94041", "location": {}, "url": "u",
+            "models": [{"modelName": "A1", "rentLabel": "Starting at $4,664 Total Monthly Price",
+                        "details": ["1 Bed", "1 Bath", "700 Sq Ft"],
+                        "units": [{"type": "101", "price": "$4,664", "sqft": "700", "availability": "Now"},
+                                  {"type": "102", "price": "$4,824", "sqft": "700", "availability": "Now"}]},
+                       {"modelName": "A1", "rentLabel": "$4,700 Total Monthly Price",
+                        "details": ["1 Bed", "1 Bath", "720 Sq Ft"], "units": []},
+                       {"modelName": "S1", "rentLabel": "Starting at $3,000", "details": ["Studio", "1 Bath"],
+                        "units": []}],
+            "rentals": [{"Name": "A1", "Rent": 4603, "MinTotalMonthlyPrice": 4664},
+                        {"Name": "A1", "Rent": 4639, "MinTotalMonthlyPrice": 4700},
+                        {"Name": "S1", "Rent": 2939, "MinTotalMonthlyPrice": 3000}]}
+    by = {p.source_id: p for p in ADAPTERS["apartments_com"].parse(item, {})}
+    assert (by["c1:u:101"].price, by["c1:u:102"].price) == (4603, 4763)
+    assert by["c1:u:102"].data.extra["total_monthly"] == 4824
+    assert by["c1:m:a1-720"].price == 4639  # two same-named plans: one fee for the building
+    plain = by["c1:m:s1"]
+    assert plain.price == 3000 and "total_monthly" not in plain.data.extra  # no 'Total' label: as shown
+    # rentals that disagree on the fee: the total is kept as it is and said to be one
+    item["rentals"][1]["MinTotalMonthlyPrice"] = 4710
+    by = {p.source_id: p for p in ADAPTERS["apartments_com"].parse(item, {})}
+    assert by["c1:u:101"].price == 4664 and by["c1:u:101"].data.extra["price_includes_fees"] is True
+    assert "price_includes_fees" not in by["c1:m:s1"].data.extra
+    # 707 Leahy: 'Total Monthly Price' that is the rent itself (fee 0): as shown, no flag
+    for r in item["rentals"]:
+        r["MinTotalMonthlyPrice"] = r["Rent"]
+    by = {p.source_id: p for p in ADAPTERS["apartments_com"].parse(item, {})}
+    assert by["c1:u:101"].price == 4664 and "price_includes_fees" not in by["c1:u:101"].data.extra
+
+
+def test_zillow_prices_that_include_required_fees_are_base_rent():
+    # Landsby's Zillow card (run 4): unit-group prices include the $46 fee, which sits on `property`
+    item = {"rawData": {"property": {"zpid": 466658314, "title": "Landsby", "groupType": "apartmentComplex",
+            "address": {"streetAddress": "100 Aspen Way", "city": "Mountain View", "state": "CA", "zipcode": "94040"},
+            "rental": {"listPriceIncludesRequiredMonthlyFees": True}, "minPrice": 3991, "maxPrice": 7836,
+            "unitsGroup": [{"bedrooms": 1, "minPrice": 4221}, {"bedrooms": 3, "minPrice": 7836}],
+            "totalRequiredMonthlyMinFee": 46, "totalRequiredMonthlyMaxFee": 46,
+            "minBaseRent": 3945, "maxBaseRent": 7790}}}
+    one, three = ADAPTERS["zillow"].parse(item, {})
+    assert (one.price, three.price) == (4175, 7790)
+    assert one.data.extra["total_monthly"] == 4221
+    item["rawData"]["property"]["rental"]["listPriceIncludesRequiredMonthlyFees"] = False  # fees on top: as shown
+    one, _ = ADAPTERS["zillow"].parse(item, {})
+    assert one.price == 4221 and "total_monthly" not in one.data.extra
+    # a single home: the same rule on its price; a fee range is never taken off
+    home = {"rawData": {"property": {"zpid": 7, "price": 4995, "bedrooms": 2, "bathrooms": 1,
+            "address": {"streetAddress": "1 A St", "city": "Menlo Park", "state": "CA", "zipcode": "94025"},
+            "rental": {"listPriceIncludesRequiredMonthlyFees": True, "totalRequiredMonthlyMinFee": 200,
+                       "totalRequiredMonthlyMaxFee": 200}}}}
+    (h,) = ADAPTERS["zillow"].parse(home, {})
+    assert h.price == 4795 and h.data.extra["total_monthly"] == 4995
+    home["rawData"]["property"]["rental"]["totalRequiredMonthlyMaxFee"] = 300
+    assert ADAPTERS["zillow"].parse(home, {})[0].price == 4995
+
+
 def test_apartments_building_website_company_and_phone():
     item = {"listingId": "x1", "listingName": "Sevens", "listingAddress": "1 A St", "listingCity": "Mountain View",
             "listingState": "CA", "listingZip": "94041", "location": {}, "url": "u",
