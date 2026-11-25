@@ -332,3 +332,20 @@ def test_duplicates_batch_answers_pairs_in_order(client):
     assert con.execute("SELECT comment FROM annotations WHERE entity_type = 'place_pair' AND entity_key = ? "
                        "AND attribute = 'same_building'", (pair,)).fetchall() == [("no",)]
     assert pair not in {e["pair_key"] for e in c.get("/api/verify/duplicates?n=500").json()["items"]}
+
+
+def test_an_amenity_rating_is_the_buildings_for_every_goal_and_a_later_comment_keeps_it(client):
+    """A rating is a fact about the building: every goal's amenity rule reads the latest rating, whatever goal (if
+    any) an old row carries, and a comment typed after it does not hide it."""
+    c, db = client
+    pk = c.get("/api/places").json()[0]["place_key"]
+    gym = {"label": "gym", "rules": [{"type": "amenity", "name": "gym"}], "nice": []}
+    conn = connect(db)
+    append_annotation(conn, "user", "place", pk, "gym", goal_id="temp", rating=2)  # an old row labelled by goal
+    assert c.post("/api/goals/preview", json=gym).json()["places"][pk]["status"] == "fail"
+    assert c.post("/api/annotations", json={"entity_key": pk, "attribute": "gym", "rating": 5}).status_code == 200
+    assert c.post("/api/annotations", json={"entity_key": pk, "attribute": "gym", "comment": "new gym"}).status_code == 200
+    res = c.post("/api/goals/preview", json=gym).json()["places"][pk]
+    assert res["status"] == "pass"
+    assert c.get("/api/places").json()[0]["place_key"] == pk  # the card and drawer read the same rows
+    assert [a["goal_id"] for a in c.get(f"/api/places/{pk}").json()["annotations"]] == ["temp", None, None]

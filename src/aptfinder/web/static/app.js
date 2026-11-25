@@ -998,17 +998,18 @@ async function openPlace(pk) {
 }
 
 function wireDrawer(pk) {
+  // ratings and comments are about the building, shared by every goal: no goal_id (old rows may carry one)
   $$("#drawer .attr").forEach((box) => {
     const attr = box.dataset.attr;
     $$(".rate button", box).forEach((b) => b.addEventListener("click", async () => {
-      await post("api/annotations", { entity_key: pk, attribute: attr, rating: +b.dataset.rate, goal_id: S.goal === "all" ? null : S.goal });
+      await post("api/annotations", { entity_key: pk, attribute: attr, rating: +b.dataset.rate });
       await refreshAfterWrite(pk); toast(`Rated ${attr} ${b.dataset.rate}/5`);
     }));
     $("form", box).addEventListener("submit", async (e) => {
       e.preventDefault();
       const c = e.target.c.value.trim();
       if (!c) return;
-      await post("api/annotations", { entity_key: pk, attribute: attr, comment: c, goal_id: S.goal === "all" ? null : S.goal });
+      await post("api/annotations", { entity_key: pk, attribute: attr, comment: c });
       await refreshAfterWrite(pk); toast("Comment saved");
     });
   });

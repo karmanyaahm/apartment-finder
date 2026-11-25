@@ -63,10 +63,15 @@ def nearest_by_set(trips: dict[tuple[str, str], dict[str, Any]]) -> dict[tuple[s
 
 
 def place_annotations(conn: sqlite3.Connection) -> dict[str, dict[str, dict[str, Any]]]:
-    """place_key -> attribute -> latest annotation (any author)."""
+    """place_key -> attribute -> latest annotation (any author, any goal: a rating is a fact about the building,
+    shared by every goal; old rows may still carry a goal_id, which nothing reads). Its `rating` is the latest
+    rating of that attribute, so a comment typed after a rating does not hide it."""
     out: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
     for r in conn.execute("SELECT * FROM annotations WHERE entity_type = 'place' ORDER BY id"):
-        out[r["entity_key"]][r["attribute"].lower()] = dict(r)
+        a, prev = dict(r), out[r["entity_key"]].get(r["attribute"].lower())
+        if a["rating"] is None and prev:
+            a["rating"] = prev["rating"]
+        out[r["entity_key"]][r["attribute"].lower()] = a
     return out
 
 

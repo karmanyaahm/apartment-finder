@@ -376,7 +376,10 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         sql = "SELECT * FROM annotations WHERE entity_type = ?" + (" AND entity_key = ?" if key else "")
         out: dict[str, dict[str, dict[str, Any]]] = {}
         for r in q(sql + " ORDER BY id", (entity_type, key) if key else (entity_type,)):
-            out.setdefault(r["entity_key"], {})[r["attribute"]] = r
+            prev = out.setdefault(r["entity_key"], {}).get(r["attribute"])
+            if r["rating"] is None and prev:  # the latest rating survives a later comment (filter.place_annotations)
+                r["rating"] = prev["rating"]
+            out[r["entity_key"]][r["attribute"]] = r
         return out
 
     def effective() -> Any:
