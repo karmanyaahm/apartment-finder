@@ -28,7 +28,7 @@ from urllib.parse import urlsplit, urlunsplit
 from .. import settings
 from ..areas import in_walk_zone
 from ..config import (CHECK_LABEL, CHECK_RETRY, PRECHECK_RECHECK_DAYS, PRECHECK_SKIP, check_outcome, last_checks,
-                      latest_found, load_areas, load_sites)
+                      latest_found, load_areas, load_sites, site_key)
 from ..store import finish_run, start_run
 
 FILE = "discovered_sites.toml"
@@ -171,7 +171,7 @@ def candidates(conn, model: str = "sonnet") -> list[dict[str, Any]]:
     seen = {r.get("place_key") for r in rec.get("miss", []) if searched_well(r)}
     seen |= {r.get("place_key") for r in rec.get("found", [])
              if str(r.get("found_by", "")).startswith("claude") and searched_well(r)}
-    have = {s.get("place_key") for s in load_sites().values()}  # passed or not yet checked
+    have = {s.get("place_key") for s in load_sites(duplicates=True).values()}  # passed or not yet checked
     have |= scraped_places(conn)
     out = []
     for r in conn.execute("SELECT place_key, property_name, address, lat, lon, n_listings FROM places "
@@ -227,7 +227,11 @@ def discover(conn, *, limit: int, batch: int, model: str, max_usd: float,
     if dry_run or not cands:
         return {"buildings": [f'{c["name"]} | {c["address"]}' for c in cands], "estimated_usd": est}
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    taken = set(load_sites()) | {r["id"] for r in _records().get("found", [])}
+    every = load_sites(duplicates=True)
+    taken = set(every) | {r["id"] for r in _records().get("found", [])}
+    # a URL already in the list (or found before) is the same site (config.duplicate_sites): never a second entry
+    urls = {site_key(r["url"]): r["id"] for r in _records().get("found", [])} | {
+        site_key(s["url"]): sid for sid, s in every.items()}
     spent, found, missed = 0.0, [], []
     for i in range(0, len(cands), batch):
         if spent >= max_usd:
@@ -247,9 +251,12 @@ def discover(conn, *, limit: int, batch: int, model: str, max_usd: float,
             url, why = clean_url(a.get("url"))
             base = {"place_key": c["key"], "name": c["name"], "address": c["address"],
                     "found_at": now, "run_id": run, "model": model, "note": (a.get("note") or "")[:300]}
+            if url and site_key(url) in urls:
+                url, why = None, f"same site as {urls[site_key(url)]} ({url})"
             if url:
                 sid = _slug(c["name"], taken)
                 taken.add(sid)
+                urls[site_key(url)] = sid
                 f_rows.append({"id": sid, **base, "platform": platform_of(url), "url": url,
                                "found_by": f"claude -p WebSearch ({model})"})
             else:
@@ -272,6 +279,7 @@ def retryable(recheck: bool = False) -> list[str]:
     PRECHECK_RECHECK_DAYS ago (`--retry-failed` never takes them)."""
     rec = _records()
     last = last_checks(rec)
+    dup = {sid for sid, s in load_sites(duplicates=True).items() if s.get("duplicate_of")}  # never fetched
 
     def due(c: dict[str, Any]) -> bool:
         oc = check_outcome(c)
@@ -279,7 +287,7 @@ def retryable(recheck: bool = False) -> list[str]:
             return recheck and _age_days(c.get("at")) > PRECHECK_RECHECK_DAYS
         return oc in CHECK_RETRY
 
-    return [f["id"] for f in rec.get("found", []) if not is_aggregator(f["url"])
+    return [f["id"] for f in rec.get("found", []) if not is_aggregator(f["url"]) and f["id"] not in dup
             and f["id"] in last and due(last[f["id"]])]
 
 
@@ -307,7 +315,8 @@ def promote(conn, *, limit: int, dry_run: bool = False, fetch: bool = True,
         return {"retry": retry, "fetch": fetch_and_check(conn, retry, browser=browser, residential=residential)}
     rec = _records()
     proposed = {r.get("place_key") for r in rec.get("found", []) if not is_aggregator(r["url"])}
-    have = {s.get("place_key") for s in load_sites().values()} | proposed | scraped_places(conn)
+    every = load_sites(duplicates=True)
+    have = {s.get("place_key") for s in every.values()} | proposed | scraped_places(conn)
     by_place: dict[str, Counter] = {}
     info: dict[str, Any] = {}
     for r in conn.execute(
@@ -321,10 +330,9 @@ def promote(conn, *, limit: int, dry_run: bool = False, fetch: bool = True,
         info[r["place_key"]] = r
     # every website you added in Verify (annotation `website` on the place) is a site of its own, even when the
     # place already has one: a place can have several sources; only a URL already found or listed is skipped
-    def norm(u: str) -> str:
-        return (clean_url(u, keep_query=True)[0] or u).rstrip("/").lower()
-
-    known = {norm(f["url"]) for f in rec.get("found", [])} | {norm(s["url"]) for s in load_sites().values()}
+    # a URL already found or listed is the same site (config.site_key): never proposed again
+    norm = site_key
+    known = {norm(f["url"]) for f in rec.get("found", [])} | {norm(s["url"]) for s in every.values()}
     yours = []
     for r in conn.execute(
             "SELECT a.entity_key AS place_key, a.comment AS website, p.property_name, p.address, p.lat, p.lon "
@@ -338,9 +346,15 @@ def promote(conn, *, limit: int, dry_run: bool = False, fetch: bool = True,
         by_place.pop(r["place_key"], None)  # your URL outranks a listing's link for the same place
         yours.append((r["place_key"], url, r))
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    taken = set(load_sites()) | {r["id"] for r in rec.get("found", [])}
+    taken = set(every) | {r["id"] for r in rec.get("found", [])}
     rows = []
     picks = [(pk, *c.most_common(1)[0], info[pk]) for pk, c in by_place.items()]
+    kept = []
+    for p in picks:  # a listing's website that is already a site (or another place's pick this pass) is skipped
+        if norm(p[1][0]) not in known:
+            known.add(norm(p[1][0]))
+            kept.append(p)
+    picks = kept
     for pk, (url, source), n, r in ([(pk, (url, "you"), 1, r) for pk, url, r in yours] + picks)[:limit]:
         name = html.unescape(r["property_name"] or r["address"]).strip()
         sid = _slug(name, taken)

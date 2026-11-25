@@ -160,13 +160,56 @@ def latest_found(raw: dict[str, Any]) -> list[dict[str, Any]]:
     return list({f["id"]: f for f in raw.get("found", [])}.values())
 
 
-def load_sites(config_dir: Path | None = None) -> dict[str, dict[str, Any]]:
+def prometheus_ids() -> dict[str, str]:
+    """site id -> Prometheus community id, the cache `aptf-intake prometheus` keeps (data/prometheus_ids.json)."""
+    import json
+
+    try:
+        return json.loads((settings.DATA_DIR / "prometheus_ids.json").read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def site_key(url: str) -> str:
+    """'host/path' of a site URL, the same-site rule's key: `discover.clean_url` (no query, fragment or form
+    path), host lowercased without www., path without its trailing slash, lowercased."""
+    from urllib.parse import urlsplit
+
+    from .intake.discover import clean_url
+
+    p = urlsplit((clean_url(url)[0] or url).strip())
+    return p.netloc.lower().split(":")[0].removeprefix("www.") + p.path.rstrip("/").lower()
+
+
+def duplicate_sites(sites: dict[str, dict[str, Any]], ids: dict[str, str] | None = None) -> dict[str, str]:
+    """{entry id: canonical id} for the entries of the site list that are the same site as an earlier one: the
+    same `site_key`, or for Prometheus the same community id (`ids`). The canonical entry is the first in load
+    order: hand-listed (direct_sites.toml) before discovered, each file in its own order."""
+    owner: dict[tuple[str, str], str] = {}
+    out: dict[str, str] = {}
+    for sid, s in sites.items():
+        keys = [("url", site_key(s["url"]))]
+        if ids and s.get("platform") == "prometheus" and ids.get(sid):
+            keys.append(("prometheus", str(ids[sid])))
+        canon = next((owner[k] for k in keys if k in owner), None)
+        if canon:
+            out[sid] = canon
+        for k in keys:
+            owner.setdefault(k, canon or sid)
+    return out
+
+
+def load_sites(config_dir: Path | None = None, *, duplicates: bool = False) -> dict[str, dict[str, Any]]:
     """Community websites: hand-listed ones (config/direct_sites.toml) plus ones found by `aptf-intake
     discover-sites` (config/discovered_sites.toml, machine-appended). A discovered site is left out once a
     `[[check]]` rejected it (its latest check: the page was fetched and lacks the address, or is a contact/tour
     form; a page not fetched is retried), when it is or landed on a contact/tour form or an aggregator host
     (`discover.AGGREGATOR_HOSTS`, also for hand entries), or when a hand entry has
-    the same id or URL, or the same place (unless you added it in Verify); it carries `verify_address`."""
+    the same id or place (unless you added it in Verify); it carries `verify_address`.
+
+    An entry that is the same site as an earlier one (`duplicate_sites`: same URL, or same Prometheus community)
+    is left out; `duplicates=True` keeps it, marked `duplicate_of` the canonical entry's id, for the readers that
+    retire its rows (`intake.render.mark_duplicates`) and the pipeline's own-site list."""
     from .intake.discover import is_aggregator, is_form
 
     d = config_dir or settings.CONFIG_DIR
@@ -179,12 +222,11 @@ def load_sites(config_dir: Path | None = None) -> dict[str, dict[str, Any]]:
         # out, empty) is retried. The last check of a site wins.
         failed = {i for i, c in last_checks(raw).items() if check_outcome(c) == "rejected"}
         moved = {c["id"]: c for c in raw.get("check", []) if c.get("ok") and c.get("final_url")}
-        urls = {s["url"].rstrip("/") for s in out.values()}
         places = {s.get("place_key") for s in out.values()} - {None}
         for s in latest_found(raw):
             # a URL you added in Verify is kept beside the place's other sites (a place can have several)
             same_place = s.get("place_key") in places and not str(s.get("found_by", "")).startswith("you")
-            if s["id"] in failed or s["id"] in out or s["url"].rstrip("/") in urls or same_place:
+            if s["id"] in failed or s["id"] in out or same_place:
                 continue
             m = moved.get(s["id"])  # a redirect link that landed on the building's page: use where it landed
             landed = m["final_url"] if m else s["url"]
@@ -193,7 +235,10 @@ def load_sites(config_dir: Path | None = None) -> dict[str, dict[str, Any]]:
             s = {**s, "url": m["final_url"], "platform": m.get("platform") or s.get("platform"),
                  "link": s["url"]} if m else s
             out[s["id"]] = {**s, "verify_address": True}
-    return out
+    dups = duplicate_sites(out, prometheus_ids())
+    if not duplicates:
+        return {sid: s for sid, s in out.items() if sid not in dups}
+    return {sid: {**s, "duplicate_of": dups[sid]} if sid in dups else s for sid, s in out.items()}
 
 
 def load_areas(config_dir: Path | None = None) -> list[Area]:

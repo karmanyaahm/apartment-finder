@@ -107,7 +107,7 @@ def website_status(conn: sqlite3.Connection, place_key: str | None = None) -> di
         if is_aggregator(url):
             continue
         out[pk] = {"state": "known", "url": url, "detail": "named by a listing; promote-sites fetches it"}
-    for s in load_sites().values():
+    for s in load_sites(duplicates=True).values():
         if s.get("place_key") and mine(s["place_key"]):
             out[s["place_key"]] = {"state": "listed", "url": s["url"], "detail": "in the site list, not scraped yet"}
     for r in conn.execute(
@@ -323,43 +323,52 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
     renders = render_outcomes(conn)
     checks = site_checks()
     site_rows = []
-    for sid, s in sites.items():
+    # every entry of the list, duplicates included: a duplicate (same URL or Prometheus community as an earlier
+    # entry, config.duplicate_sites) is listed as 'duplicate of <id>' and left out of the counts and commands
+    for sid, s in load_sites(duplicates=True).items():
         last = (seen.get(sid) or {}).get("last")
         st = stats.get(sid) or {}
         rd = renders.get(sid)
         if s.get("platform") in RENDER_SKIP:
             rd = {"outcome": "skipped", "label": "not needed (page data gives every unit)"}
+        if s.get("duplicate_of"):
+            rd = {"outcome": "duplicate", "label": f"duplicate of {s['duplicate_of']}"}
         site_rows.append({"id": sid, "name": s.get("name") or sid, "url": s["url"], "platform": s.get("platform"),
                           "last": last, "state": _fresh(last, now),
                           "rows": st.get("rows") or 0, "priced": st.get("priced") or 0,
                           "info_only": bool(st.get("rows")) and st.get("info") == st.get("rows"),
-                          "discovered": bool(s.get("verify_address")),
+                          "discovered": bool(s.get("verify_address")), "duplicate_of": s.get("duplicate_of"),
                           "render": rd, "check": checks.get(sid),
                           "command": f"{INTAKE} run direct --area {sid}" + (" --reload" if last else "")})
     order = {"todo": 0, "stale": 1, "done": 2}
-    site_rows.sort(key=lambda r: (order[r["state"]], r["last"] or "", r["name"].lower()))
-    sc = Counter(r["state"] for r in site_rows)
+    site_rows.sort(key=lambda r: (bool(r["duplicate_of"]), order[r["state"]], r["last"] or "", r["name"].lower()))
+    dup_rows = [r for r in site_rows if r["duplicate_of"]]
+    live = [r for r in site_rows if not r["duplicate_of"]]
+    sc = Counter(r["state"] for r in live)
     cmds = []
     if sc["todo"]:
         cmds.append(f"{INTAKE} run direct")
     if sc["stale"]:
         cmds.append(f"{INTAKE} run direct --reload")
     # Prometheus sites are read from their availability JSON (`aptf-intake prometheus`), never rendered
-    rend = [r for r in site_rows if r["platform"] != "prometheus"]
+    rend = [r for r in live if r["platform"] != "prometheus"]
     if any((r["render"] or {}).get("retry") for r in rend):
         cmds.append(f"{INTAKE} render --retry-failed")
     if any(not r["render"] or r["render"].get("stale") for r in rend):
         cmds.append(f"{INTAKE} render")
-    if any(not r["render"] or r["render"].get("retry") or r["render"].get("stale") for r in site_rows
+    if any(not r["render"] or r["render"].get("retry") or r["render"].get("stale") for r in live
            if r["platform"] == "prometheus"):
         cmds.append(f"{INTAKE} prometheus")
-    rc = Counter((r["render"] or {"outcome": "never"})["outcome"] for r in site_rows)
-    stage("sites", "Own-site scrapes", _roll([r["state"] for r in site_rows]),
+    rc = Counter((r["render"] or {"outcome": "never"})["outcome"] for r in live)
+    stage("sites", "Own-site scrapes", _roll([r["state"] for r in live]),
           f"{sc['done']} fresh, {sc['stale']} stale, {sc['todo']} never scraped "
-          f"of {len(site_rows)} sites; rendered: "
+          f"of {len(live)} sites; rendered: "
           + (", ".join(f"{n} {k}" for k, n in rc.most_common()) or "none")
-          + f"; precheck stopped {rc['dead']} (site dead (DNS))", cmds,
-          counts=dict(sc), render_counts=dict(rc), **_run_info(runs, "intake", "direct"))
+          + f"; precheck stopped {rc['dead']} (site dead (DNS))"
+          + (f"; {len(dup_rows)} duplicate entries collapsed ("
+             + ", ".join(f"{r['id']} = {r['duplicate_of']}" for r in dup_rows) + ")" if dup_rows else ""), cmds,
+          counts=dict(sc), render_counts=dict(rc), duplicates={r["id"]: r["duplicate_of"] for r in dup_rows},
+          **_run_info(runs, "intake", "direct"))
 
     # 7-9. commute: trips under the current point ids only (renamed points leave old rows behind)
     points = _current_points()
@@ -484,7 +493,7 @@ def place_status(conn: sqlite3.Connection, place_key: str, now: datetime | None 
         if pt in points:
             trips[prov] += 1
     # the building's own site(s): the latest render and address check of each, failure or not
-    sids = {sid for sid, s in load_sites().items() if s.get("place_key") == base}
+    sids = {sid for sid, s in load_sites(duplicates=True).items() if s.get("place_key") == base}
     sids |= {r[0] for r in conn.execute(
         "SELECT DISTINCT substr(source_id, 1, instr(source_id, ':') - 1) FROM listings WHERE source = 'direct' "
         "AND place_key = ?", (base,))}

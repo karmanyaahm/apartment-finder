@@ -14,6 +14,9 @@ is logged like a render (`params.render`, an outcome per `<site>#render` area), 
 older render rows (plans no longer offered) exactly as a render does, and a refused request retires nothing.
 Requests are sequential with a short delay and a normal browser UA; a refused request (HTTP 403/429, or a JSON
 error such as Cloudflare's 'challenge') is recorded as `blocked` and that site is left for next time.
+
+An entry that is the same site as an earlier one (same URL, or the same community id: `config.duplicate_sites`) is
+never requested; `render.mark_duplicates` records it as `duplicate` of the canonical entry, which retires its rows.
 """
 
 from __future__ import annotations
@@ -26,13 +29,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .. import identity, settings
-from ..config import load_sites
+from ..config import load_sites, prometheus_ids
 from ..plans import match_drawing
 from ..store import append_observation, finish_run, start_run
 from ..store.models import ObservationData
 from .direct import _script, _site_for
 from .lease import _avail
-from .render import _site_address, _slug, describe
+from .render import _site_address, _slug, describe, mark_duplicates
 
 API = "https://shopping.prometheusapartments-prod-west2.com/{id}/available-units?date={date}"
 ORIGIN = "https://prometheusapartments.com"
@@ -53,7 +56,8 @@ def _httpx_get(url: str, headers: dict[str, str]) -> tuple[int, str]:
 
 
 def prometheus_sites() -> dict[str, dict[str, Any]]:
-    return {sid: s for sid, s in load_sites().items() if s.get("platform") == "prometheus"}
+    """Every Prometheus entry of the site list, duplicates included (marked `duplicate_of`)."""
+    return {sid: s for sid, s in load_sites(duplicates=True).items() if s.get("platform") == "prometheus"}
 
 
 def _ids_file() -> Path:
@@ -61,10 +65,7 @@ def _ids_file() -> Path:
 
 
 def _load_ids() -> dict[str, str]:
-    try:
-        return json.loads(_ids_file().read_text())
-    except (OSError, ValueError):
-        return {}
+    return prometheus_ids()
 
 
 def _save_id(sid: str, cid: str) -> None:
@@ -190,6 +191,8 @@ def _summary(rows: list[tuple[str, ObservationData, float | None]]) -> dict[str,
 
 def read(conn, *, sites: list[str] | None = None, dry_run: bool = False, get: Get | None = None,
          delay: float = DELAY_S, today: date | None = None) -> dict[str, Any]:
+    """Resolve the community id of each site picked, retire the duplicates (`render.mark_duplicates`: same URL or
+    same community id as an earlier entry, decided by `config.duplicate_sites`), then one request per site left."""
     get = get or _httpx_get
     all_p = prometheus_sites()
     unknown = sorted(set(sites or []) - set(all_p))
@@ -199,8 +202,37 @@ def read(conn, *, sites: list[str] | None = None, dry_run: bool = False, get: Ge
     if dry_run or not pick:
         ids = _load_ids()
         return {"sites": [(sid, s["url"], ids.get(sid) or id_from_raw(conn, sid) or "id from the page")
-                          for sid, s in pick.items()], "requests": len(pick)}
+                          for sid, s in pick.items() if not s.get("duplicate_of")],
+                "duplicates": {sid: f"duplicate of {s['duplicate_of']}" for sid, s in pick.items()
+                               if s.get("duplicate_of")},
+                "requests": sum(not s.get("duplicate_of") for s in pick.values())}
     day = (today or date.today()).isoformat()
+    n_obs = n_req = 0
+    # 1. the community id of every entry picked that is not already a duplicate by URL (cached ids cost nothing)
+    cids: dict[str, str] = {}
+    fails: dict[str, dict[str, Any]] = {}
+    for sid, s in pick.items():
+        if s.get("duplicate_of"):
+            continue
+        try:
+            cid, src, fail = community_id(conn, sid, s, get)
+            if src == "page":
+                n_req += 1
+                time.sleep(delay)
+        except Exception as e:  # network failure: this site only
+            cid, src, fail = None, "page", {"outcome": "timeout" if "timeout" in type(e).__name__.lower() else "error",
+                                            "http_status": None, "error": f"{type(e).__name__}: {str(e)[:200]}"}
+        if cid:
+            cids[sid] = cid
+        else:
+            fails[sid] = fail
+    # 2. duplicates (with the ids just learned) are retired in a run of their own and never requested
+    marked = mark_duplicates(conn)
+    dups = {sid: s["duplicate_of"] for sid, s in prometheus_sites().items() if s.get("duplicate_of")}
+    pick = {sid: s for sid, s in pick.items() if sid not in dups}
+    report: dict[str, Any] = {sid: f"duplicate of {c}" for sid, c in dups.items() if not sites or sid in sites}
+    if not pick:
+        return {"requests": n_req, "observations": 0, "sites": report, "marked_duplicate": marked}
     run = start_run(conn, "intake", "direct", {"areas": [f"{sid}#render" for sid in pick], "render": True,
                                                "reader": READER, "scope": "partial", "endpoint": API,
                                                "date": day})
@@ -209,39 +241,26 @@ def read(conn, *, sites: list[str] | None = None, dry_run: bool = False, get: Ge
     raw_path = raw_dir / f"run{run}_prometheus_json.json"
     raw: dict[str, Any] = {"reader": READER, "endpoint": API, "date": day, "sites": {}}
     per_area: dict[str, Any] = {}
-    report: dict[str, Any] = {}
-    n_obs = n_req = 0
-    answers: dict[str, Any] = {}  # community id -> (units, failure) of this run
     try:
         for sid, s in pick.items():
-            if n_req:
-                time.sleep(delay)
             rec: dict[str, Any] = {"url": s["url"]}
             raw["sites"][sid] = rec
-            try:
-                cid, src, fail = community_id(conn, sid, s, get)
-                n_req += src == "page"
-                rec.update(community_id=cid, id_from=src)
-                units = None
-                if cid in answers:  # another list entry for the same community: asked once per run
-                    units, fail = answers[cid]
-                    rec.update(same_as=cid)
-                elif cid:
-                    if src == "page":
-                        time.sleep(delay)
+            cid, units, fail = cids.get(sid), None, fails.get(sid, {})
+            rec.update(community_id=cid)
+            if cid:
+                if n_req:
+                    time.sleep(delay)
+                try:
                     url = API.format(id=cid, date=day)
-                    status, body = get(url, {"Accept": "application/json", "Origin": ORIGIN,
-                                             "Referer": s["url"]})
+                    status, body = get(url, {"Accept": "application/json", "Origin": ORIGIN, "Referer": s["url"]})
                     n_req += 1
                     units, fail = units_outcome(status, body)
-                    answers[cid] = (units, fail)
                     rec.update(request=url, status=status,
                                **({"units": units} if units is not None else {"body": (body or "")[:2000]}))
-            except Exception as e:  # network failure: this site only
-                fail = {"outcome": "timeout" if "timeout" in type(e).__name__.lower() else "error",
-                        "http_status": None, "error": f"{type(e).__name__}: {str(e)[:200]}"}
-                units = None
-                rec["exception"] = fail["error"]
+                except Exception as e:  # network failure: this site only
+                    fail = {"outcome": "timeout" if "timeout" in type(e).__name__.lower() else "error",
+                            "http_status": None, "error": f"{type(e).__name__}: {str(e)[:200]}"}
+                    rec["exception"] = fail["error"]
             if units is None:
                 per_area[f"{sid}#render"] = {"state": "failed", "items": 0, **fail}
                 report[sid] = describe({**fail, "at": None}) + f": {fail.get('error')}"
@@ -274,4 +293,5 @@ def read(conn, *, sites: list[str] | None = None, dry_run: bool = False, get: Ge
     finish_run(conn, run, "ok", {"areas": per_area, "observations": n_obs, "requests": n_req}, est_cost=0.0)
     if n_obs:
         identity.run(conn)
-    return {"run_id": run, "requests": n_req, "observations": n_obs, "raw": str(raw_path), "sites": report}
+    return {"run_id": run, "requests": n_req, "observations": n_obs, "raw": str(raw_path), "sites": report,
+            "marked_duplicate": marked}

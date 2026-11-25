@@ -12,7 +12,8 @@ community's own path. Avalon sites are skipped: their page data already gives ev
 Each site's outcome is recorded in the run's counts (`areas['<site>#render']`): `ok`, `no_plans`, or a transient
 failure (`blocked`, `timeout`, `empty`, `not_returned`, `error`, `not_read`) with the HTTP status and the
 scraper's message; `dead` when the free precheck (`precheck.py`: DNS, one plain GET) stopped the site
-before Apify. A run over every site picks transient failures first, then sites never rendered, then those older than
+before Apify; `duplicate` (with `duplicate_of`) for an entry that is the same site as an earlier one, written by
+`mark_duplicates` in a run of its own before any fetch, which retires the entry's rows (it is never fetched). A run over every site picks transient failures first, then sites never rendered, then those older than
 STALE_DAYS; `ok` and `no_plans` are done until then.
 
 Each site's rendered text goes to headless `claude -p --model haiku` (no tools) with a fixed schema of plans and
@@ -239,12 +240,15 @@ PAGE_BUDGET = {"start": 12000, "floorplans": 12000, "units": 6000}  # characters
 OUTCOME_LABEL = {"ok": "plans found", "no_plans": "rendered, no plans offered", "blocked": "blocked",
                  "timeout": "timed out", "empty": "rendered almost no text", "not_returned": "no page returned",
                  "error": "failed", "not_read": "not read (Claude budget reached)",
-                 "dead": "site dead (DNS)"}  # the last: precheck.py
+                 "dead": "site dead (DNS)",  # precheck.py
+                 "duplicate": "duplicate"}  # mark_duplicates: 'duplicate of <canonical id>'
 
 
 def describe(o: dict[str, Any]) -> str:
     """'blocked (HTTP 403) on 11-24, will retry'."""
     s = OUTCOME_LABEL.get(o["outcome"], o["outcome"])
+    if o["outcome"] == "duplicate" and o.get("duplicate_of"):
+        s += f" of {o['duplicate_of']}"
     if o.get("http_status"):
         s += f" (HTTP {o['http_status']})"
     if o.get("at"):
@@ -266,8 +270,29 @@ def last_outcomes(conn) -> dict[str, dict[str, Any]]:
             oc = a.get("outcome") or old.get(a.get("state"), "not_returned")
             out[area[: -len("#render")]] = {"outcome": oc, "at": r["started_at"], "run_id": r["id"],
                                             "http_status": a.get("http_status"), "error": a.get("error"),
-                                            "plans": a.get("items")}
+                                            "plans": a.get("items"),
+                                            **({"duplicate_of": a["duplicate_of"]} if a.get("duplicate_of") else {})}
     return out
+
+
+def mark_duplicates(conn) -> dict[str, str]:
+    """Retire the rows of every site-list entry that is the same site as an earlier one (`config.duplicate_sites`):
+    one run of its own (`params.render`, scope partial, status ok, cost 0) whose outcome for `<entry>#render` is
+    `duplicate` with `duplicate_of`, state `empty`, so its older render rows go inactive. Only entries not already
+    marked as a duplicate of the same canonical entry. Run before every render and Prometheus read; the readers
+    never fetch a duplicate. Returns {entry id: canonical id} of the entries marked now."""
+    last = last_outcomes(conn)
+    dups = {sid: s["duplicate_of"] for sid, s in load_sites(duplicates=True).items() if s.get("duplicate_of")}
+    new = {sid: c for sid, c in dups.items()
+           if (last.get(sid) or {}).get("outcome") != "duplicate" or last[sid].get("duplicate_of") != c}
+    if not new:
+        return {}
+    run = start_run(conn, "intake", "direct", {"areas": [f"{sid}#render" for sid in new], "render": True,
+                                               "scope": "partial", "duplicates": True})
+    finish_run(conn, run, "ok", {"areas": {f"{sid}#render": {
+        "state": "empty", "items": 0, "outcome": "duplicate", "duplicate_of": c, "http_status": None, "error": None}
+        for sid, c in new.items()}, "observations": 0}, est_cost=0.0)
+    return new
 
 
 def _age_days(ts: str) -> float:
@@ -337,12 +362,14 @@ def site_text(pages: list[dict[str, Any]]) -> str:
 def render(conn, *, sites: list[str] | None = None, model: str = "haiku",
            max_claude_usd: float = 1.0, max_apify_usd: float = 1.0, dry_run: bool = False,
            retry_failed: bool = False, residential: bool = False) -> dict[str, Any]:
-    all_sites = load_sites()
+    all_sites = load_sites(duplicates=True)
+    dups = {sid: s["duplicate_of"] for sid, s in all_sites.items() if s.get("duplicate_of")}
+    marked = {} if dry_run else mark_duplicates(conn)
     cands = []
     for sid, s in all_sites.items():
         if s.get("platform") in SKIP_PLATFORMS:
             continue
-        if sites and sid not in sites:
+        if (sites and sid not in sites) or sid in dups:  # a duplicate is never fetched (mark_duplicates)
             continue
         cands.append(sid)
     last = last_outcomes(conn)
@@ -352,6 +379,7 @@ def render(conn, *, sites: list[str] | None = None, model: str = "haiku",
     if dry_run or not pick:
         return {"sites": [(sid, all_sites[sid]["url"], why) for sid, why in order],
                 "done": {sid: describe(last[sid]) for sid in cands if sid not in pick and sid in last},
+                "duplicates": {sid: f"duplicate of {c}" for sid, c in dups.items()}, "marked_duplicate": marked,
                 "estimated_apify_usd": round(0.003 * PAGES_PER_SITE * len(pick), 2),
                 "estimated_claude_usd": round(0.006 * len(pick), 2)}
     # the free precheck (DNS, one plain GET): a dead domain is recorded, not sent to Apify
@@ -369,7 +397,7 @@ def render(conn, *, sites: list[str] | None = None, model: str = "haiku",
     if not pick:
         finish_run(conn, run, "ok", {"areas": per_area, "observations": 0}, est_cost=0.0)
         return {"run_id": run, "apify_usd": 0.0, "claude_usd": 0.0, "observations": 0, "sites": report,
-                "outcomes": {k[: -len("#render")]: a for k, a in per_area.items()}}
+                "outcomes": {k[: -len("#render")]: a for k, a in per_area.items()}, "marked_duplicate": marked}
     n_req = PAGES_PER_SITE * len(pick)
     try:
         res = run_actor(ACTOR, {"startUrls": [{"url": s["url"], "userData": {"site": sid}} for sid, s in pick.items()],
@@ -451,6 +479,7 @@ def render(conn, *, sites: list[str] | None = None, model: str = "haiku",
                est_cost=round((res.cost_usd or 0) + spent, 4))
     identity.run(conn)
     return {"run_id": run, "apify_usd": res.cost_usd, "claude_usd": round(spent, 4), "observations": n_obs,
+            "marked_duplicate": marked,
             "outcomes": {sid: {k: v for k, v in a.items() if k != "state"} for sid, a in
                          ((k[: -len("#render")], a) for k, a in per_area.items())},
             "sites": report}
