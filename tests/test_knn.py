@@ -415,10 +415,10 @@ def test_a_google_row_without_minutes_never_hides_a_time(tmp_path):
     init_db(conn)
     pa = "commute_targets:Downtown Palo Alto"
     for prov, m in (("estimate", 40.0), ("google", None)):
-        conn.execute("INSERT INTO trips (computed_at, place_key, point_id, mode, minutes, provider) "
-                     "VALUES ('2026-11-25', 'x', ?, 'bike', ?, ?)", (pa, m, prov))
+        conn.execute("INSERT INTO trips (computed_at, place_key, point_id, mode, minutes, provider, o_lat, o_lon) "
+                     "VALUES ('2026-11-25', 'x', ?, 'bike', ?, ?, 37.4, -122.1)", (pa, m, prov))
     conn.commit()
-    t = best_trips(conn)["x"][(pa, "bike")]
+    t = best_trips(conn, {"x": (37.4, -122.1)})["x"][(pa, "bike")]
     assert t["provider"] == "estimate" and t["minutes"] == 40.0
 
 

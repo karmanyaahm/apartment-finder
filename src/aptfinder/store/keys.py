@@ -25,6 +25,11 @@ STATE_ZIP_RE = re.compile(r"^(ca|california)?\s*(\d{5})?(-\d{4})?$", re.IGNORECA
 # '670,680,690,2333 Eastridge Ave', '2491 2483, 2485, 2489, 2491 Whitney Drive' (the list ends before a word)
 NUM_LIST_RE = re.compile(r"\s*(\d+[a-z]?)((?:(?:\s*[,&]\s*|\s+and\s+|\s+-\s+|\s+)\d+[a-z]?)+)(?=\s+[a-z])",
                          re.IGNORECASE)
+# Sources whose map pin is not the building: a Craigslist pin is the poster's account or area point (one pin,
+# 37.4056, -122.0775, carries 23 posts of 4 buildings). The places view ignores these pins when any other source
+# gives the place a position. Airbnb and Furnished Finder pins are approximate too, but their stays never share a
+# place with a precisely placed source (2026-11-25: 0 places), so they are not listed.
+APPROX_PIN_SOURCES = ("craigslist",)
 # a route number belongs to the street ('2615 State Highway 82')
 NUMBERED_ROUTES = {"hwy", "route", "rte"}
 
