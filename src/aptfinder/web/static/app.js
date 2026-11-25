@@ -316,12 +316,15 @@ async function openPlace(pk) {
   const p = d.place;
   const label = p.label || d.listings.find((l) => l.fields.title)?.fields.title || pk;
   const goals = Object.entries(d.goals).filter(([g, r]) => r && (S.goal === "all" || g === S.goal)).map(([g, r]) => `
-    <div><span class="chip ${r.status}">${esc(g)}: ${esc(STATUS_LABEL[r.status])}</span>
+    <div><span class="chip ${r.status}">${esc(g)}: ${esc(STATUS_LABEL[r.status])}</span>${r.own_site ? ' <span class="small muted" title="The building\'s own website prices offers here, so only its listings decide the goals; other sources are shown as \'also listed\'.">judged on the own website</span>' : ""}
       ${r.reasons.map(([s, t]) => `<div class="reason ${s}">${s === "pass" ? "✓" : s === "fail" ? "✗" : "?"} ${esc(t)}</div>`).join("")}
       ${r.nice.length ? `<div class="small muted">nice to have: ${r.nice.map(([s, t]) => `${s === "pass" ? "✓" : s === "fail" ? "✗" : "?"} ${esc(t)}`).join(" · ")}</div>` : ""}
     </div>`).join("");
   const photos = (d.photos || []).map((ph) => `<figure class="ph"><a href="${esc(ph.page || ph.url)}" target="_blank" rel="noopener noreferrer" title="Open the ${esc(ph.site || ph.source)} page this photo is from"><img loading="lazy" src="${esc(ph.url)}" alt="photo from ${esc(ph.site || ph.source)}" onerror="this.closest('figure').remove()"></a>${ph.page ? `<a class="src" href="${esc(ph.page)}" target="_blank" rel="noopener noreferrer" title="Open the page this photo came from">${esc(ph.site || ph.source)} ↗</a>` : `<span class="src">${esc(ph.source)}</span>`}</figure>`)
     .concat(d.listings.flatMap((l) => l.media.map((f) => `<a href="media/${encodeURIComponent(f)}" target="_blank" rel="noopener"><img src="media/${encodeURIComponent(f)}" alt="file from ${esc(l.source)}"></a>`)));
+  // other sources' prices beside the own site's: "also listed at $X on zillow"
+  const alsoListed = (pl) => (pl.also_listed || []).length ? `<br><span class="muted">${pl.also_listed.map((a) =>
+    `also listed${a.price_month ? ` at ${money(a.price_month)}` : ""} on ${esc(a.source)}`).join("<br>")}</span>` : "";
   const rng = (a, f) => (!a ? '<span class="muted">?</span>' : a[0] === a[1] ? f(a[0]) : `${f(a[0])}–${f(a[1])}`);
   // leases and furnished offers (the building's own furnished option, operators' furnished stays) never mix
   const planRows = (plans) => `<div class="scroll-x"><table>
@@ -335,7 +338,9 @@ async function openPlace(pk) {
       <td>${pl.plan_only ? '<span class="muted" title="Listed in the community\'s own plan data, with no price: no unit in this plan is known to be offered. Not counted for goals.">plan exists, no unit offered</span>'
         : pl.n_units ? `${pl.n_units} unit${pl.n_units > 1 ? "s" : ""}` : `${pl.n_active} listing${pl.n_active === 1 ? "" : "s"}`}</td>
       <td>${esc(pl.earliest || "")}</td>
-      <td>${pl.from_direct ? `<b>own site</b>${pl.also_on.length ? `<br><span class="muted">also on ${esc(pl.also_on.join(", "))}</span>` : ""}` : esc(pl.sources.join(", "))}</td>
+      <td>${pl.from_direct ? `<b>own site</b>${alsoListed(pl)}`
+        : pl.not_on_own_site ? `<span class="muted" title="The building's own website prices other plans but not this one; it does not count for goals.">not on own site</span>${alsoListed(pl)}`
+        : esc(pl.sources.join(", "))}</td>
       <td>${pl.image ? `<a href="${esc(pl.image)}" target="_blank" rel="noopener noreferrer"><img class="plan-img" loading="lazy" src="${esc(pl.image)}" alt="floor plan" onerror="this.parentNode.remove()"></a>` : ""}</td>
     </tr>`).join("")}
   </table></div>`;

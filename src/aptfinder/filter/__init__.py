@@ -7,7 +7,7 @@ from collections import defaultdict
 from typing import Any
 
 from ..config import GoalsConfig, load_goals
-from ..plans import inherit_prices
+from ..plans import inherit_prices, is_own_priced
 from ..verify import accuracy, low_accuracy
 from .rules import CHECK, FAIL, PASS, RANK, Ctx, combine, evaluate
 
@@ -74,6 +74,9 @@ def evaluate_all(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> di
     listings = [dict(r) for r in conn.execute("SELECT * FROM listings WHERE kind IS NOT 'site_info' "
                                               "AND NOT (source = 'direct' AND price IS NULL)")]
     inherit_prices(listings)  # a price-less plan row takes the same plan's price from another source
+    # own website wins: where the building's own site prices an offer, only its active priced rows decide the
+    # place's goals; other sources' listings there still get a result (shown in the drawer) but decide nothing
+    own = {r["place_key"] for r in listings if r["place_key"] and is_own_priced(r)}
     out: dict[str, Any] = {"listings": {}, "places": {}}
     for gid, goal in cfg.goals.items():
         lres, pres = {}, {}
@@ -85,11 +88,13 @@ def evaluate_all(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> di
             # (status, text, rule type): the type lets callers set aside commute rules (routing_candidates)
             reasons = [(*evaluate(r, row, ctx), r["type"]) for r in goal.rules]
             nice = [(*evaluate(r, row, ctx), r["type"]) for r in goal.nice]
+            decides = pk not in own or is_own_priced(row)
             res = {"status": combine([s for s, _, _ in reasons]), "reasons": reasons, "nice": nice,
                    "nice_score": sum(s == PASS for s, _, _ in nice), "source": row["source"],
-                   "source_id": row["source_id"], "unit_key": row["unit_key"], "place_key": pk}
+                   "source_id": row["source_id"], "unit_key": row["unit_key"], "place_key": pk,
+                   "decides": decides, "own_site": pk in own}
             lres[(row["source"], row["source_id"])] = res
-            if pk is None:
+            if pk is None or not decides:
                 continue
             best = pres.get(pk)
             if best is None or (RANK[res["status"]], -res["nice_score"]) < (RANK[best["status"]], -best["nice_score"]):
@@ -105,14 +110,16 @@ COMMUTE_RULES = {"commute_any", "near"}
 def routing_candidates(conn: sqlite3.Connection, cfg: GoalsConfig | None = None,
                        res: dict[str, Any] | None = None) -> dict[str, set[str]]:
     """place_key -> goals for which some listing there can still pass on everything except commute rules:
-    the only places worth paid routing (a 2-bedroom over budget fails whatever its commute). `res`: an
+    the only places worth paid routing (a 2-bedroom over budget fails whatever its commute). Listings that do
+    not decide their place (an aggregator's at a place whose own site prices offers) nominate nothing. `res`: an
     `evaluate_all` result already in hand."""
     res = res or evaluate_all(conn, cfg)
     out: dict[str, set[str]] = {}
     for gid, listings in res["listings"].items():
         for r in listings.values():
             pk = r.get("place_key")
-            if pk and not any(s == FAIL and t not in COMMUTE_RULES for s, _, t in r["reasons"]):
+            if pk and r.get("decides", True) and not any(
+                    s == FAIL and t not in COMMUTE_RULES for s, _, t in r["reasons"]):
                 out.setdefault(pk, set()).add(gid)
     return out
 

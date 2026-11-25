@@ -152,7 +152,12 @@ def conflict_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Units with active listings from more than one source that disagree on a field (a retired listing never
     makes a conflict). A conflict drops out once every disagreeing field has a current check on every listing
     (see the current_checks view). Conflicts at a place whose own site awaits a render carry
-    `pending_render: True` and a `pending_reason`, and come after the actionable ones."""
+    `pending_render: True` and a `pending_reason`, and come after the actionable ones. A place whose own website
+    prices an offer has no conflicts: the own site is the truth there, and disagreements among other sources
+    decide nothing (`plans.own_site_places`)."""
+    from ..plans import own_site_places
+
+    own = own_site_places(conn)
     by_unit: dict[str, list[sqlite3.Row]] = defaultdict(list)
     for r in conn.execute("SELECT * FROM listings WHERE unit_key IS NOT NULL AND active = 1 "
                           "AND kind IS NOT 'site_info'"):
@@ -161,7 +166,7 @@ def conflict_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     pending = pending_render(conn)
     out = []
     for uk, rows in sorted(by_unit.items()):
-        if len({r["source"] for r in rows}) < 2:
+        if len({r["source"] for r in rows}) < 2 or rows[0]["place_key"] in own:
             continue
         fields = []
         for f in CONFLICT_FIELDS:
@@ -190,12 +195,18 @@ def all_conflicts(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 def text_conflict_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Listings whose text (read by `aptf-intake extract`) contradicts a value the source stated: the source's
     value is stored, the text's is shown beside it as '<source> (text)'. Drops out once each such field has a
-    current check on the listing."""
+    current check on the listing. None at a place whose own website prices an offer: there other sources'
+    listings decide nothing, so their text is moot."""
+    from ..plans import own_site_places
+
+    own = own_site_places(conn)
     checked = current_checks(conn)
     out = []
     for r in conn.execute("SELECT source, source_id, obs_id, place_key, "
                           "json_extract(data, '$.extra.extracted.conflicts') AS c FROM listings "
                           "WHERE json_extract(data, '$.extra.extracted.conflicts') IS NOT NULL ORDER BY source_id"):
+        if r["place_key"] in own and r["source"] != "direct":
+            continue
         text = json.loads(r["c"])
         open_ = {f: v for f, v in text.items() if f not in checked.get((r["source"], r["source_id"]), {})}
         if open_:

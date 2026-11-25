@@ -35,3 +35,15 @@ def test_group_plans_direct_is_current_and_stays_are_separate():
     assert lease["name"] == "C1" and lease["price_month"] == [5320, 5449] and lease["n_units"] == 2
     assert lease["from_direct"] and lease["also_on"] == ["apartments_com", "zillow"]
     assert stay["offer"] == "furnished stay (Blueground)" and stay["price_month"] == [6300, 6300]
+    # every other source's lowest price for the plan: "also listed at $X on <source>"
+    assert lease["also_listed"] == [{"source": "apartments_com", "price_month": 5400},
+                                    {"source": "zillow", "price_month": 5320}]
+    assert not lease["not_on_own_site"]
+
+
+def test_plan_only_other_sources_list_at_an_own_site_place_is_marked():
+    ls = [L("direct", 2, 2, 980, 4100, "12", plan="B1"), L("zillow", 3, 2, 1200, 5000, "77")]
+    by_beds = {p["beds"]: p for p in group_plans(ls)}
+    assert by_beds[3]["not_on_own_site"] and by_beds[3]["also_listed"] == [{"source": "zillow", "price_month": 5000}]
+    # no priced own-site offer at the place: nothing is marked
+    assert not any(p["not_on_own_site"] for p in group_plans([L("zillow", 3, 2, 1200, 5000, "77")]))

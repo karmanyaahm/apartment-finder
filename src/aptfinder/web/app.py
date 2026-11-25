@@ -40,8 +40,10 @@ def _group_listings(conn) -> dict[str, list[dict[str, Any]]]:
 
 
 def group_plans(listings: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Floor plans of a place: listings grouped by beds, baths and plan name across all sources."""
+    """Floor plans of a place: listings grouped by beds, baths and plan name across all sources. When the
+    building's own site prices an offer, other sources' prices are only 'also listed' (own website wins)."""
     listings = [l for l in listings if l["fields"].get("kind") != "site_info"]  # photos and link only
+    own_site = any(l["source"] == "direct" and l["active"] and l["fields"].get("price_month") for l in listings)
     listings = [l for l in listings if l["active"]] or listings  # inactive rows only if nothing is live
     groups: dict[str, list[dict[str, Any]]] = {}
     summaries = []  # beds-only rows (e.g. Zillow's per-building "3bd from $X", baths unknown)
@@ -86,6 +88,11 @@ def group_plans(listings: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "earliest": avail[0] if avail else None,
             "sources": sorted({l["source"] for l in ls}),
             "also_on": sorted({l["source"] for l in ls} - {"direct"}) if direct else [],
+            # each other source's lowest price for this plan: "also listed at $X on <source>"
+            "also_listed": [{"source": src, "price_month": min((x for x in pr if x), default=None)}
+                            for src, pr in sorted(_by_source(ls).items())],
+            # at a place whose own site prices offers, a plan only other sources list does not count for goals
+            "not_on_own_site": own_site and not direct,
             # the community's own drawing first; hotlink-blocked hosts last
             "image": next((u for l in sorted(ls, key=lambda l: l["source"] != "direct")
                            for u in [(l["data"].get("extra") or {}).get("floorplan_image")]
@@ -96,6 +103,14 @@ def group_plans(listings: list[dict[str, Any]]) -> list[dict[str, Any]]:
         })
     return sorted(out, key=lambda p: (p["offer"] != "lease", p["offer"], p["beds"] is None, p["beds"] or 0, p["baths"] or 0,
                                       (p["price_month"] or [1e9])[0]))
+
+
+def _by_source(ls: list[dict[str, Any]]) -> dict[str, list[float | None]]:
+    out: dict[str, list[float | None]] = {}
+    for l in ls:
+        if l["source"] != "direct":
+            out.setdefault(l["source"], []).append(l["fields"].get("price_month"))
+    return out
 
 
 # Image hosts that refuse hotlinked requests (Chrome: ERR_BLOCKED_BY_ORB on every images1.apartments.com URL,

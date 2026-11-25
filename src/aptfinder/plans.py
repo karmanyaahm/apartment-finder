@@ -40,3 +40,18 @@ def inherit_prices(rows: list[dict[str, Any]]) -> None:
                 r["price_month"], r["price_from"] = hit
                 if r.get("beds"):
                     r["price_per_bed"] = hit[0] / r["beds"]
+
+
+def is_own_priced(r: dict[str, Any]) -> bool:
+    """An active, priced offer from the building's own website (`direct`, not a `site_info` photo/link row)."""
+    return (r.get("source") == "direct" and bool(r.get("active")) and r.get("price") is not None
+            and r.get("kind") != "site_info")
+
+
+def own_site_places(conn) -> set[str]:
+    """Places whose own website currently prices at least one offer. There the own site is the truth: goals are
+    judged on its rows alone, and other sources' listings are shown as 'also listed' (design.md, 'own website
+    wins')."""
+    return {r[0] for r in conn.execute(
+        "SELECT DISTINCT place_key FROM listings WHERE source = 'direct' AND active = 1 AND price IS NOT NULL "
+        "AND kind IS NOT 'site_info' AND place_key IS NOT NULL")}

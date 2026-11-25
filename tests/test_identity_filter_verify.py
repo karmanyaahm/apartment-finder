@@ -220,9 +220,10 @@ def test_conflict_detection_and_resolution(conn):
 
 
 def test_retired_listing_never_makes_a_conflict(conn):
-    """A plan the own site no longer offers (absent from a later complete run) is not compared."""
+    """A plan the own site no longer offers (absent from a later complete run) is not compared. (The own site
+    gives no prices here; a priced one would settle every conflict at the place: own website wins.)"""
     r1 = start_run(conn, "intake", "direct")
-    obs(conn, r1, "direct", "s:old", 3000, address="10 Retired Way, Mountain View", beds=1, sqft=763,
+    obs(conn, r1, "direct", "s:old", None, None, address="10 Retired Way, Mountain View", beds=1, sqft=763,
         unit="101")
     finish_run(conn, r1, "ok")
     r2 = start_run(conn, "intake", "apartments_com")
@@ -232,7 +233,7 @@ def test_retired_listing_never_makes_a_conflict(conn):
     identity.run(conn)
     assert [c["fields"] for c in conflict_queue(conn)] == [["sqft"]]
     r3 = start_run(conn, "intake", "direct")  # a later full run of the site without that plan
-    obs(conn, r3, "direct", "s:new", 3100, address="10 Retired Way, Mountain View", beds=2, unit="202")
+    obs(conn, r3, "direct", "s:new", None, None, address="10 Retired Way, Mountain View", beds=2, unit="202")
     finish_run(conn, r3, "ok")
     identity.run(conn)
     assert conn.execute("SELECT active FROM listings WHERE source_id = 's:old'").fetchone()[0] == 0
@@ -252,8 +253,8 @@ def test_conflicts_waiting_for_an_own_site_render_come_last(conn):
     q = conflict_queue(conn)
     assert [(c["listings"][0]["source_id"], c["pending_render"]) for c in q] == [("b", False), ("a", True)]
     assert "alpha" in q[1]["pending_reason"] and q[0]["pending_reason"] is None
-    # once the site is rendered, the conflict is actionable again
-    obs(conn, r, "direct", "alpha:r:x", 4800, address="1 Alpha St, Mountain View", beds=3,
+    # once the site is rendered, the conflict is actionable again (a priced plan would settle it: own site wins)
+    obs(conn, r, "direct", "alpha:r:x", None, None, address="1 Alpha St, Mountain View", beds=3,
         extra={"site": "alpha", "platform": "render"})
     identity.run(conn)
     assert not any(c["pending_render"] for c in conflict_queue(conn))
@@ -316,3 +317,53 @@ def test_unitless_ads_in_a_building_are_not_one_unit():
     house = {**base, "property_name": None, "kind": "house", "address": "49 Showers Dr, Mountain View"}
     assert decide({**house, "source_id": "4", "beds": 3, "price": 5000})[2] == decide(
         {**house, "source_id": "5", "beds": 3, "price": 5400})[2]  # a house stays one unit
+
+
+# ---------------------------------------------------------------- own website wins
+def test_own_site_prices_decide_the_place_and_aggregators_only_show(conn):
+    from aptfinder.filter import routing_candidates
+    from aptfinder.verify import text_conflict_queue
+
+    r = start_run(conn, "intake", "zillow")
+    # own site: 3/2 at $8,400 (fails lease's per-bedroom cap); Zillow: the same plan at $6,000 (would pass)
+    obs(conn, r, "direct", "own:r:c1", 8400, address="7 Own St, Mountain View", beds=3, baths=2, sqft=1100,
+        term="long", extra={"site": "own", "platform": "render"})
+    obs(conn, r, "zillow", "z1", 6000, address="7 Own St, Mountain View", beds=3, baths=2, sqft=1100, term="long")
+    obs(conn, r, "apartments", "a1", 6100, address="7 Own St, Mountain View", beds=3, baths=2.5, sqft=1100,
+        term="long", extra={"extracted": {"conflicts": {"beds": 2}}})
+    # another building without own-site prices: unchanged, the best listing decides
+    obs(conn, r, "zillow", "z2", 6000, address="8 Agg St, Mountain View", beds=3, baths=2, term="long")
+    obs(conn, r, "apartments", "a2", 6000, address="8 Agg St, Mountain View", beds=3, baths=2.5, term="long")
+    finish_run(conn, r, "ok")
+    identity.run(conn)
+    res = evaluate_all(conn, _lease_goals())
+    pk = {a: conn.execute("SELECT place_key FROM places WHERE address LIKE ?", (a + "%",)).fetchone()[0]
+          for a in ("7 Own", "8 Agg")}
+    own = res["places"]["lease"][pk["7 Own"]]
+    assert own["status"] == FAIL and own["source"] == "direct" and own["own_site"]
+    # filters report, never drop: the aggregator listing keeps its result but does not decide
+    z = res["listings"]["lease"][("zillow", "z1")]
+    assert z["status"] == PASS and not z["decides"]
+    assert res["places"]["lease"][pk["8 Agg"]]["status"] == PASS
+    assert pk["7 Own"] not in routing_candidates(conn, res=res)
+    # verify: no conflict at the own-site place, neither own vs aggregator nor among aggregators, nor text ones
+    assert [c["place_key"] for c in conflict_queue(conn)] == [pk["8 Agg"]]
+    assert text_conflict_queue(conn) == []
+
+
+def test_own_site_without_prices_or_retired_does_not_win(conn):
+    r1 = start_run(conn, "intake", "direct")
+    obs(conn, r1, "direct", "s:old", 8400, address="9 Old St, Mountain View", beds=3, baths=2, term="long",
+        extra={"area": "s#render"})
+    obs(conn, r1, "direct", "s:plan", None, address="9 Old St, Mountain View", beds=3, baths=2, term="long")
+    finish_run(conn, r1, "ok", {"areas": {"s#render": {"state": "complete"}}})
+    r2 = start_run(conn, "intake", "direct", {"areas": ["s#render"]})
+    finish_run(conn, r2, "ok", {"areas": {"s#render": {"state": "empty"}}})  # the plan is gone
+    r3 = start_run(conn, "intake", "zillow")
+    obs(conn, r3, "zillow", "z", 6000, address="9 Old St, Mountain View", beds=3, baths=2, term="long")
+    finish_run(conn, r3, "ok")
+    identity.run(conn)
+    assert conn.execute("SELECT active FROM listings WHERE source_id = 's:old'").fetchone()[0] == 0
+    res = evaluate_all(conn, _lease_goals())
+    (place,) = res["places"]["lease"].values()
+    assert place["status"] == PASS and place["source"] == "zillow" and not place["own_site"]
