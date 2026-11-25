@@ -12,6 +12,7 @@
   aptf-intake precheck [--site ID] [--dry-run]   # free: DNS + one plain GET per site; records dead / challenge
   aptf-intake extract <text source>|all [--workers 8] [--dry-run]   # Haiku reads each listing's whole entry
   aptf-intake zillow-detail --max-usd 1.0 [--batch 150] [--limit N] [--dry-run]   # Zillow detail pages (raw only)
+  aptf-intake zillow-buildings --max-usd 0.5 [--limit N] [--dry-run]   # Zillow building floor plans (raw only)
   (`run` of a text source then reads its rows automatically, `--no-extract` skips; `reparse` applies cached readings)
   (then, after any `run` or `reparse` that wrote rows: geocode new addresses (not on reparse), identity, free commute
    estimates for places without any; `--no-followup` skips)
@@ -138,6 +139,14 @@ def main(argv: list[str] | None = None) -> None:
     zd.add_argument("--limit", type=int, help="at most this many zpids")
     zd.add_argument("--refetch", action="store_true", help="also zpids that already have a page")
     zd.add_argument("--dry-run", action="store_true")
+    zb = sub.add_parser("zillow-buildings", help="fetch the building page (every floor plan: beds, baths, sqft, "
+                                                 "price, units) of every building with active Zillow bedroom rows "
+                                                 "(Apify; raw only, applied by `extract zillow`)")
+    zb.add_argument("--max-usd", type=float, required=True, help="cap on Apify spend for this command")
+    zb.add_argument("--batch", type=int, default=150, help="buildings per actor run")
+    zb.add_argument("--limit", type=int, help="at most this many buildings")
+    zb.add_argument("--refetch", action="store_true", help="also buildings that already have a page")
+    zb.add_argument("--dry-run", action="store_true")
     rd = sub.add_parser("render", help="render buildings' own sites in a browser (Apify) and read offered plans "
                                        "and prices with Claude Haiku")
     rd.add_argument("--site", action="append", default=[], help="site id (repeatable); default every site")
@@ -222,6 +231,19 @@ def main(argv: list[str] | None = None) -> None:
         from .prometheus import read
 
         print(json.dumps(read(conn, sites=args.site or None, dry_run=args.dry_run), indent=1, default=str))
+        return
+
+    if args.cmd == "zillow-buildings":
+        from .zillow_building import fetch as fetch_buildings
+
+        res = fetch_buildings(conn, max_usd=args.max_usd, batch=args.batch, limit=args.limit, refetch=args.refetch,
+                              dry_run=args.dry_run)
+        print(json.dumps(res, indent=1, default=str))
+        if res.get("warnings"):
+            print("\nWARNINGS:\n  " + "\n  ".join(res["warnings"]))
+        if res.get("fetched"):
+            print("\napply to the bedroom rows (free, cached answers): aptf-intake extract zillow --reread "
+                  "--id-like '%:%'")
         return
 
     if args.cmd == "zillow-detail":

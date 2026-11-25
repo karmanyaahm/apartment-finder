@@ -637,11 +637,13 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
         reread = cached_only = True
     if source not in TEXT_SOURCES:
         raise SystemExit(f"extract supports {', '.join(TEXT_SOURCES)} or all")
-    pages = None
-    if source == "zillow":  # detail pages, by zpid (a building's bedroom rows share one)
+    pages = buildings = None
+    if source == "zillow":  # detail pages, by zpid (a building's bedroom rows share one), and building pages
+        from .zillow_building import load_buildings
         from .zillow_detail import load_pages
 
         pages = load_pages()
+        buildings = load_buildings()
     todo = [t for t in _pending(conn, source, reread, set(pages or ()), id_like)
             if not units_missing or units_wanted(source, t["row"]["source_id"], t["data"])][:limit]
     raws = RawIndex(source) if source in RAW_SOURCES else None
@@ -651,6 +653,8 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
         if pages is not None:
             page = pages.get(str((t["data"].get("extra") or {}).get("zpid")))
             t["page"] = page if ":" not in t["row"]["source_id"] else None  # a single unit's own page
+            if ":" in t["row"]["source_id"]:  # a building's bedroom row: the building's floor plans
+                t["building"] = buildings.get(str((t["data"].get("extra") or {}).get("zpid")))
             lines = raw_lines(source, page, ":" in t["row"]["source_id"]) if page else None  # <zpid>:Nbd
         elif raws is not None:
             item = raws.item(t["row"]["raw_path"], t["row"]["source_id"])
@@ -737,7 +741,8 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
                     d[k] = v
                     got.append(k)
             # beds, baths, sqft, price the source left empty: a Zillow single unit's own page (structured) first,
-            # then the row's own text (`check_units`, quoted); a building's rows are never filled (`units_wanted`)
+            # a building's bedroom row from its building page (`zillow_building.bed_facts`), then the row's own text
+            # (`check_units`, quoted; never a building's rows, `units_wanted`)
             price, units = t["row"]["price"], {}
             if t.get("page"):
                 from .zillow_detail import unit_facts
@@ -745,6 +750,15 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
                 for k, v in unit_facts(t["page"]).items():
                     if (price if k == "price" else d.get(k)) is None:
                         units[k] = {"value": v, "from": "zillow page"}
+            if t.get("building"):  # every plan of the row's bed count: baths and sqft only where they all agree
+                from .zillow_building import bed_facts
+
+                bf = bed_facts(t["building"], d.get("beds"))
+                if bf:
+                    extra["building_plans"] = bf["plans"]
+                for k in ("baths", "sqft", "available_from", "price"):
+                    if k in bf and (price if k == "price" else d.get(k)) is None:
+                        units[k] = {"value": bf[k], "from": "zillow building"}
             if t["own"]:
                 for k, f in check_units(cache[t["hash"]], t["text"], source in WHOLE_ENTRY).items():
                     if d.get(k) is None and k not in units:
