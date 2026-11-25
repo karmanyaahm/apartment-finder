@@ -27,7 +27,7 @@ from .extract import TEXT_SOURCES
 
 SHORT = {"direct": "direct", "zillow": "zillow", "apartments_com": "apts.com", "craigslist": "craigsl", "furnishedfinder": "ff",
          "airbnb": "airbnb", "google_places": "g.places", "zumper": "zumper", "padmapper": "padmapper",
-         "portfolio": "portfolio"}
+         "portfolio": "portfolio", "rentcafe": "rentcafe"}
 
 
 def print_coverage(conn) -> None:

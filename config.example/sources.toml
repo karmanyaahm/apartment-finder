@@ -85,3 +85,11 @@ operators = [
   { name = "Prometheus", url = "https://prometheusapartments.com/ca/{slug}-apartments/", proxy = "residential" },
   { name = "AvalonBay", url = "https://www.avaloncommunities.com/california/{slug}-apartments" },
 ]
+
+[rentcafe]
+# RentCafe (Yardi), per city, chosen 2026-11-25 by a Mountain View probe (design.md): pages through the whole city
+# search (siteTotal 462 for Mountain View) and opens each property for its floor plans. One item per property.
+# $0.00135 per item on the Bronze tier until 2026-11-28, $0.00081 after; $0.00005 per start. azzouzana/rentcafe-scraper
+# returns the raw search cards (base vs total rent label, units available) but stopped after 25 of 462.
+actor = "benthepythondev/rentcafe-apartments-scraper"
+max_items = 600          # properties per city
