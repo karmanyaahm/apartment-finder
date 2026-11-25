@@ -75,6 +75,8 @@ def test_residential_operators_get_their_own_run(monkeypatch):
     run = portfolio.fetch(cfg, area, 0, 1.0, None)
     assert len(runs) == 2 and runs[0] == {"useApifyProxy": True}
     assert {it["proxy"] for it in run.items} == {"datacenter", "residential"} and run.cost_usd == 0.02
+    # pages the actor never returned: only their city is partial, never the whole run (r320, 2026-11-25)
+    assert not run.truncated and portfolio.failed_cities(run.items) == ["Mountain View"]
 
 
 # r320 (2026-11-25): one Irvine Company page for Stanford failed and all 8 cities were marked partial
