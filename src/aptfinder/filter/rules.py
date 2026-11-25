@@ -29,6 +29,8 @@ def _label(rule: dict[str, Any]) -> str:
         return f"{rule['field']} = {rule['value']}"
     if t == "max":
         return f"{rule['field']} {'<' if rule.get('strict') else '<='} {rule['value']}"
+    if t == "min":
+        return f"{rule['field']} {'>' if rule.get('strict') else '>='} {rule['value']}"
     if t == "size_options":
         return "size " + " or ".join(f"{o['beds']}bd/{o['min_baths']}+ba" for o in rule["options"])
     if t == "dates_cover":
@@ -80,7 +82,7 @@ def evaluate(rule: dict[str, Any], row: dict[str, Any], ctx: Ctx) -> tuple[str, 
         ok = v == rule["value"]
         return (PASS, label) if ok else (FAIL, f"{label}: is {v}")
 
-    if t == "max":
+    if t in ("max", "min"):
         f = rule["field"]
         v = row.get(f)
         deps = ("price", "beds") if f == "price_per_bed" else ("price",) if f == "price_month" else (f,)
@@ -88,7 +90,8 @@ def evaluate(rule: dict[str, Any], row: dict[str, Any], ctx: Ctx) -> tuple[str, 
             return CHECK, f"{label}: {f} unknown"
         if (u := _untrusted(ctx, *deps)):
             return CHECK, f"{label}: {u}"
-        ok = v < rule["value"] if rule.get("strict") else v <= rule["value"]
+        lim, strict = rule["value"], rule.get("strict")
+        ok = (v < lim if strict else v <= lim) if t == "max" else (v > lim if strict else v >= lim)
         via = f", price from {row['price_from']}" if row.get("price_from") and f.startswith("price") else ""
         return (PASS, f"{label} ({v:,.0f}{via})") if ok else (FAIL, f"{label}: is {v:,.0f}{via}")
 
@@ -150,7 +153,9 @@ def evaluate(rule: dict[str, Any], row: dict[str, Any], ctx: Ctx) -> tuple[str, 
         if am is None:
             return CHECK, f"{label}: amenities unknown"
         words = [w.lower() for w in rule.get("match") or [name]]  # e.g. gym: ["gym", "fitness"]
-        hit = next((a for a in am if any(w in a.lower() for w in words)), None)
+        excl = [w.lower() for w in rule.get("exclude") or []]  # e.g. parking: ["no parking"]
+        hit = next((a for a in am if any(w in a.lower() for w in words) and not any(x in a.lower() for x in excl)),
+                   None)
         return (PASS, f"{label}: {hit}") if hit else (FAIL, f"{label}: not listed")
 
     if t == "known":
@@ -164,11 +169,13 @@ def fact(rule: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
     `f` names it (a listing field, or beds / baths / available / commute / near / amenity), `v` is this listing's
     value, and commute rules carry their point (`pt` or `set`) and modes."""
     t = rule["type"]
-    if t in ("equals", "max", "known"):
+    if t in ("equals", "max", "min", "known"):
         v = row.get(rule["field"])
         if t == "equals" and isinstance(rule["value"], bool) and v is not None:
             v = bool(v)  # SQLite returns JSON booleans as 0/1
         out = {"f": rule["field"], "v": v}
+        if t == "min":  # a floor: the card says "< lim"
+            return {**out, "lim": rule["value"], "min": True}
         return {**out, "lim": rule["value"]} if t == "max" else out
     if t == "size_options":
         beds = row.get("beds")
@@ -188,3 +195,98 @@ def fact(rule: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
 
 def combine(statuses: list[str]) -> str:
     return max(statuses, key=lambda s: RANK[s]) if statuses else PASS
+
+
+# ---------------------------------------------------------------- rule shapes (goals edited in the dashboard)
+NUMERIC_FIELDS = ["price", "price_month", "price_per_bed", "beds", "baths", "sqft"]
+EQUALS_FIELDS: dict[str, list[Any]] = {"term": ["short", "long"], "furnished": [True, False],
+                                       "private_bath": [True, False],
+                                       "kind": ["apartment", "house", "townhome", "entire_place", "room"]}
+KNOWN_FIELDS = [*NUMERIC_FIELDS, "furnished", "private_bath", "term", "kind", "available_from", "address",
+                "property_name"]
+# type -> (label, required keys, optional keys): what the editor offers and validate_rule checks
+RULE_TYPES: dict[str, tuple[str, list[str], list[str]]] = {
+    "max": ("field at most", ["field", "value"], ["strict"]),
+    "min": ("field at least", ["field", "value"], ["strict"]),
+    "equals": ("field equals", ["field", "value"], []),
+    "size_options": ("beds / baths", ["options"], []),
+    "dates_cover": ("available for dates", ["start", "end"], []),
+    "commute_any": ("commute to a point", ["target", "options"], []),
+    "near": ("nearest point of a set", ["set", "mode", "max"], []),
+    "amenity": ("amenity", ["name"], ["match", "exclude"]),
+    "known": ("field known", ["field"], []),
+}
+
+
+def _num(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def validate_rule(rule: Any, *, modes: list[str], points: set[str], sets: set[str]) -> str | None:
+    """Why `rule` cannot be evaluated (a message naming the problem), or None when it is fine. The checks are the
+    shapes `evaluate` and `fact` read: a rule that passes never raises there."""
+    if not isinstance(rule, dict):
+        return "a rule must be an object"
+    t = rule.get("type")
+    if t not in RULE_TYPES:
+        return f"unknown rule type {t!r} (one of {', '.join(RULE_TYPES)})"
+    _, req, opt = RULE_TYPES[t]
+    missing = [k for k in req if rule.get(k) in (None, "")]
+    if missing:
+        return f"{t}: missing {', '.join(missing)}"
+    extra = set(rule) - {"type", *req, *opt}
+    if extra:
+        return f"{t}: unknown key {', '.join(sorted(extra))}"
+    if t in ("max", "min"):
+        if rule["field"] not in NUMERIC_FIELDS:
+            return f"{t}: field must be one of {', '.join(NUMERIC_FIELDS)}"
+        if not _num(rule["value"]):
+            return f"{t}: value must be a number"
+        if not isinstance(rule.get("strict", False), bool):
+            return f"{t}: strict must be true or false"
+    if t == "equals":
+        if rule["field"] not in EQUALS_FIELDS:
+            return f"equals: field must be one of {', '.join(EQUALS_FIELDS)}"
+        if rule["value"] not in EQUALS_FIELDS[rule["field"]] or type(rule["value"]) is not type(
+                EQUALS_FIELDS[rule["field"]][0]):
+            return f"equals: {rule['field']} must be one of {EQUALS_FIELDS[rule['field']]}"
+    if t == "known" and rule["field"] not in KNOWN_FIELDS:
+        return f"known: field must be one of {', '.join(KNOWN_FIELDS)}"
+    if t == "size_options":
+        opts = rule["options"]
+        if not isinstance(opts, list) or not opts or not all(
+                isinstance(o, dict) and set(o) == {"beds", "min_baths"} and _num(o["beds"]) and _num(o["min_baths"])
+                for o in opts):
+            return "size_options: options must be a non-empty list of {beds, min_baths} numbers"
+    if t == "dates_cover":
+        import datetime as _dt
+        try:
+            a, b = _dt.date.fromisoformat(rule["start"]), _dt.date.fromisoformat(rule["end"])
+        except (TypeError, ValueError):
+            return "dates_cover: start and end must be dates (YYYY-MM-DD)"
+        if a > b:
+            return "dates_cover: start is after end"
+    if t == "commute_any":
+        if rule["target"] not in points:
+            return f"commute_any: unknown point {rule['target']!r}"
+        opts = rule["options"]
+        if not isinstance(opts, list) or not opts or not all(
+                isinstance(o, dict) and set(o) == {"mode", "max"} and o["mode"] in modes and _num(o["max"])
+                and o["max"] > 0 for o in opts):
+            return f"commute_any: options must be a non-empty list of {{mode, max}} (mode one of {', '.join(modes)}, " \
+                   "max minutes > 0)"
+    if t == "near":
+        if rule["set"] not in sets:
+            return f"near: unknown point set {rule['set']!r}"
+        if rule["mode"] not in modes:
+            return f"near: mode must be one of {', '.join(modes)}"
+        if not _num(rule["max"]) or rule["max"] <= 0:
+            return "near: max must be minutes > 0"
+    if t == "amenity":
+        if not isinstance(rule["name"], str) or not rule["name"].strip():
+            return "amenity: name must be text"
+        for k in ("match", "exclude"):
+            v = rule.get(k)
+            if v is not None and not (isinstance(v, list) and all(isinstance(w, str) and w.strip() for w in v)):
+                return f"amenity: {k} must be a list of words"
+    return None

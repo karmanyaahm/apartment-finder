@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .areas import in_walk_zone
-from .config import CHECK_LABEL, CHECK_RETRY, check_outcome, load_areas, load_goals, load_points, load_sites
+from .config import CHECK_LABEL, CHECK_RETRY, check_outcome, load_areas, load_points, load_sites
 from .verify import is_named_building
 
 STALE_DAYS = 7
@@ -195,7 +195,9 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
         stages.append({"id": sid, "label": label, "state": state, "summary": summary, "commands": commands, **extra})
 
     # 1. configure
-    goals = load_goals().goals
+    from .filter.goals import effective_goals
+
+    goals = effective_goals(conn).goals
     sites = load_sites()
     kinds = Counter(a.kind for a in areas)
     stage("configure", "Configure", "done",

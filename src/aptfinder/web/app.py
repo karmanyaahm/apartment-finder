@@ -18,8 +18,10 @@ from pydantic import BaseModel
 from .. import pipeline, settings, verify
 from ..areas import in_walk_zone
 from ..areas import zones as area_zones
-from ..config import load_goals, load_point_sets, load_points
-from ..filter import amenity_flags, best_trips, evaluate_all, nearest_by_set
+from ..config import Goal, load_goals, load_point_sets, load_points
+from ..filter import AMENITY_FLAGS, amenity_flags, best_trips, evaluate_all, evaluate_goal, goal_inputs, nearest_by_set
+from ..filter import goals as goalstore
+from ..filter.rules import EQUALS_FIELDS, KNOWN_FIELDS, NUMERIC_FIELDS, RULE_TYPES
 from ..plans import plan_image, site_drawings
 from ..plans import plan_key as _plan_key
 from ..store import append_annotation, append_check, append_link, connect, init_db
@@ -234,6 +236,14 @@ class LinkIn(BaseModel):
     place_key: str | None = None  # None = split this listing into its own place
 
 
+def goal_view(r: dict[str, Any]) -> dict[str, Any]:
+    """A place's result for one goal as the list needs it."""
+    return {"status": r["status"], "nice_score": r["nice_score"],
+            "reasons": [t for s, t, *_ in r["reasons"] if s != "pass"],
+            "fails": r["fails"],  # the attribute of each reason, for red/amber facts
+            "unit_key": r["unit_key"], "source": r["source"], "source_id": r["source_id"]}
+
+
 def _parse_value(v: Any) -> Any:
     if not isinstance(v, str):
         return v
@@ -323,10 +333,14 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             out.setdefault(r["entity_key"], {})[r["attribute"]] = r
         return out
 
+    def effective() -> Any:
+        with lock:
+            return goalstore.effective_goals(conn)
+
     # ------------------------------------------------------------------ read API
     @app.get("/api/meta")
     def meta() -> dict[str, Any]:
-        goals = load_goals()
+        goals = effective()
         points = load_points()
         return {
             "db": Path(db_path).name,
@@ -370,11 +384,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             for gid, pres in res["places"].items():
                 r = pres.get(pk)
                 if r:
-                    goals[gid] = {"status": r["status"], "nice_score": r["nice_score"],
-                                  "reasons": [t for s, t, *_ in r["reasons"] if s != "pass"],
-                                  "fails": r["fails"],  # the attribute of each reason, for red/amber facts
-                                  "unit_key": r["unit_key"], "source": r["source"],
-                                  "source_id": r["source_id"]}
+                    goals[gid] = goal_view(r)
             title = next((x["title"] for x in rows if x.get("title")), None)
             cover = gather_photos([{**x, "data": json.loads(x["data"])} for x in rows], limit=1, files=files)
             a = anns.get(pk, {})
@@ -649,6 +659,8 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
     # ------------------------------------------------------------------ other writes
     @app.post("/api/annotations")
     def post_annotation(a: AnnotationIn) -> dict[str, Any]:
+        if a.entity_type == "goal":
+            raise HTTPException(400, "goals are edited through /api/goals")
         if a.rating is not None and not 1 <= a.rating <= 5:
             raise HTTPException(400, "rating must be 1 to 5")
         if a.rating is None and not (a.comment or "").strip():
@@ -657,6 +669,75 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             aid = append_annotation(conn, AUTHOR, a.entity_type, a.entity_key, a.attribute.strip().lower(),
                                     goal_id=a.goal_id, rating=a.rating, comment=a.comment)
         return {"id": aid}
+
+    # ------------------------------------------------------------------ goals (filter.goals): goals.toml is the
+    # seed; an edit, a new goal or a delete is an annotations row (goal / <id> / definition), latest wins
+    def goal_refs() -> dict[str, Any]:
+        pts = load_points()
+        return {"modes": MODES, "points": {p.id for v in pts.values() for p in v},
+                "sets": set(pts) | set(load_point_sets())}
+
+    def checked_goal(body: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return goalstore.validate_goal(body, **goal_refs())
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
+
+    def save_goal(gid: str, d: dict[str, Any]) -> dict[str, Any]:
+        with lock:
+            aid = append_annotation(conn, AUTHOR, "goal", gid, "definition", comment=json.dumps(d, sort_keys=True))
+        return {"id": aid, "goal": gid}
+
+    @app.get("/api/goals")
+    def list_goals() -> dict[str, Any]:
+        seed = load_goals().goals
+        with lock:
+            edits = goalstore.goal_edits(conn)
+        refs = goal_refs()
+        return {
+            "goals": [{"id": g, "label": v.label, "rules": v.rules, "nice": v.nice,
+                       "origin": "new" if g not in seed else "edited" if g in edits else "goals.toml"}
+                      for g, v in effective().goals.items()],
+            "deleted": sorted(g for g, d in edits.items() if d is None),
+            # what the editor offers: rule types (label, required and optional keys), fields, presets
+            "types": {t: {"label": lab, "keys": req, "optional": opt} for t, (lab, req, opt) in RULE_TYPES.items()},
+            "numeric_fields": NUMERIC_FIELDS, "equals_fields": EQUALS_FIELDS, "known_fields": KNOWN_FIELDS,
+            "amenities": {k: {"match": w, "exclude": x} for k, (w, x) in AMENITY_FLAGS.items()},
+            "modes": refs["modes"], "points": sorted(refs["points"]), "sets": sorted(refs["sets"]),
+        }
+
+    @app.post("/api/goals")
+    def create_goal(body: dict[str, Any]) -> dict[str, Any]:
+        d = checked_goal(body)
+        gid = body.get("id") or re.sub(r"[^a-z0-9]+", "_", d["label"].lower()).strip("_")[:40]
+        try:
+            goalstore.check_id(gid)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
+        if gid in effective().goals:
+            raise HTTPException(409, f"goal {gid!r} exists")
+        return save_goal(gid, d)
+
+    @app.put("/api/goals/{gid}")
+    def update_goal(gid: str, body: dict[str, Any]) -> dict[str, Any]:
+        if gid not in effective().goals:
+            raise HTTPException(404, f"no goal {gid!r}")
+        return save_goal(gid, checked_goal(body))
+
+    @app.delete("/api/goals/{gid}")
+    def delete_goal(gid: str) -> dict[str, Any]:
+        if gid not in effective().goals:
+            raise HTTPException(404, f"no goal {gid!r}")
+        return save_goal(gid, {"deleted": True})
+
+    @app.post("/api/goals/preview")
+    def preview_goal(body: dict[str, Any]) -> dict[str, Any]:
+        """An unsaved goal judged on the stored data, writes nothing: place_key -> the same per-goal entry as
+        /api/places, for the list while you edit."""
+        d = checked_goal(body)
+        inp = cached("goal_inputs", lambda: goal_inputs(conn))
+        _, pres = evaluate_goal(inp, Goal(**d))
+        return {"places": {pk: goal_view(r) for pk, r in pres.items()}}
 
     # The list filters saved for everyone: annotations rows (view / list / filters, the JSON in `comment`); the
     # latest row is the saved set. Each browser keeps its own unsaved changes in localStorage.

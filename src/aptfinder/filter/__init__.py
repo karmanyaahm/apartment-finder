@@ -8,7 +8,7 @@ import sqlite3
 from collections import defaultdict
 from typing import Any
 
-from ..config import GoalsConfig, load_goals
+from ..config import Goal, GoalsConfig, load_goals
 from ..plans import inherit_prices, is_own_priced
 from ..verify import accuracy, low_accuracy
 from .rules import CHECK, FAIL, PASS, RANK, Ctx, combine, evaluate, fact
@@ -63,10 +63,10 @@ def place_annotations(conn: sqlite3.Connection) -> dict[str, dict[str, dict[str,
     return out
 
 
-def evaluate_all(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> dict[str, Any]:
-    """{'listings': {goal: {(source, source_id): result}}, 'places': {goal: {place_key: result}}}.
-    A result is {status, reasons: [(status, text, type)], fails: [{s, f, v, ...}] (rules.fact of each non-pass
-    rule, in reasons order), nice: [(status, text, type)], nice_score}."""
+def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> dict[str, Any]:
+    """Everything a goal is judged on, read once: the offer rows (amenities pooled per place), trips, place
+    annotations, low-accuracy source fields and the places whose own site prices offers. Reused by evaluate_all
+    for every goal and by the dashboard's draft preview (evaluate_goal on one unsaved goal)."""
     cfg = cfg or load_goals()
     trips = best_trips(conn)
     anns = place_annotations(conn)
@@ -90,32 +90,50 @@ def evaluate_all(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> di
         if r["place_key"] in pooled:
             own_am = json.loads(r["amenities"]) if isinstance(r.get("amenities"), str) else (r.get("amenities") or [])
             r["amenities"] = sorted(pooled[r["place_key"]] | set(own_am))
+    return {"listings": listings, "trips": trips, "anns": anns, "low": low, "own": own}
+
+
+def evaluate_goal(inp: dict[str, Any], goal: Goal) -> tuple[dict[tuple[str, str], Any], dict[str, Any]]:
+    """(listing results, place results) of one goal over goal_inputs."""
+    listings, trips, anns, low, own = inp["listings"], inp["trips"], inp["anns"], inp["low"], inp["own"]
+    lres: dict[tuple[str, str], Any] = {}
+    pres: dict[str, Any] = {}
+    for row in listings:
+        pk = row["place_key"]
+        t = trips.get(pk, {})
+        ctx = Ctx(trips=t, nearest=nearest_by_set(t), annotations=anns.get(pk, {}),
+                  untrusted={f for (src, f) in low if src == row["source"]})
+        # (status, text, rule type): the type lets callers set aside commute rules (routing_candidates)
+        reasons = [(*evaluate(r, row, ctx), r["type"]) for r in goal.rules]
+        nice = [(*evaluate(r, row, ctx), r["type"]) for r in goal.nice]
+        decides = pk not in own or is_own_priced(row)
+        # the attribute each non-pass rule judges (rules.fact), in reasons order: cards mark it red or amber
+        fails = [{"s": s, **fact(r, row)} for r, (s, _, _) in zip(goal.rules, reasons) if s != PASS]
+        res = {"status": combine([s for s, _, _ in reasons]), "reasons": reasons, "fails": fails, "nice": nice,
+               "nice_score": sum(s == PASS for s, _, _ in nice), "source": row["source"],
+               "source_id": row["source_id"], "unit_key": row["unit_key"], "place_key": pk,
+               "decides": decides, "own_site": pk in own}
+        lres[(row["source"], row["source_id"])] = res
+        if pk is None or not decides:
+            continue
+        best = pres.get(pk)
+        if best is None or (RANK[res["status"]], -res["nice_score"]) < (RANK[best["status"]], -best["nice_score"]):
+            pres[pk] = res
+    return lres, pres
+
+
+def evaluate_all(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> dict[str, Any]:
+    """{'listings': {goal: {(source, source_id): result}}, 'places': {goal: {place_key: result}}}.
+    A result is {status, reasons: [(status, text, type)], fails: [{s, f, v, ...}] (rules.fact of each non-pass
+    rule, in reasons order), nice: [(status, text, type)], nice_score}. `cfg` defaults to the effective goal set
+    (goals.toml overlaid by the dashboard's goal edits, filter.goals.effective_goals)."""
+    from .goals import effective_goals
+
+    cfg = cfg or effective_goals(conn)
+    inp = goal_inputs(conn, cfg)
     out: dict[str, Any] = {"listings": {}, "places": {}}
     for gid, goal in cfg.goals.items():
-        lres, pres = {}, {}
-        for row in listings:
-            pk = row["place_key"]
-            t = trips.get(pk, {})
-            ctx = Ctx(trips=t, nearest=nearest_by_set(t), annotations=anns.get(pk, {}),
-                      untrusted={f for (src, f) in low if src == row["source"]})
-            # (status, text, rule type): the type lets callers set aside commute rules (routing_candidates)
-            reasons = [(*evaluate(r, row, ctx), r["type"]) for r in goal.rules]
-            nice = [(*evaluate(r, row, ctx), r["type"]) for r in goal.nice]
-            decides = pk not in own or is_own_priced(row)
-            # the attribute each non-pass rule judges (rules.fact), in reasons order: cards mark it red or amber
-            fails = [{"s": s, **fact(r, row)} for r, (s, _, _) in zip(goal.rules, reasons) if s != PASS]
-            res = {"status": combine([s for s, _, _ in reasons]), "reasons": reasons, "fails": fails, "nice": nice,
-                   "nice_score": sum(s == PASS for s, _, _ in nice), "source": row["source"],
-                   "source_id": row["source_id"], "unit_key": row["unit_key"], "place_key": pk,
-                   "decides": decides, "own_site": pk in own}
-            lres[(row["source"], row["source_id"])] = res
-            if pk is None or not decides:
-                continue
-            best = pres.get(pk)
-            if best is None or (RANK[res["status"]], -res["nice_score"]) < (RANK[best["status"]], -best["nice_score"]):
-                pres[pk] = res
-        out["listings"][gid] = lres
-        out["places"][gid] = pres
+        out["listings"][gid], out["places"][gid] = evaluate_goal(inp, goal)
     return out
 
 
@@ -160,4 +178,4 @@ def routing_candidates(conn: sqlite3.Connection, cfg: GoalsConfig | None = None,
     return out
 
 
-__all__ = ["evaluate_all", "routing_candidates", "amenity_flags", "AMENITY_FLAGS", "best_trips", "nearest_by_set", "PASS", "FAIL", "CHECK"]
+__all__ = ["evaluate_all", "evaluate_goal", "goal_inputs", "routing_candidates", "amenity_flags", "AMENITY_FLAGS", "best_trips", "nearest_by_set", "PASS", "FAIL", "CHECK"]
