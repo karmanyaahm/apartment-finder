@@ -284,3 +284,20 @@ def test_compute_is_refused_in_the_redacted_view(tmp_path):
     spec = {"point": "commute_targets:Meta HQ", "mode": "drive", "scope": "zone"}
     assert c.post("/api/compute/dry_run", json=spec).status_code == 403
     assert c.post("/api/compute/run", json=spec).status_code == 403
+
+
+def test_merge_a_duplicate_place(client):
+    """Split a listing off into its own place, then merge it back from the drawer: the listings move as user
+    links and keep their own unit."""
+    c, _ = client
+    places = c.get("/api/places").json()
+    showers = next(p for p in places if "Showers" in p["label"])
+    pk = c.post("/api/links", json={"source": "apartments_com", "source_id": "ac-55102", "place_key": None}).json()["place_key"]
+    n = len(c.get("/api/places").json())
+    assert c.post(f"/api/places/{pk}/merge", json={"into": pk}).status_code == 400
+    r = c.post(f"/api/places/{pk}/merge", json={"into": showers["place_key"]})
+    assert r.status_code == 200 and r.json()["merged"] == 1
+    assert len(c.get("/api/places").json()) == n - 1
+    det = c.get(f"/api/places/{showers['place_key']}").json()
+    assert "apartments_com" in {l["source"] for l in det["listings"]}
+    assert all(l["unit_key"].startswith(showers["place_key"]) for l in det["listings"])

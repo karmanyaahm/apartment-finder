@@ -217,6 +217,10 @@ class ComputeIn(BaseModel):
     confirm_calls: int | None = None  # Google: the dry run's call count, used as this run's cap
 
 
+class MergeIn(BaseModel):
+    into: str  # the place this one's listings join
+
+
 class LinkIn(BaseModel):
     source: str
     source_id: str
@@ -460,6 +464,8 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             "matrix": matrix,
             "nearest": nearest,
             "annotations": anns,
+            # other places within 300 m, for a manual merge of a duplicate building
+            "nearby": nearby_places(place_key),
             # the building and its third-party stay places (`<building>~<operator>`), linked both ways
             "related": [dict(r, label=place_label(r)) for r in q(
                 "SELECT place_key, property_name, operator, address, n_active, min_lease_month, min_stay_month "
@@ -640,6 +646,43 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         with lock:
             aid = append_annotation(conn, AUTHOR, "view", "list", "filters", comment=json.dumps(f, sort_keys=True))
         return {"id": aid}
+
+    def nearby_places(place_key: str, max_m: float = 300.0, n: int = 8) -> list[dict[str, Any]]:
+        from ..commute.geo import haversine_m
+
+        allp = all_places()
+        me = allp.get(place_key)
+        if not me or me.get("lat") is None:
+            return []
+        out = []
+        for k, p in allp.items():
+            if k == place_key or p.get("lat") is None or "~" in k:
+                continue
+            d = haversine_m((me["lat"], me["lon"]), (p["lat"], p["lon"]))
+            if d <= max_m:
+                out.append({"place_key": k, "label": place_label(p) or k, "address": p.get("address"),
+                            "metres": round(d), "n_listings": p.get("n_listings")})
+        return sorted(out, key=lambda x: x["metres"])[:n]
+
+    @app.post("/api/places/{place_key}/merge")
+    def merge_place(place_key: str, body: MergeIn) -> dict[str, Any]:
+        """Every listing of this place becomes the other place's, as user links (append-only; each listing keeps
+        its own unit: '<this place>/<unit>' -> '<other place>/<unit>'). Undo a listing with 'split'."""
+        if body.into == place_key:
+            raise HTTPException(400, "a place cannot merge into itself")
+        if not q("SELECT 1 FROM places WHERE place_key = ?", (body.into,)):
+            raise HTTPException(404, "no such place to merge into")
+        rows = q("SELECT source, source_id, unit_key FROM listings WHERE place_key = ?", (place_key,))
+        if not rows:
+            raise HTTPException(404, "no listings at this place")
+        with lock:
+            for r in rows:
+                uk = r["unit_key"] or place_key
+                unit = body.into + uk[len(place_key):] if uk.startswith(place_key) else body.into
+                append_link(conn, AUTHOR, r["source"], r["source_id"], body.into, unit,
+                            f"manual merge of {place_key}", commit=False)
+            conn.commit()
+        return {"merged": len(rows), "into": body.into}
 
     @app.post("/api/links")
     def post_link(link: LinkIn) -> dict[str, Any]:

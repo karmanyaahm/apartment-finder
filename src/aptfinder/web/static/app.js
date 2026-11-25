@@ -544,6 +544,10 @@ async function openPlace(pk) {
     <h3>Goals</h3>${goals}
     ${photos.length ? `<h3>Photos (${photos.length})</h3><div class="media">${photos.join("")}</div>` : '<p class="muted small">No photos from any source.</p>'}
     ${relatedBox}
+    ${(d.nearby || []).length ? `<details class="merge small"><summary>Same building as a nearby place? Merge…</summary>
+      ${d.nearby.map((n) => `<div><button class="small" data-merge-into="${esc(n.place_key)}">merge into</button>
+        ${esc(n.label)} <span class="muted">${esc(n.address || "")} · ${n.metres} m · ${n.n_listings ?? 0} listings</span></div>`).join("")}
+    </details>` : ""}
     <h3>${isStay ? "Furnished stays" : "Floor plans"}</h3>${planTable}
     ${listingTable}
     <h3>Price history (per month)</h3>${historyChart([...d.listings].sort((a, b) => b.history.length - a.history.length).slice(0, 8))}
@@ -593,6 +597,14 @@ function wireDrawer(pk) {
         .then((r) => { pre.textContent = JSON.stringify(r.item, null, 2); })
         .catch((e) => { pre.textContent = "not available: " + e.message; });
     }
+  }));
+  $$("#drawer [data-merge-into]").forEach((b) => b.addEventListener("click", async () => {
+    const into = b.dataset.mergeInto;
+    if (!confirm(`Merge every listing here into "${b.parentElement.textContent.replace("merge into", "").trim().split("\n")[0]}"? (undo per listing with split)`)) return;
+    try {
+      const r = await post(`api/places/${encodeURIComponent(pk)}/merge`, { into });
+      toast(`Merged ${r.merged} listings`); await loadPlaces(); openPlace(into);
+    } catch (err) { toast("Merge failed: " + err.message, 6000); }
   }));
   $$("#drawer [data-split]").forEach((b) => b.addEventListener("click", async () => {
     const [source, source_id] = b.dataset.split.split("|");
