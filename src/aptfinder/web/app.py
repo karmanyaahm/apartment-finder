@@ -285,9 +285,11 @@ class LinkIn(BaseModel):
 
 def goal_view(r: dict[str, Any], commute: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """A place's result for one goal as the list needs it. `commute`: the net-commute terms, [minutes or null,
-    estimate, trip] per hard commute rule of the goal (filter.place_commute_terms), combined on the card; `trip`
-    (rules.commute_trips) is what the card's hover lists, so the list and the number are the same terms."""
-    return {"commute": [[d["minutes"], d["est"], d] for d in commute or []],"status": r["status"], "nice_score": r["nice_score"],
+    estimate, trip] per counted commute rule of the goal (filter.place_commute_terms), combined on the card; `trip`
+    (rules.commute_trips) is what the card's hover lists, so the list and the number are the same terms.
+    `commute_off`: the trips of must-haves unticked from the net commute, listed on hover as not counted."""
+    return {"commute": [[d["minutes"], d["est"], d] for d in commute or [] if not d.get("off")],
+            "commute_off": [d for d in commute or [] if d.get("off")], "status": r["status"], "nice_score": r["nice_score"],
             "reasons": [t for s, t, *_ in r["reasons"] if s != "pass"],
             "fails": r["fails"],  # the attribute of each reason, for red/amber facts
             "unit_key": r["unit_key"], "source": r["source"], "source_id": r["source_id"]}

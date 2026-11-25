@@ -29,13 +29,19 @@ class Ctx:
     nearest: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)  # (set, mode) -> best
     annotations: dict[str, dict[str, Any]] = field(default_factory=dict)  # attribute -> latest
     untrusted: set[str] = field(default_factory=set)  # fields of this listing's source with low accuracy
-    commute_rules: list[dict[str, Any]] = field(default_factory=list)  # the goal's hard commute rules (net_commute)
+    commute_rules: list[dict[str, Any]] = field(default_factory=list)  # the goal's counted commute rules (net_commute)
 
 
 # ---------------------------------------------------------------- net commute: one term per commute rule of a goal
 # (a roommate each). A term is the minutes that rule reads: commute_any, its fastest option with a time; near, the
 # nearest point of the set by that mode. Unknown terms are never counted as 0.
 AGGS = ["total", "mean", "median", "spread"]  # spread: standard deviation, low = everyone's commute is alike
+
+
+def in_net(rule: dict[str, Any], must: bool) -> bool:
+    """Whether a commute_any / near rule is a term of its goal's net commute: its `in_net` when set (the editor's
+    'count in net commute' box), else a must-have counts and a nice-to-have does not."""
+    return rule.get("in_net", must)
 
 
 def commute_trips(rules: list[dict[str, Any]], trips: dict[tuple[str, str], dict[str, Any]],
@@ -323,8 +329,8 @@ RULE_TYPES: dict[str, tuple[str, list[str], list[str]]] = {
     "equals": ("field equals", ["field", "value"], []),
     "size_options": ("beds / baths", ["options"], []),
     "dates_cover": ("available for dates", ["start", "end"], []),
-    "commute_any": ("commute to a point", ["target", "options"], []),
-    "near": ("nearest point of a set", ["set", "mode", "max"], []),
+    "commute_any": ("commute to a point", ["target", "options"], ["in_net"]),
+    "near": ("nearest point of a set", ["set", "mode", "max"], ["in_net"]),
     "amenity": ("amenity", ["name"], ["match", "exclude"]),
     "known": ("field known", ["field"], []),
     "net_commute": ("net commute", ["agg", "max"], []),
@@ -395,6 +401,8 @@ def validate_rule(rule: Any, *, modes: list[str], points: set[str], sets: set[st
             return f"near: mode must be one of {', '.join(modes)}"
         if not _num(rule["max"]) or rule["max"] <= 0:
             return "near: max must be minutes > 0"
+    if t in ("commute_any", "near") and not isinstance(rule.get("in_net", True), bool):
+        return f"{t}: in_net must be true or false"
     if t == "net_commute":
         if rule["agg"] not in AGGS:
             return f"net_commute: agg must be one of {', '.join(AGGS)}"

@@ -237,3 +237,37 @@ def test_a_net_commute_fail_still_nominates_for_routing(client):
     assert any(r["status"] == "fail" for r in res["places"]["net_only"].values())
     cands = routing_candidates(conn, res=res)
     assert all("net_only" in cands.get(pk, set()) for pk in res["places"]["net_only"])
+
+
+# ---------------------------------------------------------------- in_net: which commute rules the net commute counts
+def test_in_net_defaults_and_validation():
+    from aptfinder.config import Goal
+    from aptfinder.filter import net_rules
+    from aptfinder.filter.rules import RULE_TYPES
+    assert "in_net" in RULE_TYPES["commute_any"][2] and "in_net" in RULE_TYPES["near"][2]
+    near = {"type": "near", "set": "caltrain_stations", "mode": "walk", "max": 20}
+    assert validate_rule({**near, "in_net": False}, modes=MODES, points=set(), sets={"caltrain_stations"}) is None
+    assert "in_net" in validate_rule({**near, "in_net": "no"}, modes=MODES, points=set(), sets={"caltrain_stations"})
+    g = Goal(label="g", rules=[ROOMMATES[0], {**ROOMMATES[1], "in_net": False}, ROOMMATES[2]],
+             nice=[{**near, "set": "bus"}, {**near, "set": "tram", "in_net": True}])
+    counted, off = net_rules(g)
+    # unset: a must-have counts (today's behaviour, both types), a nice-to-have does not
+    assert counted == [ROOMMATES[0], ROOMMATES[2], {**near, "set": "tram", "in_net": True}]
+    assert off == [{**ROOMMATES[1], "in_net": False}]
+
+
+def test_unticked_rule_leaves_the_net_commute(client):
+    c, _ = client
+    bike = {"type": "commute_any", "target": "commute_targets:Downtown Palo Alto", "options": [{"mode": "bike", "max": 30}]}
+    near = {"type": "near", "set": "caltrain_stations", "mode": "walk", "max": 30}
+    base = {"label": "x", "rules": [bike, near], "nice": []}
+    both = c.post("/api/goals/preview", json=base).json()["places"]
+    one = c.post("/api/goals/preview", json={**base, "rules": [bike, {**near, "in_net": False}]}).json()["places"]
+    nice = c.post("/api/goals/preview", json={**base, "rules": [bike], "nice": [{**near, "in_net": True}]}).json()["places"]
+    assert both and any(r["commute"][1][0] is not None for r in both.values())  # some place has a Caltrain time
+    for pk, r in both.items():
+        assert len(r["commute"]) == 2 and r["commute_off"] == []
+        assert one[pk]["commute"] == r["commute"][:1]  # the near term is out of the number ...
+        assert [d["set"] for d in one[pk]["commute_off"]] == ["caltrain_stations"]  # ... and listed as not counted
+        assert one[pk]["commute_off"][0]["off"] is True
+        assert nice[pk]["commute"] == r["commute"]  # a ticked nice-to-have counts like a must-have

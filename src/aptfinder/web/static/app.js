@@ -247,8 +247,9 @@ function limitFacts(p, fails = []) {
 }
 
 /* ---------------------------------------------------------------- net commute: the goal's commute rules together */
-// Each place's goal result carries `commute`: [minutes or null, estimate] per hard commute rule of the goal (one
-// per roommate), the same time each rule checks. The Net selector picks how they combine: total, mean, median or
+// Each place's goal result carries `commute`: [minutes or null, estimate, trip] per counted commute rule of the goal
+// (one per roommate; a must-have counts unless its 'count in net commute' box is unticked, a nice-to-have only when
+// ticked: filter.net_rules), the same time each rule checks; `commute_off` the unticked must-haves' trips (hover only). The Net selector picks how they combine: total, mean, median or
 // spread (standard deviation: low = everyone's commute is alike). Unknown terms are never counted as 0: the card
 // says how many are unknown and the sort puts such places after the complete ones. All shows no net commute.
 function aggregate(vals, agg) {
@@ -272,18 +273,20 @@ function netTripLine(d) {
   const where = d.set ? `nearest ${S.meta.point_sets?.[d.set]?.label || d.set}${d.point ? ` (${d.point.split(":").slice(1).join(":")})` : ""}`
     : (d.point || "").split(":").slice(1).join(":");
   const head = `${d.mode ? `${MODE_LABEL[d.mode] || d.mode} ` : ""}to ${where}`;
+  if (d.off) return `– ${head}${d.minutes != null ? ` ${mins(d.minutes)} min` : ""}: not counted: unticked · rule ${d.rule}`;
   if (d.minutes == null) return `✗ ${head}: skipped, ${d.why || "no time"} (not counted) · rule ${d.rule}`;
   const src = d.provider === "knn"
     ? `KNN range ${mins(d.min)}–${mins(d.max)} of ${d.n || "?"} nearby Google route${d.n === 1 ? "" : "s"}; uses their median ${mins(d.minutes)}`
     : d.provider === "google" ? "Google" : d.provider === "estimate" ? "straight-line estimate" : d.provider;
   return `✓ ${head} ${mins(d.minutes)} min (${src}) · rule ${d.rule}`;
 }
-function netTrips(terms) {
-  return (terms || []).filter((t) => t[2]).map((t) => netTripLine(t[2]));
+// the counted terms' trips, then the unticked must-haves' (`off`: not counted)
+function netTrips(terms, off) {
+  return [...(terms || []).filter((t) => t[2]).map((t) => t[2]), ...(off || [])].map(netTripLine);
 }
 function netTip(p) {
-  const terms = S.goal === "all" ? null : p.goals[S.goal]?.commute;
-  const lines = netTrips(terms);
+  const g = S.goal === "all" ? null : p.goals[S.goal];
+  const lines = g?.commute?.length ? netTrips(g.commute, g.commute_off) : [];
   return lines.length ? `net commute (${$("#agg").value}) over these trips:\n${lines.join("\n")}` : "";
 }
 function netFact(p, fails) {
@@ -340,7 +343,7 @@ function ruleTemplates() {
     ["parking cost at most ($/month)", { type: "max", field: "parking_usd_month", value: 100 }],
     ["available for dates", { type: "dates_cover", start: new Date().toISOString().slice(0, 10), end: new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10) }],
     ["field known", { type: "known", field: "sqft" }],
-    ["net commute (the must-have commute rules)", { type: "net_commute", agg: $("#agg").value || "total", max: 90 }],
+    ["net commute (the commute rules counted in it)", { type: "net_commute", agg: $("#agg").value || "total", max: 90 }],
   ];
 }
 const opt = (v, label, sel) => `<option value="${esc(v)}"${String(v) === String(sel) ? " selected" : ""}>${esc(label)}</option>`;
@@ -348,8 +351,9 @@ const FIELD_LABEL = { price: "price", price_month: "price / month", price_per_be
   sqft: "sqft", term: "term", furnished: "furnished", private_bath: "private bath", kind: "kind", restriction: "who may rent",
   parking_included: "parking included", parking_spots: "parking spots", parking_usd_month: "parking $/month" };
 const fieldName = (f) => FIELD_LABEL[f] || f.replace(/_/g, " ");
-// one rule row's inputs; each input names the path it sets in data-p ("value", "options.0.max", ...)
-function ruleInputs(r) {
+// one rule row's inputs; each input names the path it sets in data-p ("value", "options.0.max", ...); `part` is
+// "rules" (must-haves) or "nice"
+function ruleInputs(r, part) {
   const G = S.goalsData;
   // the width is per kind (style.css .num-*): room for the largest realistic value plus the spinner
   const numIn = (p, v, kind, step = "any") => `<input data-p="${p}" data-num type="number" class="num-${kind}" step="${step}" value="${v ?? ""}">`;
@@ -364,7 +368,7 @@ function ruleInputs(r) {
       <select data-p="value" data-json>${vals.map((v) => opt(JSON.stringify(v), v === true ? "yes" : v === false ? "no" : v, JSON.stringify(r.value))).join("")}</select>`;
   }
   if (r.type === "net_commute") {
-    return `<select data-p="agg">${G.aggs.map((a) => opt(a, a, r.agg)).join("")}</select> of the commute rules ≤ ${numIn("max", r.max, "min", 1)} min`;
+    return `<select data-p="agg">${G.aggs.map((a) => opt(a, a, r.agg)).join("")}</select> of the commute rules counted in it ≤ ${numIn("max", r.max, "min", 1)} min`;
   }
   if (r.type === "known") return `<select data-p="field">${G.known_fields.map((f) => opt(f, fieldName(f), r.field)).join("")}</select> known`;
   if (r.type === "size_options") {
@@ -379,10 +383,14 @@ function ruleInputs(r) {
     const mOpts = (sel) => [...S.meta.modes, ...(sel && !S.meta.modes.includes(sel) ? [sel] : [])]
       .map((m) => opt(m, MODE_LABEL[m] || m, sel)).join("");
     const rows = r.type === "near" ? [{ mode: r.mode, max: r.max }] : r.options;
+    // 'count in net commute' (rules.in_net, an optional key /api/goals advertises): unset = a must-have counts, a
+    // nice-to-have does not
+    const net = G.types[r.type]?.optional?.includes("in_net")
+      ? ` <label class="in-net small" title="Count this trip in the net commute (the card's net commute, its sort and a net-commute rule). Default: on for a must-have, off for a nice-to-have."><input type="checkbox" data-innet${(r.in_net ?? part === "rules") ? " checked" : ""}> count in net commute</label>` : "";
     return `<select data-pt>${limitOptions().map(([v, l]) => opt(v, l, pt)).join("")}</select> `
       + rows.map((o, i) => `<span class="sub"><select data-p="${r.type === "near" ? "mode" : `options.${i}.mode`}">${mOpts(o.mode)}</select>
         ≤ ${numIn(r.type === "near" ? "max" : `options.${i}.max`, o.max, "min", 1)} min${rows.length > 1 ? ` <button type="button" class="small" data-rm-opt="${i}" title="remove this mode">×</button>` : ""}</span>`).join(" or ")
-      + (r.type === "commute_any" ? ` <button type="button" class="small" data-add-opt="mode" title="another mode that also counts">+ or</button>` : "");
+      + (r.type === "commute_any" ? ` <button type="button" class="small" data-add-opt="mode" title="another mode that also counts">+ or</button>` : "") + net;
   }
   if (r.type === "amenity") {
     const preset = Object.keys(G.amenities).includes(r.name) ? r.name : "";
@@ -400,7 +408,7 @@ function setPath(o, path, v) {
 }
 function renderRuleList(part) {
   return S.draft[part].map((r, i) => `<div class="rule" data-part="${part}" data-i="${i}">
-      <span class="rule-kind">${esc(S.goalsData.types[r.type]?.label || r.type)}</span> ${ruleInputs(r)}
+      <span class="rule-kind">${esc(S.goalsData.types[r.type]?.label || r.type)}</span> ${ruleInputs(r, part)}
       <button type="button" class="small rm" data-rm title="remove">×</button></div>`).join("")
     || `<div class="muted small">none</div>`;
 }
@@ -461,6 +469,11 @@ function wireRule(row) {
     if (r.type === "equals" && el.dataset.p === "field") { r.value = S.goalsData.equals_fields[r.field][0]; return changed(true); }
     changed(false);
   }));
+  // the 'count in net commute' box: stored only when it differs from the part's default, so a goal untouched stays as is
+  $("[data-innet]", row)?.addEventListener("change", (e) => {
+    if (e.target.checked === (row.dataset.part === "rules")) delete r.in_net; else r.in_net = e.target.checked;
+    changed(false);
+  });
   $("[data-op]", row)?.addEventListener("change", (e) => {
     const o = e.target.value;
     r.type = o === "≤" || o === "<" ? "max" : "min";
@@ -470,9 +483,10 @@ function wireRule(row) {
   $("[data-pt]", row)?.addEventListener("change", (e) => {
     const pt = e.target.value;
     const first = r.type === "near" ? { mode: r.mode, max: r.max } : r.options[0];
+    const net = r.in_net;
     for (const k of Object.keys(r)) delete r[k];
     Object.assign(r, pt.startsWith("set:") ? { type: "near", set: pt.slice(4), mode: first.mode, max: first.max }
-      : { type: "commute_any", target: pt, options: [first] });
+      : { type: "commute_any", target: pt, options: [first] }, net === undefined ? {} : { in_net: net });
     changed(true);
   });
   $$("[data-add-opt]", row).forEach((b) => b.addEventListener("click", () => {
@@ -915,12 +929,13 @@ async function openPlace(pk) {
   // the net commute's trips (the list's own terms for this place, so the drawer and the card read the same list)
   const lp = S.places.find((x) => x.place_key === pk);
   const goals = Object.entries(d.goals).filter(([g, r]) => r && (S.goal === "all" || g === S.goal)).map(([g, r]) => {
-    const nt = netTrips(lp?.goals?.[g]?.commute);
+    const nc = lp?.goals?.[g]?.commute || [];
+    const nt = nc.length ? netTrips(nc, lp.goals[g].commute_off) : [];
     const ntTip = nt.length ? ` title="${esc(`trips in the net commute:\n${nt.join("\n")}`)}"` : "";
     return `
     <div><span class="chip ${r.status}">${esc(g)}: ${esc(STATUS_LABEL[r.status])}</span>${r.own_site ? ' <span class="small muted" title="The building\'s own website prices offers here, so only its listings decide the goals; other sources are shown as \'also listed\'.">judged on the own website</span>' : ""}
       ${r.reasons.map(([s, t, ty]) => `<div class="reason ${s}"${ty === "net_commute" ? ntTip : ""}>${s === "pass" ? "✓" : s === "fail" ? "✗" : "?"} ${esc(t)}</div>`).join("")}
-      ${nt.length ? `<details class="net-trips small"><summary>net commute: ${nt.length} trip${nt.length > 1 ? "s" : ""}</summary>${nt.map((x) => `<div>${esc(x)}</div>`).join("")}</details>` : ""}
+      ${nt.length ? `<details class="net-trips small"><summary>net commute: ${nc.length} trip${nc.length > 1 ? "s" : ""}</summary>${nt.map((x) => `<div>${esc(x)}</div>`).join("")}</details>` : ""}
       ${r.nice.length ? `<div class="small muted">nice to have: ${r.nice.map(([s, t]) => `${s === "pass" ? "✓" : s === "fail" ? "✗" : "?"} ${esc(t)}`).join(" · ")}</div>` : ""}
     </div>`;
   }).join("");

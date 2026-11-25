@@ -11,7 +11,7 @@ from typing import Any
 from ..config import Goal, GoalsConfig, load_goals, operator_restriction
 from ..plans import inherit_baths, inherit_prices, is_own_priced
 from ..verify import accuracy, low_accuracy
-from .rules import CHECK, FAIL, PASS, RANK, Ctx, combine, commute_trips, evaluate, fact
+from .rules import CHECK, FAIL, PASS, RANK, Ctx, combine, commute_trips, evaluate, fact, in_net
 
 PROVIDER_PREF = {"google": 0, "knn": 1, "estimate": 9}
 
@@ -294,7 +294,7 @@ def place_restriction(rows: list[dict[str, Any]], anns: dict[str, dict[str, Any]
 def evaluate_goal(inp: dict[str, Any], goal: Goal) -> tuple[dict[tuple[str, str], Any], dict[str, Any]]:
     """(listing results, place results) of one goal over goal_inputs."""
     listings, trips, anns, low, own = inp["listings"], inp["trips"], inp["anns"], inp["low"], inp["own"]
-    commute = [r for r in goal.rules if r["type"] in COMMUTE_RULES]  # the terms of a net_commute rule
+    commute = net_rules(goal)[0]  # the terms of a net_commute rule
     lres: dict[tuple[str, str], Any] = {}
     pres: dict[str, Any] = {}
     for row in listings:
@@ -321,11 +321,23 @@ def evaluate_goal(inp: dict[str, Any], goal: Goal) -> tuple[dict[tuple[str, str]
     return lres, pres
 
 
+def net_rules(goal: Goal) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """(counted, unticked) commute rules of a goal's net commute (rules.in_net): counted = the must-haves not
+    unticked, then the nice-to-haves ticked; unticked = the must-haves whose box was unticked (shown, not counted)."""
+    must = [r for r in goal.rules if r["type"] in COMMUTE_RULES]
+    nice = [r for r in goal.nice if r["type"] in COMMUTE_RULES]
+    return ([r for r in must if in_net(r, True)] + [r for r in nice if in_net(r, False)],
+            [r for r in must if not in_net(r, True)])
+
+
 def place_commute_terms(goal: Goal, trips: dict[str, Any], pk: str) -> list[dict[str, Any]]:
-    """The net-commute terms of a place for a goal: the trip behind each of its hard commute rules
-    (rules.commute_trips; a term is its `minutes`, an estimate when its provider is estimate or knn)."""
+    """The net-commute terms of a place for a goal: the trip behind each of its counted commute rules
+    (net_rules, rules.commute_trips; a term is its `minutes`, an estimate when its provider is estimate or knn), then
+    the trip of each unticked must-have, marked `off` (listed on hover as not counted, never in the number)."""
     t = trips.get(pk, {})
-    return commute_trips([r for r in goal.rules if r["type"] in COMMUTE_RULES], t, nearest_by_set(t))
+    counted, off = net_rules(goal)
+    nearest = nearest_by_set(t)
+    return commute_trips(counted, t, nearest) + [{**d, "off": True} for d in commute_trips(off, t, nearest)]
 
 
 def evaluate_all(conn: sqlite3.Connection, cfg: GoalsConfig | None = None, trips: dict | None = None) -> dict[str, Any]:
