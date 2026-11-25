@@ -140,3 +140,8 @@ td.nowrap { white-space: nowrap; }
 .pipe tr.off td { opacity: .5; }
 .pipe td.cell { white-space: nowrap; }
 .pipe-place td { white-space: nowrap; }
+
+/* Pipeline panel: search areas map */
+.areas-map { height: 460px; border-radius: 8px; margin: 6px 0; }
+.area-key { display: inline-flex; align-items: center; gap: 4px; margin-right: 14px; }
+.area-key span { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }

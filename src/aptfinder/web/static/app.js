@@ -679,7 +679,9 @@ async function openPipeline() {
     <h2>Pipeline status</h2>
     <p class="muted small">Computed now from the logs (${esc(d.now.slice(0, 16).replace("T", " "))} UTC). Active chunks: ${esc(d.active.join(", ") || "none")}; headline states count only those. Stale = older than ${d.stale_days} days.
       ${["done", "partial", "stale", "todo", "blocked"].map((s) => stChip(s)).join(" ")}</p>
-    ${stuck}${statusBlock(S.status)}<h3>Stages</h3>${stages}
+    ${stuck}${statusBlock(S.status)}
+    <h3>Search areas</h3><div id="areas-map" class="areas-map"></div><div id="areas-legend" class="small"></div>
+    <h3>Stages</h3>${stages}
     <h3>Intake coverage (aggregators)</h3>${matrix}
     <details><summary>Runs per source</summary>${runs}</details>
     <h3>Websites of named buildings</h3>${webTable}
@@ -688,6 +690,70 @@ async function openPipeline() {
       <div class="scroll-x"><table><tr><th>station</th><th>target</th><th>routed</th></tr>
       ${anchors.map((a) => `<tr><td>${esc(a.station)}</td><td>${esc(a.target)}</td><td>${a.routed ? "Google" : '<span class="muted">estimate</span>'}</td></tr>`).join("")}</table></div></details>
   </div>`;
+  drawAreasMap().catch((e) => { $("#areas-legend").textContent = `Area map failed: ${e.message}`; });
+}
+
+/* ---------------------------------------------------------------- search areas map (Pipeline panel) */
+// One colour per area kind: what each source actually searches. ZIP and city outlines are drawn around the
+// listings those searches returned (or, for areas scraped before rows were tagged, the listings whose address
+// names them); a station box is its rectangle, with the walk circle it was drawn around.
+const AREA_STYLE = {
+  box: { color: "#2563eb", name: "station box" },
+  zip: { color: "#ea580c", name: "ZIP code" },
+  city: { color: "#16a34a", name: "city", plural: "cities" },
+};
+let areasMap = null;
+
+async function drawAreasMap() {
+  const d = await api("api/areas");
+  if (areasMap) { areasMap.remove(); areasMap = null; }
+  areasMap = L.map("areas-map", { scrollWheelZoom: false });
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+    { attribution: "© OpenStreetMap contributors", maxZoom: 19, opacity: 0.6 }).addTo(areasMap);
+  const groups = {};
+  const bounds = [];
+  for (const kind of ["city", "zip", "box"]) groups[kind] = L.featureGroup();
+  const stations = L.featureGroup();
+  for (const a of d.areas) {
+    const st = AREA_STYLE[a.kind];
+    const who = a.searched_by.length ? a.searched_by.join(", ") : "not searched yet";
+    const tip = `<b>${esc(a.label)}</b> · ${st.name}<br>${a.listings} listings · ${esc(who)}`
+      + (a.outside ? `<br>${a.outside} stray listings far away not drawn` : "")
+      + (a.outline === "by address" ? "<br><i>outline from listing addresses (scraped before areas were tagged)</i>" : "");
+    let shape = null;
+    if (a.bbox) {
+      const [s, w, n, e] = a.bbox;
+      shape = L.rectangle([[s, w], [n, e]], { color: st.color, weight: 2, fillOpacity: 0.06 });
+      L.circle([a.station.lat, a.station.lon], { radius: a.station.radius_m, color: "#555", weight: 1,
+        dashArray: "4 4", fill: false }).bindTooltip(`${esc(a.label)}: 25-minute walk`).addTo(stations);
+    } else if (a.hull.length >= 3) {
+      shape = L.polygon(a.hull, { color: st.color, weight: 2, fillOpacity: 0.08,
+        dashArray: a.outline === "by address" ? "6 4" : null });
+    } else if (a.hull.length) {
+      shape = L.circleMarker(a.hull[0], { color: st.color, radius: 6 });
+    }
+    if (!shape) continue;
+    shape.bindTooltip(tip, { sticky: true });
+    shape.addTo(groups[a.kind]);
+    bounds.push(shape.getBounds ? shape.getBounds() : L.latLngBounds([shape.getLatLng()]));
+  }
+  const overlays = {};
+  for (const kind of ["box", "zip", "city"]) {
+    const st = AREA_STYLE[kind];
+    overlays[`<span style="color:${st.color}">■</span> ${st.plural || st.name + "s"} (${esc(d.sources[kind].join(", "))})`] = groups[kind];
+  }
+  overlays["┅ station walk circles"] = stations;
+  groups.box.addTo(areasMap);
+  groups.zip.addTo(areasMap);
+  stations.addTo(areasMap);
+  L.control.layers(null, overlays, { collapsed: false }).addTo(areasMap);
+  if (bounds.length) areasMap.fitBounds(bounds.reduce((b, x) => b.extend(x), L.latLngBounds(bounds[0])), { padding: [10, 10] });
+  $("#areas-legend").innerHTML = ["box", "zip", "city"].map((k) =>
+    `<span class="area-key"><span style="background:${AREA_STYLE[k].color}"></span>${AREA_STYLE[k].name}: searched by ${esc(d.sources[k].join(", "))}</span>`).join("")
+    + ' <span class="muted">Hover a shape for its listings and sources. Dashed outline: drawn from listing addresses. Toggle kinds at top right.</span>'
+    + d.areas.filter((a) => a.scattered).map((a) => `<p class="reason fail">${esc(a.label)} (${AREA_STYLE[a.kind].name}): `
+      + `${esc(a.searched_by.join(", "))} returned ${a.listings} listings spread across the region, so the search ignored `
+      + `the location; not drawn.</p>`).join("");
 }
 
 // a site's last render, failure or not: "blocked (HTTP 403) on 11-24, will retry"

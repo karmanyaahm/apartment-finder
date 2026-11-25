@@ -455,6 +455,13 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         that would run the rest (aptfinder.pipeline)."""
         return cached("pipeline", lambda: pipeline.overview(conn))
 
+    @app.get("/api/areas")
+    def areas_map() -> dict[str, Any]:
+        """Every intake area with the sources that search its kind and its shape (aptfinder.area_map)."""
+        from ..area_map import area_map
+
+        return cached("area_map", lambda: area_map(conn))
+
     # ------------------------------------------------------------------ verify
     def _obs_fields(obs_id: int) -> dict[str, Any]:
         r = q("SELECT * FROM observations WHERE id = ?", (obs_id,))[0]
