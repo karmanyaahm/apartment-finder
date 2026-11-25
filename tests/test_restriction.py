@@ -19,6 +19,10 @@ def test_a_limit_needs_its_quote_and_none_needs_none():
     assert check_answer({"restriction": {"value": "income", "evidence": "Income limits apply"}}, text)["restriction"] \
         == {"value": "income", "evidence": "Income limits apply"}
     assert check_answer({"restriction": {"value": "none", "evidence": ""}}, text)["restriction"] == {"value": "none"}
+    glued = "Educator HousingAt least one member of your household is a current employee of Palo Alto Unified"
+    assert check_answer({"restriction": {"value": "employer", "evidence": "At least one member of your household is a "
+                                         "current employee of Palo Alto Unified"}}, glued)["restriction"]["value"] == \
+        "employer"
     # a claimed limit without its words in the text is unknown, not 'none'
     assert "restriction" not in check_answer({"restriction": {"value": "student", "evidence": "students only"}}, text)
     assert "restriction" not in check_answer({"restriction": {"value": "bogus", "evidence": "Income"}}, text)

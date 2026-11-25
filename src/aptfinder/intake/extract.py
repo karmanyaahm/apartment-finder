@@ -186,7 +186,8 @@ def check_answer(ans: dict[str, Any], text: str) -> dict[str, Any]:
         out["restriction"] = {"value": "none"}
     elif isinstance(rx, dict) and rx.get("value") in RESTRICTIONS:  # a limit needs its quote ('55+' -> '55')
         q = _norm(rx.get("evidence") or "")
-        if len(q) >= 2 and f" {q} " in f" {t} ":
+        # whole words, except a long quote may touch a word the scrape glued on ('Educator HousingAt least one ...')
+        if len(q) >= 2 and (f" {q} " in f" {t} " or (len(q) >= 20 and q in t)):
             out["restriction"] = {"value": rx["value"], "evidence": rx["evidence"]}
     return out
 
