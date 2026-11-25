@@ -239,6 +239,7 @@ class SampleRunIn(BaseModel):
     confirm_left: int | None = None  # more than TYPED_CONFIRM_OVER elements: the elements left this month, typed
 
 
+INTERRUPTED = "interrupted: the dashboard restarted mid-run"
 KNN_MODES = ["drive", "bike", "walk", "bike_train_bike"]  # the KNN grid's columns (bike+train: commute targets only)
 
 
@@ -932,6 +933,23 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
     # against the monthly caps), then a run in a background thread. A Google run must carry the dry run's call
     # count, which becomes its --max-calls, so it never spends more than the dry run showed.
     job: dict[str, Any] = {"state": "idle"}
+    # A job runs in a thread of this process, so a restart (a deploy) kills it mid-run and leaves its runs row open.
+    # On start, close out this dashboard's own open commute runs (params `from` = dashboard; a CLI or after-intake run
+    # in another process may still be going) and report them, instead of a bare 'idle' the page read as an error.
+    if redact is None:
+        with lock:
+            from ..store import finish_run
+
+            cut = [r for r in conn.execute("SELECT id, params FROM runs WHERE component = 'commute' AND "
+                                           "status = 'running' AND finished_at IS NULL").fetchall()
+                   if json.loads(r[1] or "{}").get("from") == "dashboard"]
+            for r in cut:
+                finish_run(conn, r[0], "error", {}, error=INTERRUPTED)
+            if cut:
+                job.update(state="error", interrupted=[r[0] for r in cut],
+                           result={"error": f"{INTERRUPTED} (run{'s' if len(cut) > 1 else ''} "
+                                            f"{', '.join(str(r[0]) for r in cut)}); press Run again: elements already "
+                                            "paid for are cached and not billed again"})
 
     def _compute_places(body: ComputeIn) -> list[str]:
         located = {r["place_key"]: (r["lat"], r["lon"]) for r in all_places().values() if r["lat"] is not None}
@@ -1097,6 +1115,28 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             memo.clear()
         return {"cells": sorted(set(map(tuple, body.cells)))}
 
+    def cell_accuracy(pairs: list[tuple[str, str]], keys: list[str]) -> dict[str, Any]:
+        """Per checked cell: how the scope's places get their time (own Google route / KNN range / estimate, %) and
+        the KNN accuracy by leave-one-out over every place with its own Google route (scope-free, cached per cell)."""
+        from .. import sampling
+
+        with lock:
+            trips = cached("best_trips", lambda: best_trips(conn))
+            loc = cached("located", lambda: sampling.located(conn))
+            return {"|".join(p): {**sampling.cell_shown(trips, p, keys),
+                                  "loo": cached(f"knn_loo|{'|'.join(p)}", lambda p=p: sampling.cell_loo(trips, p, loc))}
+                    for p in pairs}
+
+    @app.post("/api/knn/accuracy")
+    def knn_accuracy(body: SampleIn) -> dict[str, Any]:
+        """The Pipeline panel's accuracy table for the checked cells over the chosen scope (cell_accuracy)."""
+        from ..filter.knn import K, RADIUS_M, cells
+        from ..filter.rules import KNN_PAD_MIN
+
+        keys = _compute_places(body)
+        return {"cells": cell_accuracy(cells(conn), keys), "scope": len(keys), "radius_m": RADIUS_M, "knn_k": K,
+                "pad_min": KNN_PAD_MIN}
+
     @app.post("/api/sample/dry_run")
     def sample_dry_run(body: SampleIn) -> dict[str, Any]:
         """A sampling plan for the checked cells over the scope, with places, uncached Route Matrix elements and
@@ -1132,6 +1172,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             use = google_usage(conn)
         left = use["matrix_cap"] - use["matrix_elements"]
         return {**summ, "label": label, "plan": {"|".join(p): v for p, v in plan.items()}, "usage": use,
+                "accuracy": cell_accuracy(pairs, keys),
                 "left": left, "typed": summ["elements"] > TYPED_CONFIRM_OVER and left < 5000,
                 "skipped": [f"{p} x {m}: paid = false in point_sets.toml" for p, m in skipped]}
 
@@ -1166,7 +1207,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 begin_write(wconn, on_wait=lambda: job.update(note="waiting for the database (another job is writing)"))
                 job.pop("note", None)
                 res = route_plan(wconn, db_path, plan, body.label, body.confirm_elements,
-                                 progress=lambda d, t: job.update(done=d, new_trips=t))
+                                 progress=lambda d, t: job.update(done=d, new_trips=t), origin="dashboard")
                 final = {"state": "error" if res["error"] else "done",
                          "result": {"places": n, "places_done": n if not res["error"] else job.get("done", 0),
                                     "new_trips": res["new_trips"], "api_calls": res["api_calls"],

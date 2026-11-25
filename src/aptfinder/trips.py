@@ -363,10 +363,12 @@ def dry_run(db_path: str, provider: str, place_keys: list[str] | None = None, on
 
 
 def route_plan(conn: sqlite3.Connection, db_path: str, plan: dict[tuple[str, str], list[str]], label: str,
-               max_elements: int, max_calls: int = 20, progress=None) -> dict[str, Any]:
+               max_elements: int, max_calls: int = 20, progress=None, origin: str | None = None) -> dict[str, Any]:
     """Route a sampling plan (pair -> places) with Google: per pair, the uncached legs go through Compute Route
     Matrix (`MeteredMatrix`, per-element cap) into the leg cache, then `compute_all` appends the trips from it; a leg
-    the matrix left out goes to computeRoutes under `max_calls`. One `commute` run row per pair."""
+    the matrix left out goes to computeRoutes under `max_calls`. One `commute` run row per pair (params `from` =
+    `origin`: the dashboard closes its own runs a restart cut off). Each matrix request's elements are in the leg
+    cache as soon as it returns (`Commute.prefetch` commits per request), so a rerun never pays for them again."""
     from .store import finish_run, start_run
 
     key = settings.secret("GOOGLE_MAPS_API_KEY")
@@ -382,7 +384,8 @@ def route_plan(conn: sqlite3.Connection, db_path: str, plan: dict[tuple[str, str
         if not keys:
             continue
         before_e, before_c = matrix.elements, source.calls
-        run = start_run(conn, "commute", "google", {"sample": label, "only": list(p), "places": len(keys)})
+        run = start_run(conn, "commute", "google", {"sample": label, "only": list(p), "places": len(keys),
+                                                    **({"from": origin} if origin else {})})
         pre: dict[str, int] = {}
         try:
             pre = prefetch.prefetch(planned_legs(db_path, keys, p))

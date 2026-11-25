@@ -174,6 +174,11 @@ def test_knn_cells_and_sampling_endpoints(tmp_path, monkeypatch):
     pair = r["pairs"][f"{META}|drive"]
     assert r["scope"] == len(keys) and pair["places"] == round(len(keys) * 0.5) and r["elements"] == pair["elements"]
     assert r["plan"][f"{META}|drive"] and r["usage"]["matrix_elements"] == 0
+    acc = r["accuracy"][f"{META}|drive"]
+    assert acc["scope"] == len(keys) and acc["counts"]["google"] + acc["counts"]["knn"] + acc["counts"]["estimate"] == len(keys)
+    assert set(acc["loo"]) == {"n", "median", "p95", "inside_pct"}
+    a2 = c.post("/api/knn/accuracy", json={"scope": "list", "place_keys": keys}).json()
+    assert a2["cells"][f"{META}|drive"] == acc and a2["pad_min"] == 0.5
     cover = c.post("/api/sample/dry_run", json={"method": "cover", "radius_m": 400, "scope": "list",
                                                 "place_keys": keys}).json()
     assert cover["pairs"][f"{META}|drive"]["covered_after"] == len(keys)
@@ -196,4 +201,76 @@ def test_knn_cells_and_sampling_endpoints(tmp_path, monkeypatch):
     n = conn.execute("SELECT COUNT(*) FROM trips WHERE provider = 'google' AND point_id = ?", (META,)).fetchone()[0]
     assert n == len(r["plan"][f"{META}|drive"])  # one trip row per routed place (a 'no route' one included)
     assert conn.execute("SELECT COUNT(*) FROM api_calls WHERE provider = 'google_matrix'").fetchone()[0] == r["elements"]
-    assert json.loads(conn.execute("SELECT params FROM runs ORDER BY id DESC LIMIT 1").fetchone()[0])["sample"]
+    params = json.loads(conn.execute("SELECT params FROM runs ORDER BY id DESC LIMIT 1").fetchone()[0])
+    assert params["sample"] and params["from"] == "dashboard"  # closed out on the next start if a restart cuts it
+
+
+def test_prefetch_keeps_the_requests_that_returned_when_a_later_one_fails(tmp_path):
+    # a run cut off mid-way (a spend cap, an error, a restart) must not pay again for what already came back
+    class FailsSecond(FakeMatrix):
+        def matrix(self, origins, dests, mode, depart):
+            if self.requests:
+                raise RuntimeError("cut off")
+            return super().matrix(origins, dests, mode, depart)
+
+    src = FailsSecond()
+    c = Commute(tmp_path / "c.db", src)
+    dest = (37.4847, -122.1484)
+    legs = [((37.40 + i * 0.001, -122.10), dest, "drive") for i in range(4)]
+    with pytest.raises(RuntimeError):
+        c.prefetch(legs, batch=3)
+    assert c._db.execute("SELECT COUNT(*) FROM commute_legs").fetchone()[0] == 3  # the first request's 3 elements
+    src.requests.clear()
+    src.matrix = FakeMatrix.matrix.__get__(src)
+    assert c.prefetch(legs, batch=3)["elements"] == 1  # the rerun asks only for the one never answered
+
+
+def test_leave_one_out_matches_add_knn_without_the_place_and_scores_against_the_padded_range():
+    from aptfinder.filter.knn import accuracy, loo_errors
+
+    loc = {f"p{i}": (37.40 + i * 0.001, -122.10) for i in range(5)}
+    loc["far"] = (37.45, -122.10)
+    mins = {"p0": 15.0, "p1": 16.0, "p2": 18.0, "p3": 30.0, "p4": 17.0, "far": 50.0}
+    trips = _trips([(pk, (META, "drive"), _g(m)) for pk, m in mins.items()])
+    errs = loo_errors(trips, loc, [(META, "drive")])
+    # p2 predicted from p1, p3, p0/p4: what add_knn gives p2 when its own trip is gone
+    without = _trips([(pk, (META, "drive"), _g(m)) for pk, m in mins.items() if pk != "p2"])
+    add_knn(without, loc, [(META, "drive")])
+    k = without["p2"][(META, "drive")]
+    assert len(errs) == 5  # 'far' has no routed neighbour within 400 m: not scored
+    lo, hi = k["min"] - 0.5, k["max"] + 0.5
+    assert (0.0 if lo <= 18.0 <= hi else min(abs(18.0 - lo), abs(18.0 - hi))) in errs
+    a = accuracy([0.0, 0.0, 0.0, 1.0, 12.5])
+    assert a == {"n": 5, "median": 0.0, "p95": 12.5, "inside_pct": 60.0}
+    assert accuracy([])["n"] == 0
+
+
+def test_cell_shown_splits_the_scope_by_the_provider_the_list_shows():
+    from aptfinder.sampling import cell_shown
+
+    loc = {"a": (37.40, -122.10), "b": (37.401, -122.10), "c": (37.45, -122.10)}
+    trips = _trips([("a", (META, "drive"), _g(15.0)), ("c", (META, "drive"), {"provider": "estimate", "minutes": 9.0})])
+    add_knn(trips, loc, [(META, "drive")])
+    s = cell_shown(trips, (META, "drive"), ["a", "b", "c"])
+    assert s["counts"] == {"google": 1, "knn": 1, "estimate": 1} and s["google_pct"] == 33.3
+
+
+def test_restart_closes_the_dashboards_open_commute_runs_only(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from aptfinder.store import connect, start_run
+    from aptfinder.store.seed import seed_db
+    from aptfinder.web.app import INTERRUPTED, create_app
+
+    db = tmp_path / "seed.db"
+    seed_db(db, with_trips=True)
+    conn = connect(db)
+    mine = start_run(conn, "commute", "google", {"sample": "cover within 400 m", "from": "dashboard"})
+    cli = start_run(conn, "commute", "google", {"sample": "cover within 400 m"})  # another process's: left alone
+    c = TestClient(create_app(db))
+    s = c.get("/api/compute/status").json()
+    assert s["state"] == "error" and s["interrupted"] == [mine] and INTERRUPTED in s["result"]["error"]
+    rows = dict(conn.execute("SELECT id, status FROM runs WHERE id IN (?, ?)", (mine, cli)).fetchall())
+    assert rows == {mine: "error", cli: "running"}
+    assert conn.execute("SELECT error FROM runs WHERE id = ?", (mine,)).fetchone()[0] == INTERRUPTED
+    assert TestClient(create_app(db)).get("/api/compute/status").json() == {"state": "idle"}  # closed once

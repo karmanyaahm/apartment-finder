@@ -11,6 +11,8 @@ const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const money = (v) => (v == null ? "?" : "$" + Math.round(v).toLocaleString());
 const num = (v) => (v == null ? "?" : (+v).toLocaleString(undefined, { maximumFractionDigits: 1 }));
+// commute times are shown in whole minutes (user, 2026-11-25); the database and the rules keep full precision
+const mins = (v) => (v == null ? "?" : String(Math.round(+v)));
 const RANK = { pass: 0, needs_check: 1, fail: 2 };
 const STATUS_LABEL = { pass: "pass", needs_check: "needs check", fail: "fail" };
 const MODE_LABEL = { walk: "walk", bike: "bike", transit: "transit", drive: "drive", bike_train_bike: "bike+train", bike_bus_bike: "bike+bus" };
@@ -217,10 +219,10 @@ const SRC = { google: ["src-google", "Google Maps"], knn: ["src-knn", "from 3 ne
 const srcOf = (prov) => SRC[prov] || ["", prov || "unknown source"];
 // the text of a time: a KNN range "17-19" (one number when both ends round alike), "~27" for an estimate
 const srcText = (v) => v.provider === "knn" && v.min != null
-  ? (Math.round(v.min) === Math.round(v.max) ? num(v.min) : `${Math.round(v.min)}–${Math.round(v.max)}`)
-  : `${v.provider === "estimate" ? "~" : ""}${num(v.minutes)}`;
+  ? (Math.round(v.min) === Math.round(v.max) ? mins(v.min) : `${Math.round(v.min)}–${Math.round(v.max)}`)
+  : `${v.provider === "estimate" ? "~" : ""}${mins(v.minutes)}`;
 const srcTitle = (v) => v.provider === "knn" && v.neighbors
-  ? `from 3 nearby Google routes: ${v.neighbors.map((n) => num(n.minutes)).join(", ")} min (${v.neighbors.map((n) => n.km).join(", ")} km away)`
+  ? `from 3 nearby Google routes: ${v.neighbors.map((n) => mins(n.minutes)).join(", ")} min (${v.neighbors.map((n) => n.km).join(", ")} km away)`
   : srcOf(v.provider)[1];
 const srcMin = (v) => `<b class="${srcOf(v.provider)[0]}" title="${esc(srcTitle(v))}">${srcText(v)}</b>`;
 const SRC_LEGEND = `<span class="src-key"><b class="src-google">■</b> Google Maps · <b class="src-knn">■ a–b</b> range of the 3 nearest places' Google routes · <b class="src-estimate">■ ~</b> straight-line estimate</span>`;
@@ -273,7 +275,7 @@ function netFact(p, fails) {
   const trips = `${n.n} trip${n.n > 1 ? "s" : ""}${n.est ? ", est." : ""}`;
   if (n.v == null) return `<span${mk || ' data-ff="needs_check"'}>net commute: no times yet (${trips})</span>`;
   const unk = n.known < n.n ? (agg === "total" ? ` + ? (${n.n - n.known} unknown)` : ` of ${n.known} known (${n.n - n.known} unknown)`) : "";
-  const main = agg === "spread" ? `spread ±<b>${num(n.v)}</b> min${unk}` : `${agg} <b>${num(n.v)}</b> min${unk}${n.known > 1 ? ` · spread ±${num(n.sd)}` : ""}`;
+  const main = agg === "spread" ? `spread ±<b>${mins(n.v)}</b> min${unk}` : `${agg} <b>${mins(n.v)}</b> min${unk}${n.known > 1 ? ` · spread ±${mins(n.sd)}` : ""}`;
   return `<span${mk}>net commute ${main} (${trips})</span>`;
 }
 
@@ -603,7 +605,7 @@ function failChip(x) {
   if (x.f === "commute") t = `${x.modes.map((m) => MODE_LABEL[m] || m).join("/")} to ${x.pt.split(":").slice(1).join(":")}`;
   else if (x.f === "near") t = `${x.modes.map((m) => MODE_LABEL[m] || m).join("/")} to nearest ${S.meta.point_sets?.[x.set]?.label || x.set}`;
   else if (x.f === "amenity") t = `no ${x.v}`;
-  else if (x.f === "net_commute") t = `net commute (${x.agg}) > ${num(x.lim)}`;
+  else if (x.f === "net_commute") t = `net commute (${x.agg}) > ${mins(x.lim)}`;
   else t = `${FACT_LABEL[x.f] || x.f.replace(/_/g, " ")} ${fmtv(x.v)}${x.lim != null && x.s === "fail" && x.v != null ? ` ${x.min ? "<" : ">"} ${num(x.lim)}` : ""}`;
   return `<span class="chip ff-chip" data-ff="${x.s}" title="${esc(`${x.goal}: ${x.text}`)}">${esc(t)}</span>`;
 }
@@ -789,7 +791,7 @@ function matrixTable(d) {
     const cells = modes.map((m) => {
       const v = d.matrix[`${t}|${m}`];
       if (!v || v.minutes == null) return `<td class="muted">–</td>`;
-      const legs = (v.legs || []).map((l) => `${l.mode}${l.from || l.to ? ` ${l.from || ""}${l.to ? "→" + l.to : ""}` : ""}: ${num(l.minutes)}m`).join("\n");
+      const legs = (v.legs || []).map((l) => `${l.mode}${l.from || l.to ? ` ${l.from || ""}${l.to ? "→" + l.to : ""}` : ""}: ${mins(l.minutes)}m`).join("\n");
       return `<td class="${srcOf(v.provider)[0]}" title="${esc(srcTitle(v))}${legs ? "\n" + esc(legs) : ""}">${srcText(v)}</td>`;
     }).join("");
     return `<tr><th>${esc(t.split(":")[1])}</th>${cells}</tr>`;
@@ -1095,10 +1097,10 @@ async function renderVerify() {
     const tm = { walk: "walking", bike: "bicycling", transit: "transit", drive: "driving", bike_train_bike: "transit", bike_bus_bike: "transit" }[t.mode];
     const gm = t.origin && t.dest ? `https://www.google.com/maps/dir/?api=1&origin=${t.origin.lat},${t.origin.lon}&destination=${t.dest.lat},${t.dest.lon}&travelmode=${tm}` : null;
     body.innerHTML = `${head}<h2>Check a computed trip</h2>
-      <p>${esc(t.origin?.address || t.place_key)} → <b>${esc(t.dest?.name || t.point_id)}</b> by <b>${esc(MODE_LABEL[t.mode] || t.mode)}</b>: stored <b>${num(t.minutes)} min</b> (provider ${esc(t.provider)}).</p>
+      <p>${esc(t.origin?.address || t.place_key)} → <b>${esc(t.dest?.name || t.point_id)}</b> by <b>${esc(MODE_LABEL[t.mode] || t.mode)}</b>: stored <b>${mins(t.minutes)} min</b> (provider ${esc(t.provider)}).</p>
       ${gm ? `<p><a href="${esc(gm)}" target="_blank" rel="noopener noreferrer">Open in Google Maps ↗</a></p>` : ""}
       <pre class="raw">${esc(JSON.stringify(t.legs, null, 2))}</pre>
-      <table><tr><th>minutes</th><td>${num(t.minutes)}</td><td>${vbtns({ trip_id: t.id, field: "minutes", queue: "sample" })}</td></tr></table>${nav}`;
+      <table><tr><th>minutes</th><td>${mins(t.minutes)}</td><td>${vbtns({ trip_id: t.id, field: "minutes", queue: "sample" })}</td></tr></table>${nav}`;
   } else {
     const obs = d.observations;
     const title = it.kind === "conflict" ? (it.cheap || it.stale ? `${obs[0].source}: ${it.reason}` : it.text ? `${obs[0].source} and its own text disagree on ${d.fields.join(", ")}`
@@ -1337,6 +1339,7 @@ function computeBlock() {
     <div id="k-grid" class="scroll-x">loading cells…</div>
     <p class="muted">A checked cell gets KNN times: a place without its own Google route reads the routes of up to 3 places
       within <span id="k-radius">400</span> m (shown as a range, <b class="src-knn">violet</b>); with none that close it keeps the straight-line estimate.</p>
+    <div id="k-acc" class="scroll-x muted"></div>
     <div>Sample: <label><input type="radio" name="s-method" value="cover" checked> cover: every place within
       <select id="s-radius"><option>100</option><option>250</option><option selected>400</option></select> m of a routed place</label>
       <label><input type="radio" name="s-method" value="random"> random <input id="s-pct" type="number" value="10" min="1" max="100" class="num-count">%</label>
@@ -1351,6 +1354,32 @@ function computeBlock() {
     <div id="c-out" class="muted"></div>
     <div id="c-job" class="muted"></div>
     <details id="c-log-box"><summary>Recent computations (each Google call and matrix element is also logged)</summary><div id="c-log">…</div></details></div>`;
+}
+// Per checked cell over the chosen scope: how places get their time, and KNN accuracy by leave-one-out (/api/knn/accuracy)
+function accuracyHtml(cells, scope, pad = 0.5, R = KNN_META?.radius_m ?? 400) {
+  const rows = Object.entries(cells || {});
+  if (!rows.length) return "";
+  const m = (x) => (x == null ? "–" : `${mins(x)} min`);
+  return `<table><tr><th>cell</th><th title="places in the scope whose shown time is their own Google route">own Google</th>
+    <th title="a Google-routed place within ${R} m: shown as a range">KNN</th><th>estimate only</th>
+    <th title="leave-one-out: each place with its own Google route predicted from its other routed neighbours within ${R} m">n</th>
+    <th title="minutes outside the range padded by ${pad} min each side (0 inside)">median error</th>
+    <th title="95th percentile of that error: the worst 5% are off by more">p95 error</th><th>inside range</th></tr>
+    ${rows.map(([k, v]) => {
+      const [p, md] = cellParts(k), l = v.loo || {};
+      return `<tr><td>${esc(p.replace(/^commute_targets:/, "").replace(/^set:/, "nearest "))} × ${esc(MODE_LABEL[md] || md)}</td>
+        <td>${v.google_pct}%</td><td>${v.knn_pct}%</td><td>${v.estimate_pct}%</td><td>${l.n ?? 0}</td>
+        <td>${l.n ? m(l.median) : "–"}</td><td>${l.n ? m(l.p95) : "–"}</td><td>${l.n ? `${l.inside_pct}%` : "–"}</td></tr>`;
+    }).join("")}</table><p class="small">Shares are of the ${scope} places in the scope. Accuracy: leave-one-out over every place
+    with its own Google route (n); error = minutes outside the neighbours' range padded by ${pad} min each side.</p>`;
+}
+async function loadAccuracy() {
+  const box = $("#k-acc");
+  if (!box) return;
+  try {
+    const d = await post("api/knn/accuracy", computeSpec());
+    box.innerHTML = accuracyHtml(d.cells, d.scope, d.pad_min, d.radius_m);
+  } catch (e) { box.textContent = "Accuracy failed to load: " + e.message; }
 }
 const cellParts = (k) => { const i = k.lastIndexOf("|"); return [k.slice(0, i), k.slice(i + 1)]; };
 let KNN_META = null;  // the last /api/knn/cells answer: rows (with each set's k), k_stations, matrix cap and free tier
@@ -1384,6 +1413,10 @@ function knnHelpHtml(d = KNN_META) {
     A place with its own Google route shows it (<b class="src-google">blue</b>). A place without one borrows the routes of up
     to ${K} Google-routed places within ${R} m and shows their range (<b class="src-knn">violet</b>). With none that close it
     keeps the straight-line estimate (<span class="src-estimate">grey ~</span>).</p>
+  <p><b>Accuracy table</b>: per ticked cell, how the scope's places get their time (own Google route, KNN range,
+    estimate only), and how good KNN is: each place that has its own Google route is predicted from its other routed
+    neighbours within ${R} m (leave-one-out); error is the minutes outside their range padded by 0.5 min each side
+    (median, and p95 = the worst 5% are off by more), n = places scored.</p>
   <p><b>Sample</b> picks places to route with Google, for every ticked cell:</p>
   <ul><li><b>cover</b>: the fewest places so that every place has a routed place within R m (places already routed count).
       The best first step.</li>
@@ -1442,7 +1475,7 @@ async function drawKnnGrid() {
     }).join("")}</tr>`).join("")}</table><p class="muted small">${esc(bill)}</p>`;
   $$("#k-grid input[data-cell]").forEach((cb) => cb.addEventListener("change", async () => {
     const cells = $$("#k-grid input[data-cell]:checked").map((x) => cellParts(x.dataset.cell));
-    try { await post("api/knn/cells", { cells }); toast(`${cells.length} cell${cells.length === 1 ? "" : "s"} saved`); await loadPlaces(); }
+    try { await post("api/knn/cells", { cells }); toast(`${cells.length} cell${cells.length === 1 ? "" : "s"} saved`); loadAccuracy(); await loadPlaces(); }
     catch (e) { toast("Saving cells failed: " + e.message, 6000); cb.checked = !cb.checked; }
   }));
 }
@@ -1463,7 +1496,8 @@ function wireCompute() {
   };
   ["#c-n", "#c-left"].forEach((id) => $(id).addEventListener("input", lock));
   $("#k-help").addEventListener("click", openKnnHelp);
-  drawKnnGrid();
+  drawKnnGrid().then(loadAccuracy);
+  $$("input[name=s-scope]").forEach((el) => el.addEventListener("change", loadAccuracy));
   loadComputeLog();
   ["#s-radius", "#s-pct", ...$$("input[name=s-method]"), ...$$("input[name=s-scope]")].forEach((el) =>
     (typeof el === "string" ? $(el) : el).addEventListener("input", () => { reset(); out.textContent = ""; }));
@@ -1492,6 +1526,7 @@ function wireCompute() {
       out.innerHTML = `${esc(head)}, <b>${d.elements}</b> Route Matrix elements (${esc(d.modes.join(", ") || "none")})
         · this month ${u.matrix_elements}/${u.matrix_cap} elements used
         <div class="scroll-x"><table><tr><th>cell</th><th>places × routes per place</th><th>elements (uncached)</th><th>with a routed place within ${d.radius_m} m</th></tr>${rows}</table></div>
+        ${d.accuracy ? `<div class="scroll-x">${accuracyHtml(d.accuracy, d.scope)}</div>` : ""}
         ${d.skipped.length ? `<span class="reason needs_check">Skipped: ${esc(d.skipped.join("; "))}</span>` : ""}
         ${d.elements > d.left ? `<br><span class="reason fail">Over the monthly matrix cap (${d.left} left): the run stops at the cap.</span>` : ""}`;
       if (d.elements > 0) {
@@ -1518,7 +1553,8 @@ function wireCompute() {
     } catch (e) { out.textContent = "Not started: " + e.message; }
   });
   // a running job reports on its own line, so it never overwrites the dry run's numbers
-  api("api/compute/status").then((s) => { if (s.state === "running") pollCompute(); }).catch(() => {});
+  // a running job, or one a dashboard restart cut off (closed out on start: 'interrupted')
+  api("api/compute/status").then((s) => { if (s.state === "running" || s.interrupted) pollCompute(); }).catch(() => {});
 }
 async function pollCompute() {
   const s = await api("api/compute/status").catch((e) => ({ state: "error", result: { error: e.message } }));
@@ -1531,6 +1567,7 @@ async function pollCompute() {
     return;
   }
   const r = s.result || {};
+  if (s.state === "idle") { out.textContent = ""; return; }  // nothing has run since the dashboard started
   out.innerHTML = s.state === "done"
     ? `Done ${esc(what)}: ${r.places_done}/${r.places} places, ${r.new_trips} new trips${r.matrix_elements ? `, ${r.matrix_elements} matrix elements` : ""}${r.api_calls ? `, ${r.api_calls} Google calls` : ""}.`
     : `<span class="reason fail">Stopped ${esc(what)}: ${esc(r.error || "unknown error")}${r.new_trips ? ` (${r.new_trips} new trips kept)` : ""}</span>`;

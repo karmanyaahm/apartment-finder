@@ -105,3 +105,38 @@ def add_knn(trips: dict[str, dict[tuple[str, str], dict[str, Any]]], located: di
             near = neighbours(rows, lat, lon, exclude=pk, grid=grid)
             if near:
                 trips[pk][key] = knn_trip(near, *key)
+
+
+def loo_errors(trips: dict[str, dict[tuple[str, str], dict[str, Any]]], located: dict[str, tuple[float, float]],
+               keys: list[tuple[str, str]]) -> list[float]:
+    """Leave-one-out over the places with their own Google trip for any of `keys` ((point, mode); a set cell passes
+    every point of the set, pooled): each is predicted from its other Google-routed places within RADIUS_M (up to
+    K), exactly as `add_knn` would, and scored against the range padded by rules.KNN_PAD_MIN: 0 inside it, else the
+    minutes outside it. Places with no routed neighbour within RADIUS_M are not scored."""
+    from .rules import KNN_PAD_MIN
+
+    errs: list[float] = []
+    for key in keys:
+        rows = [(pk, *located[pk], ts[key]["minutes"]) for pk, ts in list(trips.items())
+                if pk in located and key in ts and ts[key]["provider"] == "google" and ts[key]["minutes"] is not None]
+        grid = index(rows)
+        for pk, lat, lon, true in rows:
+            near = neighbours(rows, lat, lon, exclude=pk, grid=grid)
+            if not near:
+                continue
+            t = knn_trip(near, *key)
+            lo, hi = t["min"] - KNN_PAD_MIN, t["max"] + KNN_PAD_MIN
+            errs.append(0.0 if lo <= true <= hi else min(abs(true - lo), abs(true - hi)))
+    return errs
+
+
+def accuracy(errs: list[float]) -> dict[str, Any]:
+    """n, median and 95th-percentile error (minutes outside the padded range; nearest rank) and % inside it."""
+    if not errs:
+        return {"n": 0, "median": None, "p95": None, "inside_pct": None}
+    from math import ceil
+
+    s = sorted(errs)
+    rank = lambda q: s[max(0, ceil(len(s) * q) - 1)]  # noqa: E731  (nearest-rank percentile)
+    return {"n": len(s), "median": round(rank(0.5), 2), "p95": round(rank(0.95), 2),
+            "inside_pct": round(100 * sum(1 for e in s if e == 0) / len(s), 1)}

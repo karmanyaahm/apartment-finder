@@ -162,3 +162,30 @@ def summary(conn: sqlite3.Connection, db_path: str, plan: dict[Pair, list[str]],
     out["elements"] = len(unique)
     out["modes"] = sorted({m for _, _, m in unique})
     return out
+
+
+def cell_keys(trips: dict, pair: Pair) -> list[tuple[str, str]]:
+    """The (point, mode) trip keys a cell stands for: the point itself, or every point of a set seen in `trips`."""
+    point, mode = pair
+    if not point.startswith("set:"):
+        return [pair]
+    return sorted({k for ts in trips.values() for k in ts if k[1] == mode and k[0].startswith(point[4:] + ":")})
+
+
+def cell_loo(trips: dict, pair: Pair, loc: dict[str, tuple[float, float]]) -> dict[str, Any]:
+    """KNN accuracy for a cell by leave-one-out over every place with its own Google route (filter.knn.loo_errors)."""
+    from .filter.knn import accuracy, loo_errors
+
+    return accuracy(loo_errors(trips, loc, cell_keys(trips, pair)))
+
+
+def cell_shown(trips: dict, pair: Pair, keys: list[str]) -> dict[str, Any]:
+    """How the scope's places get their time for a cell, by the provider of the value the list shows: their own Google
+    route, a KNN range (a routed place within knn.RADIUS_M), or the straight-line estimate (or nothing)."""
+    n = {"google": 0, "knn": 0, "estimate": 0}
+    for pk in keys:
+        v = _value(trips, pk, pair)
+        p = v["provider"] if v and v.get("minutes") is not None else None
+        n[p if p in ("google", "knn") else "estimate"] += 1
+    total = len(keys) or 1
+    return {"scope": len(keys), **{f"{k}_pct": round(100 * v / total, 1) for k, v in n.items()}, "counts": n}
