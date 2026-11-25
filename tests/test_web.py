@@ -181,3 +181,28 @@ def test_raw_is_fetched_per_listing_on_demand(client):
     d = c.get(f"/api/places/{pk}").json()
     assert all("raw" not in l for l in d["listings"])  # not shipped with the drawer any more
     assert c.get("/api/raw", params={"source": "nope", "source_id": "x"}).status_code == 404
+
+
+def test_list_filters_saved_for_everyone(client):
+    c, db = client
+    assert c.get("/api/view/filters").json()["filters"] is None
+    first = {"sort": "price", "limits": [{"point": "commute_targets:Office", "mode": "bike", "max": 20}]}
+    assert c.post("/api/view/filters", json={"filters": first}).status_code == 200
+    assert c.get("/api/view/filters").json()["filters"] == first
+    second = {**first, "minbeds": 3}
+    c.post("/api/view/filters", json={"filters": second})
+    assert c.get("/api/view/filters").json()["filters"] == second  # the latest save wins
+    assert c.post("/api/view/filters", json={"filters": "x"}).status_code == 400
+    conn = connect(db)
+    rows = conn.execute("SELECT entity_type, entity_key, attribute FROM annotations").fetchall()
+    assert [tuple(r) for r in rows] == [("view", "list", "filters")] * 2  # appended, never replaced
+    # a view row is not a place annotation
+    assert all(p["rating"] is None and p["user_status"] is None for p in c.get("/api/places").json())
+
+
+def test_saving_filters_is_refused_in_the_redacted_view(tmp_path):
+    db = tmp_path / "seed.db"
+    seed_db(db, with_trips=True)
+    c = TestClient(create_app(db, redact={}))
+    assert c.post("/api/view/filters", json={"filters": {"sort": "price"}}).status_code == 403
+    assert c.get("/api/view/filters").json()["filters"] is None

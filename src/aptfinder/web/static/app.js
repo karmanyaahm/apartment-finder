@@ -135,24 +135,90 @@ function drawMarkers(list) {
   }
 }
 
-/* ---------------------------------------------------------------- commute limits */
-// Any number of "at most N minutes by <mode> to <target>" filters, remembered in this browser (localStorage; the
-// page works the same without it). A place with no time for a limit is kept unless "keep places without a time"
-// is off.
-const LIMITS_KEY = "aptf.commuteLimits";
+/* ---------------------------------------------------------------- list filters: saved for everyone */
+// "Save for everyone" stores the list filters (commute limits included) on the server; every browser opens with
+// that saved set. A change made here is kept in this browser's localStorage, and that working copy exists only
+// while it holds unsaved changes: it is deleted on save and on "reset to saved", so a browser without changes
+// always picks up the latest save. The search box and the goal switch are not part of the set.
+const FILTERS_KEY = "aptf.listFilters";
+const OLD_LIMITS_KEY = "aptf.commuteLimits"; // per-browser limits before saved filters (2026-11-25)
 S.limits = [];
-function loadLimits() {
-  try { S.limits = JSON.parse(localStorage.getItem(LIMITS_KEY) || "[]").filter((l) => l && l.target && l.mode); }
-  catch { S.limits = []; }
-  try { const k = localStorage.getItem(LIMITS_KEY + ".keepUnknown"); if (k != null) $("#limit-keep-unknown").checked = k === "1"; }
-  catch { /* storage blocked: defaults */ }
+S.savedFilters = null; // {filters, ts} from the server
+S.defaultFilters = null; // the page's own defaults, when nothing was ever saved
+const lsGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
+const lsSet = (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch { /* blocked */ } };
+
+function readFilters() {
+  return {
+    sort: $("#sort").value, target: $("#target").value, mode: $("#mode").value,
+    statuses: $$(".st").filter((c) => c.checked).map((c) => c.value),
+    minbeds: $("#minbeds").value, maxppb: $("#maxppb").value,
+    inactive: $("#inactive").checked, outzone: $("#outzone").checked,
+    keepUnknown: $("#limit-keep-unknown").checked,
+    limits: S.limits.map((l) => ({ ...l })),
+  };
 }
-function saveLimits() {
+function applyFilters(f) {
+  const has = (sel, v) => v != null && [...$(sel).options].some((o) => o.value === v);
+  if (has("#sort", f.sort)) $("#sort").value = f.sort;
+  if (has("#target", f.target)) $("#target").value = f.target;
+  if (has("#mode", f.mode)) $("#mode").value = f.mode;
+  if (Array.isArray(f.statuses)) $$(".st").forEach((c) => { c.checked = f.statuses.includes(c.value); });
+  $("#minbeds").value = f.minbeds ?? "";
+  $("#maxppb").value = f.maxppb ?? "";
+  if (f.inactive != null) $("#inactive").checked = !!f.inactive;
+  if (f.outzone != null) $("#outzone").checked = !!f.outzone;
+  if (f.keepUnknown != null) $("#limit-keep-unknown").checked = !!f.keepUnknown;
+  S.limits = (f.limits || []).filter((l) => l && l.target && l.mode).map((l) => ({ ...l }));
+  renderLimits();
+}
+// the working copy if this browser has unsaved changes, else the saved set, else the page's defaults
+function loadFilters() {
+  S.defaultFilters = readFilters();
+  let local = null;
+  try { local = JSON.parse(lsGet(FILTERS_KEY) || "null"); } catch { local = null; }
+  if (!local) { // fold the old per-browser limits in once, so they survive until saved
+    let old = [];
+    try { old = JSON.parse(lsGet(OLD_LIMITS_KEY) || "[]"); } catch { old = []; }
+    if (old.length) {
+      local = { ...(S.savedFilters?.filters || S.defaultFilters), limits: old };
+      const k = lsGet(OLD_LIMITS_KEY + ".keepUnknown");
+      if (k != null) local.keepUnknown = k === "1";
+      lsSet(FILTERS_KEY, JSON.stringify(local));
+    }
+  }
+  lsSet(OLD_LIMITS_KEY, null); lsSet(OLD_LIMITS_KEY + ".keepUnknown", null);
+  applyFilters(local || S.savedFilters?.filters || S.defaultFilters);
+  showFilterState();
+}
+function filtersChanged() {
+  lsSet(FILTERS_KEY, JSON.stringify(readFilters()));
+  showFilterState();
+}
+function showFilterState() {
+  const dirty = lsGet(FILTERS_KEY) != null;
+  const when = S.savedFilters?.ts ? new Date(S.savedFilters.ts).toLocaleString() : null;
+  $("#filters-state").textContent = dirty ? "unsaved changes in this browser"
+    : when ? `saved set (${when})` : "defaults (nothing saved yet)";
+  $("#reset-filters").classList.toggle("hidden", !dirty);
+}
+async function saveFiltersForEveryone() {
+  const f = readFilters();
   try {
-    localStorage.setItem(LIMITS_KEY, JSON.stringify(S.limits));
-    localStorage.setItem(LIMITS_KEY + ".keepUnknown", $("#limit-keep-unknown").checked ? "1" : "0");
-  } catch { /* storage blocked: limits last for this page only */ }
+    await post("api/view/filters", { filters: f });
+    S.savedFilters = { filters: f, ts: new Date().toISOString() };
+    lsSet(FILTERS_KEY, null);
+    showFilterState();
+    toast("Filters saved for everyone");
+  } catch (e) { toast("Not saved: " + e.message, 5000); }
 }
+function resetFilters() {
+  lsSet(FILTERS_KEY, null);
+  applyFilters(S.savedFilters?.filters || S.defaultFilters);
+  showFilterState();
+  renderList();
+}
+const saveLimits = filtersChanged;
 function renderLimits() {
   const tOpts = (sel) => S.meta.targets.map((t) => `<option value="${esc(t)}"${t === sel ? " selected" : ""}>${esc(t.split(":")[1])}</option>`).join("");
   const mOpts = (sel) => S.meta.modes.map((m) => `<option value="${esc(m)}"${m === sel ? " selected" : ""}>${esc(MODE_LABEL[m])}</option>`).join("");
@@ -908,15 +974,18 @@ async function boot() {
   $("#mode").innerHTML = S.meta.modes.map((m) => `<option value="${esc(m)}">${esc(MODE_LABEL[m])}</option>`).join("");
   if (S.meta.default_target) $("#target").value = S.meta.default_target; // the target a goal commutes to
   $("#mode").value = "bike";
-  loadLimits();
-  renderLimits();
+  // the saved set; if it cannot be read, the page opens with this browser's copy or the defaults
+  S.savedFilters = await api("api/view/filters").catch((e) => { console.warn(e); return null; });
+  loadFilters();
   $("#add-limit").addEventListener("click", addLimit);
-  $("#limit-keep-unknown").addEventListener("input", () => { saveLimits(); renderList(); });
+  $("#save-filters").addEventListener("click", saveFiltersForEveryone);
+  $("#reset-filters").addEventListener("click", resetFilters);
   initMap();
   $$("#base-switch button").forEach((b) => b.addEventListener("click", () => setBase(b.dataset.base)));
-  ["#q", "#sort", "#target", "#mode", "#minbeds", "#maxppb", "#inactive", "#outzone", ...$$(".st")].forEach((el) => {
+  $("#q").addEventListener("input", renderList);
+  ["#sort", "#target", "#mode", "#minbeds", "#maxppb", "#inactive", "#outzone", "#limit-keep-unknown", ...$$(".st")].forEach((el) => {
     const node = typeof el === "string" ? $(el) : el;
-    node.addEventListener("input", renderList);
+    node.addEventListener("input", () => { filtersChanged(); renderList(); });
   });
   $$("[data-close]").forEach((b) => b.addEventListener("click", () => {
     $("#" + b.dataset.close).classList.add("hidden");

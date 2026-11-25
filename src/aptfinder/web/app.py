@@ -575,6 +575,25 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                                     goal_id=a.goal_id, rating=a.rating, comment=a.comment)
         return {"id": aid}
 
+    # The list filters saved for everyone: annotations rows (view / list / filters, the JSON in `comment`); the
+    # latest row is the saved set. Each browser keeps its own unsaved changes in localStorage.
+    @app.get("/api/view/filters")
+    def get_filters() -> dict[str, Any]:
+        rows = q("SELECT id, ts, comment FROM annotations WHERE entity_type = 'view' AND entity_key = 'list' "
+                 "AND attribute = 'filters' ORDER BY id DESC LIMIT 1")
+        if not rows:
+            return {"filters": None, "ts": None, "id": None}
+        return {"filters": json.loads(rows[0]["comment"]), "ts": rows[0]["ts"], "id": rows[0]["id"]}
+
+    @app.post("/api/view/filters")
+    def save_filters(body: dict[str, Any]) -> dict[str, Any]:
+        f = body.get("filters")
+        if not isinstance(f, dict):
+            raise HTTPException(400, "filters must be an object")
+        with lock:
+            aid = append_annotation(conn, AUTHOR, "view", "list", "filters", comment=json.dumps(f, sort_keys=True))
+        return {"id": aid}
+
     @app.post("/api/links")
     def post_link(link: LinkIn) -> dict[str, Any]:
         if not q("SELECT 1 FROM listings WHERE source = ? AND source_id = ?", (link.source, link.source_id)):
