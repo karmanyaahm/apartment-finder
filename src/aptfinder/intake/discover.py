@@ -28,7 +28,7 @@ from urllib.parse import urlsplit, urlunsplit
 from .. import settings
 from ..areas import in_walk_zone
 from ..config import (CHECK_LABEL, CHECK_RETRY, PRECHECK_RECHECK_DAYS, PRECHECK_SKIP, check_outcome, last_checks,
-                      load_areas, load_sites)
+                      latest_found, load_areas, load_sites)
 from ..store import finish_run, start_run
 
 FILE = "discovered_sites.toml"
@@ -48,6 +48,7 @@ AGGREGATOR_HOSTS = {
     "youtube.com", "tiktok.com", "nextdoor.com", "bbb.org", "mapquest.com", "yahoo.com", "bing.com", "wikipedia.org"}
 ACTION_PATH = re.compile(r"/(book|schedule|tour|apply|application|contact|lease-now|virtual-tour|self-guided|"
                          r"guest-card|email)", re.I)
+SPACED_TLDS = {"com", "net", "org", "us", "io", "co", "apartments", "homes", "rentals", "properties", "biz", "info"}
 PLATFORMS = {"avaloncommunities.com": "avalon", "prometheusapartments.com": "prometheus"}
 
 SYSTEM = ("You find the official website of apartment communities with web search. The official website is the "
@@ -98,6 +99,15 @@ def clean_url(url: str | None, keep_query: bool = False) -> tuple[str | None, st
     if not url or not url.startswith("http"):
         return None, "no url"
     p = urlsplit(url.strip())
+    if not p.netloc or re.search(r"\s", p.netloc):
+        # a host written with spaces for dots in listing text ("www heritagerealtysanmateo com"): joined when it
+        # is only plain labels ending in a known TLD ("x dot com" is not); anything else is not a URL
+        labels = p.netloc.lower().split()
+        if len(labels) < 2 or labels[-1] not in SPACED_TLDS or "dot" in labels \
+                or not all(re.fullmatch(r"[a-z0-9-]+", x) for x in labels):
+            return None, f"malformed host {p.netloc!r}"
+        p = p._replace(netloc=".".join(labels))
+        url = urlunsplit(p)
     if is_aggregator(url):
         return None, f"aggregator or social host {p.netloc.lower().removeprefix('www.')}"
     if keep_query:
@@ -132,7 +142,8 @@ def _records(config_dir: Path | None = None) -> dict[str, list[dict[str, Any]]]:
     if not path.exists():
         return {}
     with open(path, "rb") as f:
-        return tomllib.load(f)
+        rec = tomllib.load(f)
+    return {**rec, "found": latest_found(rec)} if "found" in rec else rec
 
 
 MODEL_RANK = {"haiku": 1, "sonnet": 2, "opus": 3}

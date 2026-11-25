@@ -275,3 +275,25 @@ def test_load_sites_drops_aggregator_urls(tmp_path):
         '[[found]]\nid = "ok"\nplace_key = "p_ok"\nurl = "https://ok.example/"\nplatform = "photos"\n'
         '[[check]]\nid = "r"\nok = true\nfinal_url = "https://rental.turbotenant.com/p/x/1"\n')
     assert sorted(load_sites(tmp_path)) == ["ok", "sevens"]
+
+
+def test_clean_url_joins_a_host_written_with_spaces():
+    # listing text hides a link as "www heritagerealtysanmateo com"; extract reads it verbatim
+    assert clean_url("https://www heritagerealtysanmateo com/")[0] == "https://www.heritagerealtysanmateo.com/"
+    assert clean_url("https://WWW CMPMI COM/", keep_query=True)[0] == "https://www.cmpmi.com/"
+    # anything else with a space (or no host) is not a URL
+    for bad in ("https://Stayluxlife dot com/", "https://sfcityrents . com/", "http gofivestarpm com rentals",
+                "https://www srecompany com availability/", "https my matterport com show ?m=x"):
+        assert clean_url(bad)[0] is None, bad
+    assert clean_url("https://sevensmv.com/")[0] == "https://sevensmv.com/"
+
+
+def test_load_sites_takes_the_latest_found_row_of_an_id(tmp_path):
+    from aptfinder.config import load_sites
+
+    (tmp_path / "discovered_sites.toml").write_text(
+        '[[found]]\nid = "g2"\nplace_key = "p_g2"\nurl = "https://www heritage com/"\nplatform = "photos"\n'
+        '[[found]]\nid = "ok"\nplace_key = "p_ok"\nurl = "https://ok.example/"\nplatform = "photos"\n'
+        '[[found]]\nid = "g2"\nplace_key = "p_g2"\nurl = "https://www.heritage.com/"\nplatform = "photos"\n')
+    sites = load_sites(tmp_path)
+    assert list(sites) == ["g2", "ok"] and sites["g2"]["url"] == "https://www.heritage.com/"

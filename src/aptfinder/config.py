@@ -154,6 +154,12 @@ def last_checks(raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {c["id"]: c for c in raw.get("check", [])}
 
 
+def latest_found(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    """The `[[found]]` rows, the latest per site id (the file is append-only: a corrected URL is a new row with the
+    same id), in the order the ids first appear."""
+    return list({f["id"]: f for f in raw.get("found", [])}.values())
+
+
 def load_sites(config_dir: Path | None = None) -> dict[str, dict[str, Any]]:
     """Community websites: hand-listed ones (config/direct_sites.toml) plus ones found by `aptf-intake
     discover-sites` (config/discovered_sites.toml, machine-appended). A discovered site is left out once a
@@ -175,7 +181,7 @@ def load_sites(config_dir: Path | None = None) -> dict[str, dict[str, Any]]:
         moved = {c["id"]: c for c in raw.get("check", []) if c.get("ok") and c.get("final_url")}
         urls = {s["url"].rstrip("/") for s in out.values()}
         places = {s.get("place_key") for s in out.values()} - {None}
-        for s in raw.get("found", []):
+        for s in latest_found(raw):
             # a URL you added in Verify is kept beside the place's other sites (a place can have several)
             same_place = s.get("place_key") in places and not str(s.get("found_by", "")).startswith("you")
             if s["id"] in failed or s["id"] in out or s["url"].rstrip("/") in urls or same_place:
