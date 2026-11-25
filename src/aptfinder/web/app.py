@@ -544,7 +544,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         if credit_memo and time.monotonic() - credit_memo["t"] < 60:
             return credit_memo["v"]
         try:
-            v = apify.credit()
+            v = apify.credit(tries=1)  # one try: an Apify outage must not hang the dashboard
         except (Exception, SystemExit) as e:  # a missing token raises SystemExit: never kill the request
             v = {"error": str(e)[:200]}
         credit_memo.update(t=time.monotonic(), v=v)

@@ -18,7 +18,8 @@ def example_config(monkeypatch):
 def no_network_credit(monkeypatch):
     """The Apify credit guard (`apify.guard`) never reads the live account in tests: $100 left, reserve $0.30."""
     monkeypatch.setattr("aptfinder.intake.apify.credit",
-                        lambda: {"limit": 100.0, "used": 0.0, "left": 100.0, "reserve": 0.30})
+                        lambda tries=6: {"limit": 100.0, "used": 0.0, "left": 100.0, "reserve": 0.30})
+    monkeypatch.setattr("aptfinder.intake.apify.reread_usd", lambda run_id: None)  # settle keeps the at-end value
 
 
 def pytest_configure(config):

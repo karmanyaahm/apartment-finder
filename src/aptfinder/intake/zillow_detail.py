@@ -133,7 +133,7 @@ def fetch(conn: sqlite3.Connection, *, max_usd: float, batch: int = BATCH, limit
     """Fetch the detail page of every active Zillow listing without one yet (`refetch`: all of them), `batch` zpids
     per actor run, under the budget guard before each run. One `runs` row (component intake, source zillow_detail,
     scope targeted)."""
-    from .apify import run_actor, run_record
+    from .apify import run_actor, run_record, settle
     from .base import event_cost
 
     zpids = active_zpids(conn)
@@ -189,6 +189,7 @@ def fetch(conn: sqlite3.Connection, *, max_usd: float, batch: int = BATCH, limit
                  if s not in RENTAL}
         counts["not_for_rent"] = len(stale)
         counts["warnings"] = warnings
+        counts["apify_usd"] = settle(counts["apify_runs"])
         status = "error" if counts["fetched"] == 0 else "ok"
         finish_run(conn, run_id, status, counts, est_cost=round(est, 4),
                    error=("; ".join(warnings) or "no page fetched") if status == "error" else None)

@@ -30,7 +30,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from ..store.models import ObservationData
-from .apify import ActorRun, browser_proxy, run_actor
+from .apify import RESIDENTIAL_USD_PER_PAGE, ActorRun, browser_proxy, run_actor
 from .base import Adapter, Parsed
 from .direct import SITE_INFO
 from .discover import SECRET_ENV, Blocker
@@ -150,7 +150,8 @@ def fetch(cfg: dict[str, Any], areas: list, cap_each: int, max_usd: float, conn)
         if not inp["startUrls"]:
             continue
         part = run_actor(cfg["actor"], inp, max_items=len(inp["startUrls"]), max_charge_usd=max_usd,
-                         timeout_s=1800, memory_mb=cfg.get("memory_mb", 2048))
+                         timeout_s=1800, memory_mb=cfg.get("memory_mb", 2048),
+                         est_usd=RESIDENTIAL_USD_PER_PAGE * len(inp["startUrls"]) if residential else None)
         got = {it.get("requested") for it in part.items}
         for r in inp["startUrls"]:  # a page the actor gave up on: keep a stub so it shows as failed, not as nothing
             if r["url"] not in got:

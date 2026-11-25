@@ -346,3 +346,22 @@ def test_run_actor_never_starts_when_the_guard_refuses(monkeypatch):
     monkeypatch.setattr(apify, "_client", lambda: pytest.fail("a refused run must not reach Apify"))
     with pytest.raises(apify.SpendRefused):
         apify.run_actor("a/b", {}, max_items=1, max_charge_usd=0.5)
+
+
+def test_residential_estimate_over_the_room_refuses(monkeypatch):
+    from aptfinder.intake import apify
+
+    monkeypatch.setattr(apify, "credit", lambda tries=6: {"limit": 22.0, "used": 19.2, "left": 2.8, "reserve": 2.0})
+    monkeypatch.setattr(apify, "_client", lambda: pytest.fail("a refused run must not reach Apify"))
+    with pytest.raises(apify.SpendRefused, match="residential proxy"):
+        apify.run_actor("apify/playwright-scraper", {}, max_items=60, max_charge_usd=1.0, est_usd=30 * 0.029)
+
+
+def test_settle_rereads_each_apify_run_at_close(monkeypatch):
+    from aptfinder.intake import apify
+
+    later = {"a": 0.009, "b": 0.133, "c": None}
+    monkeypatch.setattr(apify, "reread_usd", lambda rid: later[rid])
+    recs = [{"run": "a,b", "usd": 0.0341}, {"run": "c", "usd": 0.01}]
+    assert apify.settle(recs) == pytest.approx(0.152)  # c unreadable: keeps its at-end value
+    assert recs[0]["usd"] == pytest.approx(0.142)

@@ -1291,7 +1291,7 @@ async function openPipeline() {
   const runs = `<div class="scroll-x"><table><tr><th>source</th><th>area kind</th><th>runs</th><th>last ok run</th><th>last status</th><th>cost</th></tr>
     ${d.intake.runs.map((r) => `<tr><td>${esc(r.source)}</td><td>${esc(r.area_kind)}</td><td>${r.runs}</td><td>${day(r.last_run)}</td>
       <td>${r.last_status ? `<span class="${r.last_status === "error" ? "reason fail" : ""}" title="${esc(r.last_error || "")}">${esc(r.last_status)}</span>` : ""}</td>
-      <td>$${(+r.cost).toFixed(2)}${r.apify_usd != null ? ` <span class="muted small" title="Apify's usageTotalUsd as read when each run ended (runs since 2026-11-25)">real $${(+r.apify_usd).toFixed(2)}</span>` : ""}</td></tr>`).join("")}</table></div>`;
+      <td>$${(+r.cost).toFixed(2)}${r.apify_usd != null ? ` <span class="muted small" title="Apify's usageTotalUsd, re-read when each of our runs closed (runs since 2026-11-25); residential proxy can post later">Apify-reported $${(+r.apify_usd).toFixed(2)}</span>` : ""}</td></tr>`).join("")}</table></div>`;
   const web = d.stages.find((s) => s.id === "websites");
   const models = Object.entries(web.no_site_models).map(([m, n]) => `${m}: ${n}`).join(", ");
   const webTable = `<div class="scroll-x"><table><tr><th>website state</th><th>in walk zones</th><th>all</th></tr>
@@ -1706,7 +1706,7 @@ function statusBlock(s) {
   const g = s.google ? `Google ${esc(s.google.month)}: ${s.google.calls}/${s.google.cap} calls · est. $${s.google.est_cost_usd.toFixed(2)}` : "";
   return `<h3>Latest runs</h3><div class="scroll-x"><table>
     <tr><th>source</th><th>last run</th><th>status</th><th>seen</th><th>new</th><th>changed</th></tr>${rows}</table></div>
-    <p class="small">${apifyCredit(s.apify)} · recorded Apify charges $${(+s.apify_real).toFixed(2)} (runs since 2026-11-25; older runs carry only estimates) · est. spend, all runs $${(+s.spend).toFixed(2)}${g ? " · " + g : ""} · hand checks: ${acc}</p>${errs}`;
+    <p class="small">${apifyCredit(s.apify)} · Apify-reported charges $${(+s.apify_real).toFixed(2)} (read when each run closed, runs since 2026-11-25; residential proxy can post later; older runs carry only estimates) · est. spend, all runs $${(+s.spend).toFixed(2)}${g ? " · " + g : ""} · hand checks: ${acc}</p>${errs}`;
 }
 
 // "Apify credit: $X left (reserve $Y)", from the live API (cached 60 s by the server)

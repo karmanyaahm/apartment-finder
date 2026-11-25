@@ -14,7 +14,7 @@ from .. import identity, settings
 from ..config import Area, load_areas
 from ..store import COMMIT_EVERY, append_observation, finish_run, start_run
 from ..store.models import ObservationData
-from .apify import ActorRun, account_remaining_usd, run_actor, run_record
+from .apify import ActorRun, account_remaining_usd, run_actor, run_record, settle
 
 API_PRICE_CACHE: dict[str, dict[str, float]] = {}
 
@@ -283,6 +283,8 @@ def run_source(conn: sqlite3.Connection, adapter: Adapter, areas: list[Area], *,
         if nothing:
             warnings.append("actor returned no items for any area")
         counts["warnings"] = warnings
+        if counts.get("apify_runs"):
+            counts["apify_usd"] = settle(counts["apify_runs"])
         status = "error" if nothing else "ok"
         finish_run(conn, run_id, status, counts, est_cost=round(est, 4),
                    error="; ".join(warnings) if status == "error" else None)

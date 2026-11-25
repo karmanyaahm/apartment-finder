@@ -395,7 +395,7 @@ def _browser_fetch(conn, ids: list[str], residential: bool) -> tuple[int, float,
     """The check pages through the browser actor (and the residential proxy if asked). Recorded as an intake run
     of source `direct` with `sites` (not `areas`), so it is not coverage."""
     from . import direct
-    from .apify import browser_proxy, run_actor, run_record
+    from .apify import RESIDENTIAL_USD_PER_PAGE, browser_proxy, run_actor, run_record, settle
     from .render import ACTOR
 
     sites = direct.sites()
@@ -409,7 +409,7 @@ def _browser_fetch(conn, ids: list[str], residential: bool) -> tuple[int, float,
                                 "pageLoadTimeoutSecs": 90, "pageFunctionTimeoutSecs": 90,
                                 "waitUntil": "domcontentloaded"},
                         max_items=2 * len(reqs), max_charge_usd=1.0, timeout_s=1800, memory_mb=2048, clean=False,
-                        with_log=True)
+                        with_log=True, est_usd=RESIDENTIAL_USD_PER_PAGE * len(reqs) if residential else None)
     except Exception as e:  # the credit guard's refusal or an Apify error: close the run, then re-raise
         finish_run(conn, run_id, "error", {}, error=repr(e)[:500])
         raise
@@ -418,8 +418,9 @@ def _browser_fetch(conn, ids: list[str], residential: bool) -> tuple[int, float,
     raw.write_text(json.dumps({"actor": ACTOR, "apify_run": res.run_id, "status": res.status, "proxy": proxy,
                                "cost_usd": res.cost_usd, "items": res.items, "log": res.log}))
     items = [i for i in res.items if not i.get("#error")]
-    finish_run(conn, run_id, "ok", {"items": len(items), "pages": len(reqs), "apify_usd": res.usage_usd,
-                                    "apify_runs": [run_record(res)]}, est_cost=res.cost_usd)
+    recs = [run_record(res)]
+    finish_run(conn, run_id, "ok", {"items": len(items), "pages": len(reqs), "apify_usd": settle(recs),
+                                    "apify_runs": recs}, est_cost=res.cost_usd)
     return run_id, res.cost_usd or 0.0, items, [res.log or ""]
 
 

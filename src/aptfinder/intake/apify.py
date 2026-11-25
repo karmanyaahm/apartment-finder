@@ -3,7 +3,9 @@
 Every actor run passes the credit guard first (`guard`: the account's real credit left, from /users/me/limits,
 minus `spend.reserve_usd`), and its charge cap is cut to what the guard allows. Apify enforces
 `maxTotalChargeUsd` only for pay-per-event actors, so `run_actor` also aborts a run whose `usageTotalUsd`
-reaches the cap while it polls (platform-billed actors such as apify/playwright-scraper).
+reaches the cap while it polls (platform-billed actors such as apify/playwright-scraper). Residential proxy
+traffic is not in `usageTotalUsd` until after the run, so a residential browser run is checked up front instead
+(`est_usd`: pages x RESIDENTIAL_USD_PER_PAGE must fit the room).
 """
 
 from __future__ import annotations
@@ -48,6 +50,9 @@ def _client() -> httpx.Client:
 
 
 DATACENTER = {"useApifyProxy": True}
+# What one page through the residential proxy cost in practice (playwright + residential, ~$0.029/page, design.md
+# 'Known cheaper Apify actors'): the up-front estimate for a residential run, since its proxy charge posts later.
+RESIDENTIAL_USD_PER_PAGE = 0.029
 # Apify's residential group, US exits: for sites that refuse the datacenter proxy (403/429 even in a browser).
 # Billed by traffic, so pages through it skip images, fonts and video (RESIDENTIAL_HOOKS).
 RESIDENTIAL = {"useApifyProxy": True, "apifyProxyGroups": ["RESIDENTIAL"], "apifyProxyCountry": "US"}
@@ -83,14 +88,14 @@ class SpendRefused(RuntimeError):
     """The credit guard refused an Apify run (credit left minus reserve is too small, or unknown)."""
 
 
-def credit() -> dict[str, float | None]:
+def credit(tries: int = 6) -> dict[str, float | None]:
     """The account's real Apify credit now: the monthly limit, the usage this cycle, what is left, and our
-    `spend.reserve_usd`. `left` is None when the API does not say."""
+    `spend.reserve_usd`. `left` is None when the API does not say. `tries=1`: no retries (the dashboard)."""
     from .base import load_sources
 
     reserve = float(load_sources().get("spend", {}).get("reserve_usd", 0.0))
     with _client() as c:
-        d = _get_json(c, "/users/me/limits").get("data", {})
+        d = _get_json(c, "/users/me/limits", tries=tries).get("data", {})
     limit = (d.get("limits") or {}).get("maxMonthlyUsageUsd")
     used = (d.get("current") or {}).get("monthlyUsageUsd")
     left = None if limit is None or used is None else round(limit - used, 4)
@@ -116,12 +121,16 @@ def _usage(run: dict[str, Any]) -> dict[str, float]:
 
 def run_actor(actor: str, run_input: dict[str, Any], *, max_items: int, max_charge_usd: float,
               timeout_s: int = 900, poll_s: int = 10, memory_mb: int | None = None, clean: bool = True,
-              with_log: bool = False) -> ActorRun:
-    """`clean=False` keeps hidden fields and empty items: Apify's scrapers (web/playwright-scraper) push a failed
+              with_log: bool = False, est_usd: float | None = None) -> ActorRun:
+    """`est_usd`: the caller's estimate of a charge that posts after the run (residential proxy); the run is
+    refused when it is more than the guard's cap. `clean=False` keeps hidden fields and empty items: Apify's scrapers (web/playwright-scraper) push a failed
     request as an item with only `#error` and `#debug` (url, statusCode, errorMessages), which `clean` drops.
     `with_log` also fetches the run's log."""
     actor_path = actor.replace("/", "~")
     max_charge_usd = guard(max_charge_usd)
+    if est_usd and est_usd > max_charge_usd:
+        raise SpendRefused(f"{actor}: estimated ${est_usd:.2f} (residential proxy, billed after the run) is more "
+                           f"than the ${max_charge_usd:.2f} the guard allows; no run started")
     with _client() as c:
         params: dict[str, Any] = {"maxItems": max_items, "maxTotalChargeUsd": max_charge_usd}
         if memory_mb:
@@ -155,6 +164,27 @@ def run_actor(actor: str, run_input: dict[str, Any], *, max_items: int, max_char
 def account_remaining_usd() -> float | None:
     """Monthly Apify credit left (limit minus usage this cycle); None if the API doesn't say."""
     return credit()["left"]
+
+
+def reread_usd(run_id: str) -> float | None:
+    """An Apify run's usageTotalUsd now (None if it cannot be read)."""
+    try:
+        with _client() as c:
+            return _get_json(c, f"/actor-runs/{run_id}", tries=2)["data"].get("usageTotalUsd")
+    except Exception:
+        return None
+
+
+def settle(records: list[dict[str, Any]]) -> float:
+    """Re-read each recorded Apify run's charge just before our run closes (residential proxy posts after the actor
+    ends) and return the total. A composite record's run ids are comma-joined; an unreadable one keeps its value."""
+    total = 0.0
+    for rec in records:
+        got = [reread_usd(i) for i in str(rec.get("run") or "").split(",") if i]
+        if got and all(g is not None for g in got):
+            rec["usd"] = round(sum(got), 4)
+        total += rec.get("usd") or 0.0
+    return round(total, 4)
 
 
 def run_record(run: ActorRun) -> dict[str, Any]:

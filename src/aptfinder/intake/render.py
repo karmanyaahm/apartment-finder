@@ -37,7 +37,8 @@ from .. import identity, settings
 from ..config import PRECHECK_SKIP, load_sites
 from ..store import append_observation, finish_run, start_run
 from ..store.models import ObservationData
-from .apify import browser_proxy, classify_failure, failed_requests, log_errors, run_actor, run_record, same_url
+from .apify import (RESIDENTIAL_USD_PER_PAGE, browser_proxy, classify_failure, failed_requests, log_errors,
+                    run_actor, run_record, same_url, settle)
 from ..plans import match_drawing
 from .direct import plan_drawings
 from .discover import SECRET_ENV, Blocker
@@ -406,7 +407,8 @@ def render(conn, *, sites: list[str] | None = None, model: str = "haiku",
                                 "pageLoadTimeoutSecs": 120, "pageFunctionTimeoutSecs": 240,
                                 "waitUntil": "domcontentloaded"},
                         max_items=2 * n_req, max_charge_usd=max_apify_usd, timeout_s=1800, memory_mb=2048,
-                        clean=False, with_log=True)
+                        clean=False, with_log=True,
+                        est_usd=RESIDENTIAL_USD_PER_PAGE * n_req if residential else None)
     except Exception as e:  # close the run, then re-raise
         finish_run(conn, run, "error", {}, error=repr(e)[:500])
         raise
@@ -468,15 +470,15 @@ def render(conn, *, sites: list[str] | None = None, model: str = "haiku",
             report[sid] = [_line(p) for p in plans] if plans else "no plans on the page"
     except (Blocker, subprocess.TimeoutExpired) as e:
         conn.commit()
-        finish_run(conn, run, "error", {"areas": per_area, "observations": n_obs, **paid},
+        finish_run(conn, run, "error", {"areas": per_area, "observations": n_obs, **paid, "apify_usd": settle(paid["apify_runs"])},
                    est_cost=round((res.cost_usd or 0) + spent, 4), error=str(e))
         raise Blocker(str(e)) from e
     except Exception as e:  # close the run (its commit keeps the sites read so far), then re-raise
-        finish_run(conn, run, "error", {"areas": per_area, "observations": n_obs, **paid},
+        finish_run(conn, run, "error", {"areas": per_area, "observations": n_obs, **paid, "apify_usd": settle(paid["apify_runs"])},
                    est_cost=round((res.cost_usd or 0) + spent, 4), error=repr(e)[:500])
         raise
     conn.commit()
-    finish_run(conn, run, "ok", {"areas": per_area, "observations": n_obs, "items": len(res.items), **paid},
+    finish_run(conn, run, "ok", {"areas": per_area, "observations": n_obs, "items": len(res.items), **paid, "apify_usd": settle(paid["apify_runs"])},
                est_cost=round((res.cost_usd or 0) + spent, 4))
     identity.run(conn)
     return {"run_id": run, "apify_usd": res.cost_usd, "claude_usd": round(spent, 4), "observations": n_obs,
