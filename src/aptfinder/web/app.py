@@ -223,7 +223,8 @@ class CellsIn(BaseModel):
 
 
 class SampleIn(BaseModel):
-    # cover: greedy set cover within radius_m; random: pct % of the scope; refine: needs_check + widest KNN ranges
+    # cover: greedy set cover within radius_m; random: pct % of the scope; refine: KNN ranges straddling a goal's
+    # limit or wider than sampling.REFINE_MAX_SPREAD_MIN, at places that can still pass that goal
     method: str = "cover"
     pct: float = 10
     radius_m: float = 400
@@ -1138,6 +1139,65 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         return {"cells": cell_accuracy(cells(conn), keys), "scope": len(keys), "radius_m": RADIUS_M, "knn_k": K,
                 "pad_min": KNN_PAD_MIN}
 
+    def candidates() -> dict[str, set[str]]:
+        """place_key -> goals it can still pass apart from commute rules (sampling.candidate_goals), cached."""
+        from .. import sampling
+
+        return cached("candidate_goals", lambda: sampling.candidate_goals(
+            conn, res=cached("evaluate_all", lambda: evaluate_all(conn))))
+
+    def hinges() -> dict[str, Any]:
+        """place_key -> goal -> the commute pairs its status waits on (sampling.hinges), cached."""
+        from .. import sampling
+
+        return cached("hinges", lambda: sampling.hinges(cached("evaluate_all", lambda: evaluate_all(conn)),
+                                                         cached("best_trips", lambda: best_trips(conn)),
+                                                         goalstore.effective_goals(conn),
+                                                         cached("located", lambda: sampling.located(conn))))
+
+    def scope_status(keys: list[str], pairs: list[tuple[str, str]]) -> dict[str, Any]:
+        """sampling.commute_status for one scope; each verdict's plan costs come from the same planners as the dry
+        run (cover within knn.RADIUS_M, refine)."""
+        from .. import sampling
+        from ..filter.knn import RADIUS_M, loo_samples
+        from ..trips import planned_legs
+
+        trips = cached("best_trips", lambda: best_trips(conn))
+        loc = cached("located", lambda: sampling.located(conn))
+        cfg = goalstore.effective_goals(conn)
+
+        def cost(method: str, pair: tuple[str, str]) -> tuple[int, int]:
+            if method == "cover":
+                pks = sampling.cover_plan(trips, [pair], keys, loc, RADIUS_M)[pair]
+            else:
+                pks = sampling.refine_plan(trips, [pair], keys, cfg, candidates())[0][pair]
+            return len(pks), (len(planned_legs(db_path, pks, pair)) if pks else 0)
+
+        return sampling.commute_status(
+            trips, pairs, keys, hinges(),
+            lambda p: cached(f"knn_loo_samples|{'|'.join(p)}",
+                             lambda: loo_samples(trips, loc, sampling.cell_keys(trips, p))),
+            lambda p: cached(f"est_errors|{'|'.join(p)}",
+                             lambda: sampling.estimate_errors(conn, sampling.cell_keys(trips, p))), cost)
+
+    @app.post("/api/knn/status")
+    def knn_status(body: SampleIn) -> dict[str, Any]:
+        """The panel's 'do I still need to sample' table: per checked cell, for the current search results (the
+        place_keys sent) and for every place in a walk zone, p90 / p99 expected error, places whose goal status
+        waits on the cell, and a verdict (sampling.commute_status). Computed on read, cached per data version."""
+        from ..filter.knn import RADIUS_M, cells
+        from ..sampling import DONE_P99_MIN
+
+        sets = load_point_sets()
+        pairs = [c for c in cells(conn) if not c[0].startswith("set:") or (c[0][4:] in sets and sets[c[0][4:]].paid)]
+        out: dict[str, Any] = {"done_p99": DONE_P99_MIN, "radius_m": RADIUS_M}
+        for scope, spec in (("list", SampleIn(scope="list", place_keys=body.place_keys or [])),
+                            ("zone", SampleIn(scope="zone"))):
+            keys = _compute_places(spec)
+            tag = hashlib.sha1("\n".join(keys).encode()).hexdigest()[:12]
+            out[scope] = cached(f"knn_status|{tag}|{json.dumps(pairs)}", lambda keys=keys: scope_status(keys, pairs))
+        return out
+
     @app.post("/api/sample/dry_run")
     def sample_dry_run(body: SampleIn) -> dict[str, Any]:
         """A sampling plan for the checked cells over the scope, with places, uncached Route Matrix elements and
@@ -1164,15 +1224,19 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 plan = sampling.cover_plan(trips, pairs, keys, sampling.located(conn), body.radius_m)
                 label = f"cover within {body.radius_m:g} m"
             elif body.method == "refine":
-                goals_of = sampling.walk_zone_candidates(conn) if body.scope == "candidates" else None
-                plan = sampling.refine_plan(trips, pairs, keys, goalstore.effective_goals(conn), goals_of)
+                plan, notes = sampling.refine_plan(trips, pairs, keys, goalstore.effective_goals(conn), candidates())
                 label = "refine"
             else:
                 raise HTTPException(400, "method must be cover, random or refine")
             summ = sampling.summary(conn, db_path, plan, keys, trips)
+            hinge = sampling.hinge_counts(hinges(), keys, pairs, plan)
             use = google_usage(conn)
         left = use["matrix_cap"] - use["matrix_elements"]
+        if body.method == "refine":
+            for p, n in notes.items():
+                summ["pairs"]["|".join(p)].update(n)
         return {**summ, "label": label, "plan": {"|".join(p): v for p, v in plan.items()}, "usage": use,
+                "hinge": hinge,
                 "accuracy": cell_accuracy(pairs, keys),
                 "left": left, "typed": summ["elements"] > TYPED_CONFIRM_OVER and left < 5000,
                 "skipped": [f"{p} x {m}: paid = false in point_sets.toml" for p, m in skipped]}
