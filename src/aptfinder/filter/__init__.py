@@ -118,6 +118,12 @@ def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None, trips:
     # own website wins: where the building's own site prices an offer, only its active priced rows decide the
     # place's goals; other sources' listings there still get a result (shown in the drawer) but decide nothing
     own = {r["place_key"] for r in listings if r["place_key"] and is_own_priced(r)}
+    # Blueground's own feed wins at its stay places the same way: where a `~blueground` place has an active row
+    # from source `blueground` (aptf-intake blueground), only those rows decide; the reposts there (Zumper,
+    # PadMapper, Airbnb) still get a result but decide nothing, so a repost without dates no longer holds the
+    # place at needs_check once Blueground says the unit is unavailable or quotes it for the goal's dates
+    feed = {r["place_key"] for r in listings
+            if r["source"] == "blueground" and r.get("active") and "~blueground" in (r["place_key"] or "")}
     # amenities belong to the building: every listing at a place is judged on all its sources' amenity lists
     # (an own-site plan row has none; Apartments.com lists the building's "Fitness Center")
     # so is a limit on who may rent ('restriction', read by `aptf-intake extract` and from an own site's pages by
@@ -219,7 +225,7 @@ def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None, trips:
         # the reading the place's card shows (place_parking), a parking_cost rule's last resort (rules.row_parking_cost)
         r["parking_place"] = best_parking(pk_all.get(r["place_key"] or "", []))
     return {"listings": listings, "unpriced": unpriced, "places": places, "trips": trips, "anns": anns, "low": low,
-            "own": own}
+            "own": own, "feed": feed}
 
 
 # What a source says when a plan has nothing to rent: Apartments.com's "0 Available units" and its "No availability"
@@ -434,7 +440,9 @@ def evaluate_goal(inp: dict[str, Any], goal: Goal) -> tuple[dict[tuple[str, str]
         nice = [(*evaluate(r, row, ctx), r["type"]) for r in goal.nice]
         # an unpriced own-site plan (goal_inputs) is an own-site row: it decides wherever it is, but only whether the
         # place is 'no listings' or a fail (place_outcome); it has no listing result
-        decides = pk not in own or is_own_priced(row) or i >= len(listings)
+        feed = inp.get("feed") or set()
+        decides = ((pk not in own or is_own_priced(row) or i >= len(listings))
+                   and (pk not in feed or row["source"] == "blueground"))
         # the attribute each non-pass rule judges (rules.fact), in reasons order: cards mark it red or amber; `i` is
         # the rule's index in goal.rules (the goal editor names the edited rule that cuts a place)
         fails = [{"s": s, "i": k, **fact(r, row, goal.people)}

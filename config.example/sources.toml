@@ -94,3 +94,14 @@ operators = [
 # returns the raw search cards (base vs total rent label, units available) but returned only 25 of 72.
 actor = "benthepythondev/rentcafe-apartments-scraper"
 max_items = 600          # properties per city
+
+[blueground]
+# Blueground's own search JSON, read directly (AGENTS.md rule 6 exception, 2026-11-25): `aptf-intake blueground`.
+# The box is the union of the [[box]] areas, searched inside the San Francisco Bay Area market (intake.blueground.MARKET_PLACE).
+market = "SFO"
+# One row per (unit, stay): the monthly base rent Blueground quotes for exactly these dates. A short stay gives every
+# unit a row (unquoted = unavailable for the dates); a long stay only the units it quotes.
+stays = [
+  { name = "temp", term = "short", check_in = "2027-01-11", check_out = "2027-02-15" },
+  { name = "year", term = "long", check_in = "2027-02-15", check_out = "2028-02-15" },
+]

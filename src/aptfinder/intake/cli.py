@@ -10,6 +10,7 @@
   aptf-intake render-restriction [--site ID] [--parking] [--dry-run]   # who may rent (or parking), re-read from rendered pages (no Apify)
   aptf-intake find-plans [--place KEY] [--name NAME] [--limit N]   # own-site list: search + click agent (pilot)
   aptf-intake prometheus [--site ID] [--dry-run]   # Prometheus sites: one availability-JSON request each, free
+  aptf-intake blueground [--stay NAME] [--no-breakdown] [--from-raw FILE] [--dry-run]  # Blueground's own JSON, free
   aptf-intake precheck [--site ID] [--dry-run]   # free: DNS + one plain GET per site; records dead / challenge
   aptf-intake extract <text source>|all [--workers 8] [--dry-run]   # Haiku reads each listing's whole entry
   aptf-intake zillow-detail --max-usd 1.0 [--batch 150] [--limit N] [--dry-run]   # Zillow detail pages (raw only)
@@ -191,6 +192,12 @@ def main(argv: list[str] | None = None) -> None:
                                            "JSON, one direct request per site (no Apify, no page scraping)")
     pm.add_argument("--site", action="append", default=[], help="site id (repeatable); default every Prometheus site")
     pm.add_argument("--dry-run", action="store_true")
+    bg = sub.add_parser("blueground", help="Blueground units in the station boxes from Blueground's own search JSON, "
+                                           "quoted for each [blueground] stay (direct, sequential, no Apify)")
+    bg.add_argument("--stay", action="append", default=[], help="stay name (repeatable); default every stay")
+    bg.add_argument("--no-breakdown", action="store_true", help="skip the per-unit rent breakdown (price = total)")
+    bg.add_argument("--from-raw", help="store a saved raw file again instead of fetching (no request)")
+    bg.add_argument("--dry-run", action="store_true")
     pc = sub.add_parser("precheck", help="free reachability check of every own site from this machine (DNS, one "
                                          "plain GET): record dead domains and Cloudflare challenges, no Apify")
     pc.add_argument("--site", action="append", default=[], help="site id (repeatable); default every site")
@@ -272,6 +279,13 @@ def main(argv: list[str] | None = None) -> None:
         from .prometheus import read
 
         print(json.dumps(read(conn, sites=args.site or None, dry_run=args.dry_run), indent=1, default=str))
+        return
+
+    if args.cmd == "blueground":
+        from .blueground import read as bg_read
+
+        print(json.dumps(bg_read(conn, with_breakdown=not args.no_breakdown, dry_run=args.dry_run,
+                                 only=args.stay or None, from_raw=args.from_raw), indent=1, default=str))
         return
 
     if args.cmd == "zillow-buildings":
