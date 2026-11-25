@@ -30,9 +30,10 @@ from . import settings
 
 PHOTO_PX, PHOTO_Q = 800, 75  # long side, JPEG quality
 PLAN_PX, PLAN_Q = 1280, 80  # drawings keep their text readable
-PHOTO_MAX_DISTANCE = 10  # pHash bits: at or under this, two photos of one place are the same picture (tuned
-# 2026-11-25 on 2,000 live downloads: every pair at 0-10 was one picture re-cropped, re-graded or with a banner
-# moved; the first different shot was at 12, different rooms only from 18)
+PHOTO_MAX_DISTANCE = 6  # pHash bits: at or under this, two photos of one place are the same picture. 2026-11-25:
+# every pair at 0-6 was one picture; at 8-10, pairs within one listing included different shots of one room (and
+# two different rooms), so 10 was lowered back to 6. A merge made at a larger distance than this is not used:
+# url_files drops it and the next fetch downloads that URL again.
 FIRST_N = 12  # photos per listing fetched before any listing's later photos
 PER_HOST, DELAY_S, WORKERS = 4, 0.25, 24
 HOST_GIVE_UP = 20  # consecutive 401/403 from a host: skip its other URLs this run (they stay "to fetch")
@@ -163,13 +164,16 @@ def photo_jobs(conn: sqlite3.Connection, ranked: bool = True) -> list[dict[str, 
 
 def url_files(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
     """url -> the stored file it is served from ({file, phash (the file's), width, height, kind}), for URLs
-    fetched OK."""
+    fetched OK (the latest OK row of each URL). A URL whose latest row merged it into another file at more than
+    PHOTO_MAX_DISTANCE bits is left out, so it is shown from its source and fetched again."""
     rows = [dict(r) for r in conn.execute(
-        "SELECT url, kind, COALESCE(same_as, sha256) AS file, same_as, sha256, phash, width, height FROM media "
-        "WHERE status = 200 AND sha256 IS NOT NULL ORDER BY id")]
+        "SELECT url, kind, COALESCE(same_as, sha256) AS file, same_as, sha256, phash, distance, width, height "
+        "FROM media WHERE status = 200 AND sha256 IS NOT NULL ORDER BY id")]
     file_phash = {r["sha256"]: r["phash"] for r in rows if r["same_as"] is None}
-    return {r["url"]: {"file": r["file"], "phash": file_phash.get(r["file"], r["phash"]), "kind": r["kind"],
-                       "width": r["width"], "height": r["height"]} for r in rows}
+    latest = {r["url"]: r for r in rows}
+    return {u: {"file": r["file"], "phash": file_phash.get(r["file"], r["phash"]), "kind": r["kind"],
+                "width": r["width"], "height": r["height"]} for u, r in latest.items()
+            if not (r["same_as"] and (r["distance"] or 0) > PHOTO_MAX_DISTANCE)}
 
 
 def _failed(conn: sqlite3.Connection) -> dict[str, int]:

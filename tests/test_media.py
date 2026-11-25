@@ -202,3 +202,14 @@ def test_blocked_host_drawing_shows_from_the_store_and_site_drawings_are_fetched
     assert plan_image(ls, {}, skip=("images1.apartments.com",), local={u: {"file": "f"}}) == u
     data = {"extra": {"plan_drawings": {"Plan A": "https://site/a.svg", "Plan B": "https://site/b.png"}}}
     assert media.listing_images(data) == [("https://site/a.svg", "plan"), ("https://site/b.png", "plan")]
+
+
+def test_a_merge_above_the_threshold_is_dropped_and_fetched_again(place, monkeypatch):
+    conn = place
+    media.fetch(conn, log=lambda m: None)
+    dup = conn.execute("SELECT url, distance FROM media WHERE same_as IS NOT NULL AND same_as <> sha256").fetchone()
+    assert dup and dup["url"] in media.url_files(conn)
+    monkeypatch.setattr(media, "PHOTO_MAX_DISTANCE", dup["distance"] - 1)  # threshold lowered below that merge
+    assert dup["url"] not in media.url_files(conn) and media.status(conn)["to_fetch"] == 1
+    c = media.fetch(conn, log=lambda m: None)
+    assert c["written"] == 1 and dup["url"] in media.url_files(conn)
