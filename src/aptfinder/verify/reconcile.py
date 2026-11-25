@@ -74,7 +74,7 @@ SYSTEM = (
     "vs a whole-unit rent, a price range or 'starting at' price of a plan vs one unit, '1.5 baths' vs '1 bath + "
     "powder room', a building page listing several plans (quote the line of this unit's plan), and remarks that "
     "contradict structured fields. Price is the monthly rent in dollars. Dates are YYYY-MM-DD ('available now' is "
-    "today's date). confidence 'high' only when the quote states the value for this very unit or room. If the "
+    "today's date; a month with no day, 'beginning March', is the 1st of the next such month from today). confidence 'high' only when the quote states the value for this very unit or room. If the "
     "evidence does not settle a field, answer undecided and say whether the listing's current page would likely "
     "settle it (need_page).")
 
