@@ -23,9 +23,14 @@ def _db(path):
     obs("zumper", "u1", address="999 Evelyn Ter, Sunnyvale, CA 94086", lat=37.3802, lon=-122.0300)
     # website kind: two addresses of one complex that name the same own website
     obs("apartments_com", "a1", address="100 Whisman Station Dr, Mountain View, CA", lat=37.3900, lon=-122.0600,
-        property_name="Central Park", extra={"website": "https://www.liveatcentralpark.com/"})
+        property_name="Central Park", extra={"website": "https://www.liveatcentralpark.com/floorplans/"})
     obs("craigslist", "c1", address="200 Hope St, Mountain View, CA", lat=37.3920, lon=-122.0600,
-        extra={"website": "liveatcentralpark.com"})
+        extra={"website": "liveatcentralpark.com/floorplans"})
+    # a manager's bare homepage named at two buildings 60 m apart is no evidence (Le Parc / Montclair, zell.com)
+    obs("craigslist", "c4", address="1921 California St, Mountain View, CA", lat=37.4000, lon=-122.1000,
+        extra={"website": "http://www.zell.com/"})
+    obs("craigslist", "c5", address="426 Escuela Ave, Mountain View, CA", lat=37.4005, lon=-122.1000,
+        extra={"website": "http://zell.com"})
     # name kind: the same name at two addresses 100 m apart
     obs("apartments_com", "a2", address="1 Oak Ave, Menlo Park, CA", lat=37.4500, lon=-122.1800,
         property_name="Sharon Grove Apartments")
@@ -46,7 +51,7 @@ def test_queue_finds_address_website_and_name_pairs(tmp_path):
     q = duplicate_queue(conn)
     assert _kinds(q) == {frozenset({"address"}), frozenset({"website"}), frozenset({"name"})}
     web = next(e for e in q if e["reasons"][0]["kind"] == "website")
-    assert web["reasons"][0]["detail"] == "liveatcentralpark.com" and web["metres"] < 300
+    assert web["reasons"][0]["detail"] == "liveatcentralpark.com/floorplans" and web["metres"] < 300
     assert q[0]["reasons"][0]["kind"] == "website"  # strongest evidence first
     assert all(p["n_listings"] == 1 for e in q for p in e["places"])
 

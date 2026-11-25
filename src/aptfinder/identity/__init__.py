@@ -114,23 +114,31 @@ def _near_address(decisions: dict, rows: list) -> None:
 
 def run(conn: sqlite3.Connection) -> dict[str, int]:
     global _GEOCODES
+    from . import same_site
     from .addresses import load_geocodes
 
     _GEOCODES = load_geocodes()
     rows = conn.execute(
         "SELECT source, source_id, address, unit, city, floor_plan, property_name, kind, lat, lon, beds, price, term, "
-        "operator "
+        "operator, url, json_extract(data, '$.extra.website') AS website "
         "FROM listings"
     ).fetchall()
-    last_rule = {
-        (r["source"], r["source_id"]): (r["place_key"], r["unit_key"])
-        for r in conn.execute(
-            "SELECT * FROM (SELECT l.*, ROW_NUMBER() OVER (PARTITION BY source, source_id ORDER BY id DESC)"
-            " rn FROM links l WHERE author != 'user') WHERE rn = 1")
-    }
+    last_rule, prev_kept = {}, set()
+    for r in conn.execute(
+        "SELECT * FROM (SELECT l.*, ROW_NUMBER() OVER (PARTITION BY source, source_id ORDER BY id DESC)"
+        " rn FROM links l WHERE author != 'user') WHERE rn = 1"):
+        last_rule[(r["source"], r["source_id"])] = (r["place_key"], r["unit_key"])
+        if r["author"] == same_site.AUTHOR:
+            prev_kept.add(r["place_key"])
     counts = {"listings": len(rows), "linked": 0, "unchanged": 0, "unidentified": 0}
     decisions = {(r["source"], r["source_id"]): decide(r) for r in rows}
     _near_address(decisions, rows)
+    # obvious duplicate buildings (the same building-specific own website, under 100 m apart) join into one place
+    cand = same_site.candidates(conn, decisions, rows, _GEOCODES)
+    merged = same_site.merge_map(cand["pairs"], cand["n_listings"], prev_kept)
+    if merged:
+        counts["auto_merged_places"] = len(merged)
+        counts["auto_merged_listings"] = same_site.apply(decisions, merged)
     for r in rows:
         d = decisions[(r["source"], r["source_id"])]
         if d is None:

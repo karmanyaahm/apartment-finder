@@ -471,13 +471,15 @@ def duplicate_queue(conn: sqlite3.Connection, places: list[dict[str, Any]] | Non
     """Pairs of places that are probably one building, each with its reasons, strongest evidence first:
     `address` (identity.addresses.suspected_duplicates: same number, street 85%+ alike, within 150 m), `website`
     (the same own website, host and path, within DUP_SITE_MAX_M: the site list or a site search found for the
-    place, a `direct` site scraped at both, or the website a listing names) and `name` (the same property name within DUP_NAME_MAX_M). Third-party stay places (`~`) and
+    place, a `direct` site scraped at both, or the website a listing names; a building's own page only, never a bare
+    homepage, portfolio page or aggregator) and `name` (the same property name within DUP_NAME_MAX_M). Third-party stay places (`~`) and
     places you split off (`u_`) are left out. Bucketed by number, URL and name, never all pairs. A pair leaves once
     you merge it (one place is gone) or answer 'not the same building' (annotation place_pair / 'a|b' /
     same_building = no). `places`: rows of the places view already read."""
     from ..commute.geo import haversine_m
     from ..config import check_outcome, last_checks, load_sites
     from ..identity.addresses import suspected_duplicates
+    from ..identity.same_site import building_site_key
     from ..intake.discover import _records
 
     if places is None:
@@ -510,17 +512,20 @@ def duplicate_queue(conn: sqlite3.Connection, places: list[dict[str, Any]] | Non
     # the site list and the sites search found for a place (an address check that failed rules one out)
     rec = _records()
     rejected = {i for i, c in last_checks(rec).items() if check_outcome(c) == "rejected"}
+    # only a building's own page counts: a bare homepage (a manager's: zell.com, caprop.com), a portfolio or city
+    # page, or an aggregator host is no evidence (identity.same_site.building_site_key)
     for s in [*load_sites().values(), *(f for f in rec.get("found", []) if f.get("id") not in rejected)]:
-        if s.get("place_key") and (k := _site_key(s.get("url"))):
+        if s.get("place_key") and (k := _site_key(s.get("url"))) and building_site_key(s.get("url")):
             sites[k].add(s["place_key"])
     inputs = own_site_inputs(conn)
+    site_urls = {sid: s.get("url") for sid, s in load_sites(duplicates=True).items()}
     for pk, rows in inputs["scraped"].items():
         for r in rows:
-            if r["site"]:
+            if r["site"] and building_site_key(site_urls.get(r["site"]) or r["url"]):
                 sites["site " + r["site"]].add(pk)
     for pk, rows in inputs["listing_sites"].items():
         for r in rows:
-            if (k := _site_key(r["w"])):
+            if (k := _site_key(r["w"])) and building_site_key(r["w"]):
                 sites[k].add(pk)
     for url, pks in sites.items():
         ks = sorted(k for k in pks if k in by_key)
