@@ -272,8 +272,8 @@ class SampleIn(BaseModel):
     method: str = "cover"
     pct: float = 10
     radius_m: float = 400
-    # "list": place_keys (the places the list shows); "zone": every place in a walk zone; "candidates": places in a
-    # walk zone that can still pass some goal apart from commute (filter.routing_candidates)
+    # "list": place_keys (the places the list shows); "zone": every place in a walk zone; "candidates": places, in a
+    # walk zone or not, that can still pass some goal apart from commute (filter.routing_candidates)
     scope: str = "list"
     place_keys: list[str] | None = None
     seed: int | None = None
@@ -1387,7 +1387,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
 
             res = results()
             cands = routing_candidates(conn, res=res)
-            keys = [pk for pk in cands if pk in located and in_walk_zone(*located[pk])]
+            keys = [pk for pk in cands if pk in located]  # in a walk zone or not: stays are mostly outside
         else:
             keys = body.place_keys or []
         # a stay place (`<building>~<operator>`) reads its building's trips: route the building when it is a place
@@ -1541,6 +1541,10 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         if body.method == "random":
             plan = sampling.random_plan(trips, pairs, keys, body.pct, body.seed)
             label = f"random {body.pct:g}%"
+        elif body.method == "cover" and body.scope == "candidates":
+            # per pair, only the candidates of a goal with a commute rule on it (a stay needs transit, a lease not)
+            plan = sampling.goal_cover_plan(trips, pairs, keys, located(), goalstore.effective_goals(conn),
+                                            candidates(), body.radius_m)
         elif body.method == "cover":
             plan = sampling.cover_plan(trips, pairs, keys, located(), body.radius_m)
             label = f"cover within {body.radius_m:g} m"

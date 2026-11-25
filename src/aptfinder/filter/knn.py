@@ -4,7 +4,9 @@ written. Only the cells (point or `set:<name>`, mode) checked in the dashboard's
 
 A KNN trip is {minutes: the middle neighbour, min, max, neighbors: [{place_key, minutes, km}]}; rules read the range
 padded by rules.KNN_PAD_MIN (rules._minutes_status). With no Google neighbour within RADIUS_M the place keeps its
-straight-line estimate. A place's own Google trip always wins; a KNN range beats a straight-line estimate.
+straight-line estimate; where that has no time (transit) or Google found no route, `far_estimate` gives the middle of the K
+nearest Google times at any distance as an estimate. A place's own Google trip (with a time) always wins; a KNN range
+beats a straight-line estimate.
 Leave-one-out on the box's Google trips (2026-11-25): within 400 m the range is about 1 minute wide (median) and the
 true time, when outside it, is at most 0.7 min outside at p90, so the radius sets coverage, not accuracy.
 """
@@ -89,7 +91,8 @@ def add_knn(trips: dict[str, dict[tuple[str, str], dict[str, Any]]], located: di
     """Fill (point, mode) entries of every located place that has no Google trip for them with a KNN range from
     the places within RADIUS_M that do, for the (point, mode) keys in the checked cells `sel` (None: every key).
     A stay place whose building is a place reads the building's trips instead (filter._Trips), so it gets none of
-    its own."""
+    its own. A place whose row for a key has no time (the transit estimate, a Google row with no route) and no
+    routed place within RADIUS_M gets `far_estimate`."""
     train: dict[tuple[str, str], list] = defaultdict(list)
     for pk, ts in list(trips.items()):
         if pk not in located:
@@ -109,6 +112,30 @@ def add_knn(trips: dict[str, dict[tuple[str, str], dict[str, Any]]], located: di
             near = neighbours(rows, lat, lon, exclude=pk, grid=grid)
             if near:
                 trips[pk][key] = knn_trip(near, *key)
+            elif cur is not None and cur["minutes"] is None:
+                # a trip row with no time (transit: the straight line cannot estimate it; or Google found no route):
+                # the middle of the K nearest Google times at any distance, an estimate (rules' estimate band). Not
+                # where the place has no row for the key at all: a set's far points (a station 15 km off) have
+                # routed places only near them, so 'nearest at any distance' would be a different trip entirely
+                trips[pk][key] = far_estimate(rows, lat, lon, pk, key, no_route=bool(cur and cur["provider"] == "google"))
+
+
+def far_estimate(rows: list[tuple[str, float, float, float]], lat: float, lon: float, exclude: str,
+                 key: tuple[str, str], k: int = K, no_route: bool = False) -> dict[str, Any] | None:
+    """A place with no time for a checked cell and no Google-routed place within RADIUS_M (in practice transit,
+    which the straight-line source cannot estimate; also where Google found no route): the middle of the k nearest
+    Google times at any distance, `provider` 'estimate' so rules read it through the estimate band
+    (rules.EST_PASS_RATIO / EST_FAIL_RATIO), with its neighbours (`far`). Leave-one-out on the box's 424 Google transit
+    trips to Downtown Palo Alto where the nearest is over 400 m (2026-11-25): 97 fail, 0 wrongly; 8 pass, 1 wrongly
+    (limit 25). `no_route`: Google returned no route for this place (the reason says so)."""
+    cos_lat = cos(radians(lat))
+    best = sorted(((la - lat) ** 2 + ((lo - lon) * cos_lat) ** 2, pk, la, lo, m)
+                  for pk, la, lo, m in rows if pk != exclude)[:k]
+    if not best:
+        return None
+    near = [(haversine_m((lat, lon), (la, lo)) / 1000, pk, m) for _, pk, la, lo, m in best]
+    t = knn_trip(near, *key)
+    return {**t, "provider": "estimate", "far": True, "no_route": no_route}
 
 
 def loo_errors(trips: dict[str, dict[tuple[str, str], dict[str, Any]]], located: dict[str, tuple[float, float]],

@@ -152,6 +152,10 @@ def _minutes_status(trip: dict[str, Any] | None, limit: float) -> tuple[str, str
         return CHECK, f"{src} span {span}, too close to call"
     m, est = trip["minutes"], trip["provider"] == "estimate"
     tag = f"{m:.0f} min{' (estimate)' if est else ''}"
+    if trip.get("far"):  # knn.far_estimate: the nearest Google times at any distance
+        km = [n["km"] for n in trip.get("neighbors") or []]
+        tag = (f"{'Google found no route; ' if trip.get('no_route') else ''}{m:.0f} min (estimate: nearest "
+               f"{len(km)} Google route{'s' if len(km) > 1 else ''} {min(km):.1f}-{max(km):.1f} km away)")
     if not est:
         return (PASS if m <= limit else FAIL), tag
     if m <= limit * EST_PASS_RATIO:

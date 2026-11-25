@@ -412,7 +412,7 @@ def route_plan(conn: sqlite3.Connection, db_path: str, plan: dict[tuple[str, str
 
 
 def sample(conn: sqlite3.Connection, args) -> dict[str, Any]:
-    """`aptf-commute sample`: plan per pair over the walk-zone candidates (cover, random % or refine), then a dry run
+    """`aptf-commute sample`: plan per pair over the candidates, in a walk zone or not (cover, random % or refine), then a dry run
     (places, matrix elements, coverage) or the Google run (`route_plan`)."""
     from . import sampling
     from .filter import best_trips
@@ -422,7 +422,7 @@ def sample(conn: sqlite3.Connection, args) -> dict[str, Any]:
     for p in pairs:
         if len(p) != 2:
             raise SystemExit(f"--pair must be POINT|MODE, got {p!r}")
-    cands = sampling.walk_zone_candidates(conn)
+    cands = sampling.candidate_goals(conn)
     keys = sorted(cands)
     trips = best_trips(conn)
     if args.refine:
@@ -431,8 +431,9 @@ def sample(conn: sqlite3.Connection, args) -> dict[str, Any]:
     elif args.pct:
         plan = sampling.random_plan(trips, pairs, keys, args.pct, args.seed)
         label = f"random {args.pct:g}%"
-    else:
-        plan = sampling.cover_plan(trips, pairs, keys, sampling.located(conn), args.radius_m)
+    else:  # only places that can still pass a goal with a rule on the pair (a stay needs transit, a lease does not)
+        plan = sampling.goal_cover_plan(trips, pairs, keys, sampling.located(conn), effective_goals(conn), cands,
+                                        args.radius_m)
         label = f"cover within {args.radius_m:g} m"
     out = {"plan": label, **sampling.summary(conn, args.db, plan, keys, trips), "google_usage_now": google_usage(conn)}
     if args.refine:
@@ -470,7 +471,7 @@ def main(argv: list[str] | None = None) -> None:
     c.add_argument("--dry-run", action="store_true",
                    help="count the uncached paid calls this would make, using estimates in a scratch cache copy")
     sm = sub.add_parser("sample", help="route a covering set (default), a random sample (or, with --refine, the ambiguous places) of the "
-                                       "walk-zone candidates with Google Route Matrix so KNN ranges cover the rest "
+                                       "candidates (in a walk zone or not) with Google Route Matrix so KNN ranges cover the rest "
                                        "(aptfinder/sampling.py); the dashboard's Pipeline panel does the same")
     sm.add_argument("--pair", action="append", required=True,
                     help="POINT|MODE, e.g. 'commute_targets:Meta HQ|drive' or 'set:caltrain_stations|walk' (repeatable)")

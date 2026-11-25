@@ -1750,7 +1750,7 @@ function computeBlock() {
       <label><input type="radio" name="s-method" value="refine"> refine: candidates whose range straddles a goal's limit or is over 2 min wide</label></div>
     <div>Of: <label><input type="radio" name="s-scope" value="list" checked> current search results (${n})</label>
       <label><input type="radio" name="s-scope" value="zone"> every place in a walk zone</label>
-      <label><input type="radio" name="s-scope" value="candidates"> search candidates (in a walk zone, can still pass a goal)</label></div>
+      <label><input type="radio" name="s-scope" value="candidates"> search candidates (can still pass a goal, in a walk zone or not)</label></div>
     <button id="c-dry">Dry run</button>
     <span id="c-confirm" class="hidden">to run, type the elements (<b id="c-n-want"></b>) <input id="c-n" type="number" class="num-count">
       and the elements left this month (<b id="c-left-want"></b>) <input id="c-left" type="number" class="num-count"></span>

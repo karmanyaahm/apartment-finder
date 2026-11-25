@@ -37,7 +37,7 @@ def test_knn_range_from_routed_places_within_the_radius():
     assert t["provider"] == "knn" and (t["min"], t["max"]) == (16.0, 30.0)  # p2, p1 (~220 m) and p5 (~220 m)
     assert len(t["neighbors"]) == 3 and t["minutes"] == 18.0
     assert trips["p0"][(META, "drive")]["provider"] == "google"  # own Google trip wins
-    assert (META, "drive") not in trips["far"]  # nothing within RADIUS_M: keeps whatever it had (here none)
+    assert (META, "drive") not in trips["far"]  # nothing within RADIUS_M and no row of its own: nothing
     assert RADIUS_M == 400
 
 
@@ -111,13 +111,15 @@ def test_prefetch_fills_the_cache_one_request_per_destination_and_skips_cached(t
     assert c.prefetch(legs)["elements"] == 0  # all cached now
 
 
-def test_transit_knn_fills_a_place_with_no_transit_row_and_none_without_a_neighbour():
+def test_transit_knn_fills_a_place_with_no_transit_row_and_the_far_estimate_without_a_neighbour():
     pa = "commute_targets:Downtown Palo Alto"
     loc = {"a": (37.40, -122.10), "b": (37.401, -122.10), "far": (37.45, -122.10)}
-    trips = _trips([("a", (pa, "transit"), _g(22.0))])  # b and far have no transit row at all (no estimate)
+    # b has no transit row at all; far has the straight-line estimate's row, which has no time for transit
+    trips = _trips([("a", (pa, "transit"), _g(22.0)), ("far", (pa, "transit"), {"provider": "estimate", "minutes": None})])
     add_knn(trips, loc, [(pa, "transit")])
     assert trips["b"][(pa, "transit")]["provider"] == "knn" and trips["b"][(pa, "transit")]["minutes"] == 22.0
-    assert (pa, "transit") not in trips["far"]  # no routed neighbour within 400 m: stays '–'
+    far = trips["far"][(pa, "transit")]  # no routed neighbour within 400 m: the far estimate, never '–'
+    assert far["provider"] == "estimate" and far["minutes"] == 22.0 and not far["no_route"]
 
 
 def test_transit_prefetch_splits_at_100_and_the_google_body_departs_in_the_future(tmp_path):
@@ -389,3 +391,43 @@ def test_hinges_count_places_waiting_only_on_a_commute_and_the_plan_settles_them
     assert row["undecided"] == 1 and row["verdict"]["state"] == "run" and (row["p90"], row["p99"]) == (0.0, 0.0)
     st = commute_status(t, [pair], sorted(loc), {}, lambda p: [(0.0, 0.5)], lambda p: [3.0], lambda m, p: (0, 0))
     assert st["cells"][f"{META}|drive"]["verdict"]["state"] == "done" and st["done"]
+
+
+def test_a_place_with_no_time_and_no_neighbour_within_the_radius_gets_the_far_estimate_through_the_band():
+    pa = "commute_targets:Downtown Palo Alto"
+    # three routed places ~2 km south of `far`, 50-60 min; `far` has a Google row with no route
+    loc = {"a": (37.430, -122.10), "b": (37.431, -122.10), "c": (37.432, -122.10), "far": (37.45, -122.10)}
+    trips = _trips([("a", (pa, "transit"), _g(50.0)), ("b", (pa, "transit"), _g(55.0)),
+                    ("c", (pa, "transit"), _g(60.0)), ("far", (pa, "transit"), _g(None))])
+    add_knn(trips, loc, [(pa, "transit")])
+    t = trips["far"][(pa, "transit")]
+    assert t["provider"] == "estimate" and t["far"] and t["no_route"] and t["minutes"] == 55.0
+    s, why = _minutes_status(t, 25)
+    assert s == FAIL and why.startswith("Google found no route; 55 min (estimate: nearest 3 Google routes")
+    assert _minutes_status({**t, "minutes": 30.0}, 25)[0] == CHECK  # inside the band: needs_check, never a rule
+
+
+def test_a_google_row_without_minutes_never_hides_a_time(tmp_path):
+    from aptfinder.filter import best_trips
+    from aptfinder.store import connect, init_db
+
+    conn = connect(tmp_path / "t.db")
+    init_db(conn)
+    pa = "commute_targets:Downtown Palo Alto"
+    for prov, m in (("estimate", 40.0), ("google", None)):
+        conn.execute("INSERT INTO trips (computed_at, place_key, point_id, mode, minutes, provider) "
+                     "VALUES ('2026-11-25', 'x', ?, 'bike', ?, ?)", (pa, m, prov))
+    conn.commit()
+    t = best_trips(conn)["x"][(pa, "bike")]
+    assert t["provider"] == "estimate" and t["minutes"] == 40.0
+
+
+def test_goal_cover_plan_covers_per_pair_only_the_candidates_of_a_goal_with_a_rule_on_it():
+    from aptfinder.sampling import goal_cover_plan
+
+    pa = "commute_targets:Downtown Palo Alto"
+    cfg = _cfg([{"type": "commute_any", "target": pa, "options": [{"mode": "transit", "max": 25}]}])  # goal 'lease'
+    loc = {"stay": (37.40, -122.10), "flat": (37.45, -122.10)}  # 5 km apart, neither routed
+    plan = goal_cover_plan(_trips([]), [(pa, "transit"), (META, "drive")], sorted(loc), loc, cfg,
+                           {"stay": {"lease"}, "flat": {"other"}})
+    assert plan == {(pa, "transit"): ["stay"], (META, "drive"): []}  # no goal has a Meta drive rule

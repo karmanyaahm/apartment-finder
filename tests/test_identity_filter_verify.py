@@ -567,6 +567,10 @@ def test_priced_fitting_offer_keeps_pass_and_needs_check():
     assert places["p1"]["status"] == "pass" and "why" not in places["p1"]
     _, places = _nl_eval([_nl_row("a", "p1", 3, None, 6000), _nl_row("b", "p1", 3, 2)])
     assert places["p1"]["status"] == "needs_check"  # priced, baths unknown: a real check
+    # a Zillow building row whose plans disagree on baths (3bd, baths unknown) beside a 3bd/1ba that fails: the
+    # unknown one decides, needs_check, never fail or no listings (checked live 2026-11-25: 0 places otherwise)
+    _, places = _nl_eval([_nl_row("z:3bd", "p1", 3, None, 6000), _nl_row("a", "p1", 3, 1, 6000)])
+    assert places["p1"]["status"] == "needs_check" and places["p1"]["source_id"] == "z:3bd"
     _, places = _nl_eval([_nl_row("a", "p1", 3, 2, 9000)])
     assert places["p1"]["status"] == "fail"  # $3,000/person over $2,500: the plan fits beds/baths but fails price
 

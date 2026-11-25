@@ -35,8 +35,9 @@ class _Trips(defaultdict):
 
 def best_trips(conn: sqlite3.Connection, located: dict[str, tuple[float, float]] | None = None
                ) -> dict[str, dict[tuple[str, str], dict[str, Any]]]:
-    """place_key -> (point_id, mode) -> latest trip from the most trusted provider: the place's own Google trip, else
-    a KNN range from nearby places' Google trips (filter.knn), else the straight-line estimate. `located`: place_key
+    """place_key -> (point_id, mode) -> latest trip from the most trusted provider with a time: the place's own Google
+    trip, else a KNN range from nearby places' Google trips (filter.knn), else the straight-line estimate, else (no
+    estimate: transit) the middle of the nearest Google times at any distance (knn.far_estimate). `located`: place_key
     -> (lat, lon) of the located places, already read (the places view is computed over everything)."""
     from .knn import add_knn, cells
 
@@ -48,7 +49,9 @@ def best_trips(conn: sqlite3.Connection, located: dict[str, tuple[float, float]]
     for r in rows:
         key = (r["point_id"], r["mode"])
         cur = out[r["place_key"]].get(key)
-        if cur is None or PROVIDER_PREF.get(r["provider"], 5) < PROVIDER_PREF.get(cur["provider"], 5):
+        # a trip with a time beats one without (Google found no route: the estimate, or KNN, decides instead)
+        if cur is None or ((r["minutes"] is None, PROVIDER_PREF.get(r["provider"], 5))
+                           < (cur["minutes"] is None, PROVIDER_PREF.get(cur["provider"], 5))):
             out[r["place_key"]][key] = dict(r)
     sel = cells(conn)
     if sel:

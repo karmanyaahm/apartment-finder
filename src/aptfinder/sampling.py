@@ -1,7 +1,7 @@
 """Which places to route with Google so that KNN ranges (filter.knn) cover the rest.
 
 The places come from a scope (the dashboard: the places the list shows, every place in a walk zone, or the routing
-candidates in a walk zone). A pair (cell) is (point id, mode) or (`set:<name>`, mode), as
+candidates anywhere). A pair (cell) is (point id, mode) or (`set:<name>`, mode), as
 `trips.compute_all(only=...)` takes it. Three plans, each over the scope's places without a Google trip for the pair:
 - `random_plan`: a random `pct` % of the scope (the same places for every pair);
 - `cover_plan`: greedy set cover: repeatedly the place that brings the most not-yet-covered scope places within
@@ -49,14 +49,6 @@ def candidate_goals(conn: sqlite3.Connection, res: dict | None = None,
     for pk, goals in routing_candidates(conn, res=res).items():
         merged.setdefault(_base(pk, loc), set()).update(goals)
     return {pk: g for pk, g in merged.items() if pk in loc}
-
-
-def walk_zone_candidates(conn: sqlite3.Connection, res: dict | None = None) -> dict[str, set[str]]:
-    """place_key -> goals, for the routing candidates inside a station walk zone (a stay place as its building)."""
-    from .areas import in_walk_zone
-
-    loc = located(conn)
-    return {pk: g for pk, g in candidate_goals(conn, res).items() if in_walk_zone(*loc[pk])}
 
 
 def routed(trips: dict, pair: Pair) -> set[str]:
@@ -114,6 +106,19 @@ def cover_plan(trips: dict, pairs: list[Pair], keys: list[str], loc: dict[str, t
             picks.append(pk)
             uncovered -= near[pk]
         out[p] = sorted(picks)
+    return out
+
+
+def goal_cover_plan(trips: dict, pairs: list[Pair], keys: list[str], loc: dict[str, tuple[float, float]], cfg,
+                    goals_of: dict[str, set[str]], radius_m: float = RADIUS_M) -> dict[Pair, list[str]]:
+    """cover_plan per pair over only the scope's places that can still pass a goal with a commute rule on the pair
+    (`goals_of`, candidate_goals): the candidates scope, in a walk zone or not, where a stay outside every walk zone
+    needs transit and a lease candidate does not."""
+    limits = goal_limits(cfg)
+    out: dict[Pair, list[str]] = {}
+    for p in pairs:
+        gs = {g for g, _ in limits.get(p, [])}
+        out.update(cover_plan(trips, [p], [pk for pk in keys if goals_of.get(pk, set()) & gs], loc, radius_m))
     return out
 
 
