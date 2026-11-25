@@ -142,20 +142,6 @@ def _area_states(per_area: dict[str, int], cap_each: int, exhausted: bool, ok: b
     return out
 
 
-def spend_room(sources: dict[str, Any], run_left: float, apify: bool = True) -> tuple[float, str | None]:
-    """The budget guard, checked before every actor run: what may still be spent (the run's cap left, and the Apify
-    credit left minus `spend.reserve_usd`), and why nothing may (None while more than $0.02 is left)."""
-    remaining = run_left
-    account = account_remaining_usd() if apify else None
-    reserve = sources["spend"].get("reserve_usd", 0.0)
-    if account is not None:
-        remaining = min(remaining, account - reserve)
-    if remaining > 0.02:
-        return remaining, None
-    return remaining, (f"Apify credit left ${account:.2f} minus reserve ${reserve:.2f}" if account is not None
-                       and account - reserve < run_left else f"run spend cap left ${run_left:.2f}")
-
-
 def run_source(conn: sqlite3.Connection, adapter: Adapter, areas: list[Area], *, max_items: int | None = None,
                max_usd: float | None = None, rebuild_identity: bool = True) -> IntakeResult:
     """Collect a source over some areas. Records, per area, how many items came back and whether the area
@@ -184,8 +170,14 @@ def run_source(conn: sqlite3.Connection, adapter: Adapter, areas: list[Area], *,
         groups = [areas] if adapter.batch else [[a] for a in areas]
         for group in groups:
             gids = [a.id for a in group]
-            remaining, why = spend_room(sources, cap - spent, adapter.apify)
-            if why:
+            remaining = cap - spent
+            account = account_remaining_usd() if adapter.apify else None
+            reserve = sources["spend"].get("reserve_usd", 0.0)
+            if account is not None:
+                remaining = min(remaining, account - reserve)
+            if remaining <= 0.02:
+                why = (f"Apify credit left ${account:.2f} minus reserve ${reserve:.2f}" if account is not None
+                       and account - reserve < cap - spent else f"run spend cap ${cap:.2f}")
                 warnings.append(f"stopped before {', '.join(gids)}: {why}")
                 for aid in gids:
                     counts["areas"][aid] = {"items": 0, "state": "not_reached"}

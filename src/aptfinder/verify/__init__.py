@@ -192,7 +192,7 @@ def all_conflicts(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     render."""
     cross = conflict_queue(conn)
     return ([c for c in cross if not c["pending_render"]] + text_conflict_queue(conn) + cheap_queue(conn)
-            + stale_queue(conn) + [c for c in cross if c["pending_render"]])
+            + [c for c in cross if c["pending_render"]])
 
 
 def cheap_queue(conn: sqlite3.Connection, min_per_bed: float | None = None) -> list[dict[str, Any]]:
@@ -220,32 +220,6 @@ def cheap_queue(conn: sqlite3.Connection, min_per_bed: float | None = None) -> l
                     "min_per_bed": min_per_bed,
                     "reason": f"price per bedroom ${per_bed:,.0f} < ${min_per_bed:,.0f}: "
                               "check for per-room or misread price",
-                    "listings": [{"source": r["source"], "source_id": r["source_id"], "obs_id": r["obs_id"]}]})
-    return out
-
-
-def stale_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    """Active Zillow listings whose newest detail page (`aptf-intake zillow-detail`) states a non-rental status
-    (FOR_SALE, SOLD, OFF_MARKET, ...): probably no longer for rent. One-listing items on the price (✓ still offered
-    at this price, ✗ or ? if gone); a building's bedroom rows share one page, so each row is an item. Drops out once
-    the price has a current check or a newer page says FOR_RENT. A page without a status flags nothing."""
-    from ..intake.zillow_detail import RENTAL, latest_status
-
-    bad = {z: s for z, (s, _) in latest_status(conn).items() if s not in RENTAL}
-    if not bad:
-        return []
-    checked = current_checks(conn)
-    out = []
-    for r in conn.execute("SELECT source, source_id, obs_id, place_key, "
-                          "CAST(json_extract(data, '$.extra.zpid') AS TEXT) AS zpid FROM listings "
-                          "WHERE source = 'zillow' AND active = 1 AND kind IS NOT 'site_info' ORDER BY source_id"):
-        status = bad.get(r["zpid"])
-        if not status or "price" in checked.get((r["source"], r["source_id"]), {}):
-            continue
-        out.append({"kind": "conflict", "stale": True, "unit_key": None, "place_key": r["place_key"],
-                    "fields": ["price_month"], "pending_render": False, "home_status": status,
-                    "reason": f"Zillow's page now says {status.replace('_', ' ').lower()}, not for rent: "
-                              "still offered?",
                     "listings": [{"source": r["source"], "source_id": r["source_id"], "obs_id": r["obs_id"]}]})
     return out
 

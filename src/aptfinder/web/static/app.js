@@ -1022,9 +1022,8 @@ function conflictBlock(e) {
     it.pending_render ? `<span class="chip pending" title="${esc(it.pending_reason || "")}">own-site render pending: will update this</span>` : "",
     it.text ? `<span class="chip">source vs its own text</span>` : "",
     it.cheap ? `<span class="chip needs_check">too cheap?</span>` : "",
-    it.stale ? `<span class="chip needs_check">no longer for rent?</span>` : "",
   ].join("");
-  const cheap = it.cheap ? `<div class="small">${money(it.price_month)} for ${it.beds ? `${num(it.beds)} bd` : "a studio"} = <b>${money(it.per_bed)}/bed</b> · ${esc(it.reason)}</div>` : it.stale ? `<div class="small">${esc(it.reason)}</div>` : "";
+  const cheap = it.cheap ? `<div class="small">${money(it.price_month)} for ${it.beds ? `${num(it.beds)} bd` : "a studio"} = <b>${money(it.per_bed)}/bed</b> · ${esc(it.reason)}</div>` : "";
   const textTh = it.text ? `<th>${esc(it.text_label)}<br><span class="muted">read from the text</span></th>` : "";
   const textTd = (f) => (it.text ? `<td>${fmtField(f, it.text[f])}</td>` : "");
   return `<div class="vconf${it.pending_render ? " pending" : ""}">
@@ -1107,7 +1106,7 @@ async function renderVerify() {
       <table><tr><th>minutes</th><td>${num(t.minutes)}</td><td>${vbtns({ trip_id: t.id, field: "minutes", queue: "sample" })}</td></tr></table>${nav}`;
   } else {
     const obs = d.observations;
-    const title = it.kind === "conflict" ? (it.cheap || it.stale ? `${obs[0].source}: ${it.reason}` : it.text ? `${obs[0].source} and its own text disagree on ${d.fields.join(", ")}`
+    const title = it.kind === "conflict" ? (it.cheap ? `${obs[0].source}: ${it.reason}` : it.text ? `${obs[0].source} and its own text disagree on ${d.fields.join(", ")}`
       : `Sources disagree on ${d.fields.join(", ")}`) : `Sample check: ${esc(obs[0].source)}`;
     // a text conflict: the listing's text (read by Haiku) as a second column; check the stored value against the page
     const textTh = it.text ? `<th>${esc(it.text_label)}<br><span class="muted">read from the listing text</span></th>` : "";
