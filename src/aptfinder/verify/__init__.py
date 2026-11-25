@@ -591,39 +591,86 @@ def rule_fields(rule: dict[str, Any]) -> set[str]:
 
 
 GOAL_HIDDEN = {"irrelevant": "no rule of this goal reads the conflicting fields",
-               "settled": "every reading fails a rule of this goal, so resolving it changes nothing"}
+               "settled": "every reading fails a rule of this goal, so resolving it changes nothing",
+               "same": "every reading gives the same result"}
+MAX_READINGS = 64  # combinations of candidate values tried per listing; more than that and the conflict stays shown
+
+
+def _with_values(row: dict[str, Any], values: dict[str, Any]) -> dict[str, Any]:
+    """`row` with some fields replaced, its derived prices recomputed as the listings view does: a monthly price is
+    both price and price_month, and price_per_bed is price_month / beds (None for a studio or unknown beds)."""
+    alt = {**row, **values}
+    if "price_month" in values and alt.get("price_basis") in ("month", None):
+        alt["price"] = alt["price_month"]
+    if "price_month" in values or "beds" in values:
+        pm, beds = alt.get("price_month"), alt.get("beds")
+        alt["price_per_bed"] = pm / beds if pm is not None and beds else None
+    return alt
 
 
 def goal_relevance(item: dict[str, Any], rules: list[dict[str, Any]], lres: dict[tuple[str, str], Any],
-                   rows: dict[tuple[str, str], dict[str, Any]]) -> str:
-    """'shown', 'irrelevant' or 'settled' for one Verify conflict under one goal. A conflict matters when some hard
-    rule reads a conflicting field and no rule fails on every reading of it. The readings are each listing as stored
-    (its goal result, `lres`) and, for a text conflict, the same listing with the text's values (its touched rules
-    re-evaluated on `rows`, the goal_inputs row). So $2,400 vs $2,700 for 1 bed under a < $2,500/bed rule is shown,
-    $3,100 vs $3,300 is settled, and a 2-bed under a 3-bed goal is settled whatever its price. Unknown never hides:
-    needs_check is not a fail, and a conflict with no judged listing stays shown."""
-    from ..filter.rules import FAIL, Ctx, evaluate
+                   rows: dict[tuple[str, str], dict[str, Any]], low: set[tuple[str, str]] | None = None) -> str:
+    """'shown', 'irrelevant', 'settled' or 'same' for one Verify conflict under one goal. A conflict matters when
+    choosing a different candidate value for its disputed fields could change the goal's status (pass, needs_check,
+    fail) of one of its listings. The candidates of a field are the values the conflict's listings state (and the
+    text's value for a text conflict); each listing is judged on every combination of them (at most MAX_READINGS),
+    the rules reading a disputed field re-evaluated on its goal_inputs row (`rows`, sources' low-accuracy fields
+    `low` as in evaluate_goal), the others taken from its stored result (`lres`). Hidden: 'irrelevant' when no hard
+    rule reads a disputed field, 'settled' when one rule fails on every reading, 'same' when every reading gives the
+    same status otherwise (3bd/2ba vs 3bd/2.5ba under a '3bd with 2+ baths' rule). A too-cheap or stale listing
+    (one listing, one reading, its alternative an unknown true price or no offer) keeps the earlier test: shown when
+    a price rule reads it and no rule fails on its reading; with no price rule the general test (one reading:
+    hidden). Unknown never hides: a conflict with no judged listing, or too many combinations, stays shown."""
+    from itertools import product
+
+    from ..filter.rules import FAIL, Ctx, combine, evaluate
 
     fields = set(item["fields"])
     touched = [i for i, r in enumerate(rules) if rule_fields(r) & fields]
     if not touched:
         return "irrelevant"
-    readings: list[list[str]] = []
-    for l in item["listings"]:
-        res = lres.get((l["source"], l["source_id"]))
-        if res is None:
-            continue
-        statuses = [s for s, _, _ in res["reasons"]]
-        readings.append(statuses)
-        row = rows.get((l["source"], l["source_id"]))
-        if item.get("text") and row is not None:
-            alt = {**row, **item["text"]}
-            alt_statuses = list(statuses)
-            for i in touched:
-                alt_statuses[i] = evaluate(rules[i], alt, Ctx())[0]
-            readings.append(alt_statuses)
-    if not readings:
+    judged = [(l, lres[(l["source"], l["source_id"])]) for l in item["listings"]
+              if (l["source"], l["source_id"]) in lres]
+    if not judged:
         return "shown"
-    if any(all(st[i] == FAIL for st in readings) for i in range(len(rules))):
+    if item.get("cheap") or item.get("stale"):
+        statuses = [[s for s, _, _ in res["reasons"]] for _, res in judged]
+        if any(all(st[i] == FAIL for st in statuses) for i in range(len(rules))):
+            return "settled"
+        if any(rule_fields(rules[i]) & PRICE_FIELDS for i in touched):
+            return "shown"
+    read = set().union(*(rule_fields(rules[i]) for i in touched)) & fields
+    cands: dict[str, list[Any]] = {f: [] for f in sorted(read)}
+    text = item.get("text") or {}
+    for l in item["listings"]:
+        row = rows.get((l["source"], l["source_id"])) or {}
+        for f in cands:
+            for x in (row.get(f), text.get(f)):
+                if x is not None and x not in cands[f]:
+                    cands[f].append(x)
+    if math.prod(max(len(v), 1) for v in cands.values()) > MAX_READINGS:
+        return "shown"
+    low = low or set()
+    combos = [dict(zip(cands, vals)) for vals in product(*[v or [None] for v in cands.values()])]
+    combos = [{f: x for f, x in c.items() if x is not None} for c in combos]
+    every: list[list[str]] = []
+    for l, res in judged:
+        row = rows.get((l["source"], l["source_id"]))
+        stored = [s for s, _, _ in res["reasons"]]
+        if row is None:
+            every.append(stored)
+            continue
+        ctx = Ctx(untrusted={f for (src, f) in low if src == l["source"]})
+        overall = set()
+        for c in combos:
+            alt = _with_values(row, c)
+            st = list(stored)
+            for i in touched:
+                st[i] = evaluate(rules[i], alt, ctx)[0]
+            every.append(st)
+            overall.add(combine(st))
+        if len(overall) > 1:
+            return "shown"
+    if any(all(st[i] == FAIL for st in every) for i in range(len(rules))):
         return "settled"
-    return "shown"
+    return "same"

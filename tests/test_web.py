@@ -384,7 +384,7 @@ def test_verify_batch_filters_by_goal_and_zone_and_counts_cheap(client):
     from aptfinder.store import append_observation, start_run
 
     base = c.get("/api/verify/batch?kind=conflict").json()
-    assert base["hidden"] == {"irrelevant": 0, "settled": 0, "zone": 0} and base["all_total"] == base["total"]
+    assert base["hidden"] == {"irrelevant": 0, "settled": 0, "same": 0, "zone": 0} and base["all_total"] == base["total"]
     n0 = c.get("/api/status").json()["queues"]["conflict"]
     conn = connect(db)
     r = start_run(conn, "intake", "zumper")

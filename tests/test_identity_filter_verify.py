@@ -441,3 +441,38 @@ def test_conflicts_relevant_to_a_goal(conn):
     w = verdicts("furn", furnished)
     assert w["t1"] == "shown"  # stored False fails, the text's True would pass
     assert w["s1"] == "irrelevant"
+
+
+def test_conflict_hidden_when_every_reading_gives_the_same_result(conn):
+    """The Gardens of Sunnyvale unit d: 3bd/2ba vs 3bd/2.5ba, both pass '3bd with 2+ baths', so resolving the baths
+    changes nothing ('same'). A beds conflict is judged with price per bed recomputed for each candidate."""
+    from aptfinder.config import Goal, VerifyConfig
+    from aptfinder.filter import goal_inputs
+    from aptfinder.verify import all_conflicts, goal_relevance
+
+    r = start_run(conn, "intake", "zillow")
+    obs(conn, r, "zillow", "g1", 7000, address="1 Gardens Ct, Sunnyvale", beds=3, baths=2)
+    obs(conn, r, "zumper", "g2", 7000, address="1 Gardens Ct, Sunnyvale", beds=3, baths=2.5)
+    obs(conn, r, "zillow", "k1", 9000, address="2 Beds Ct, Sunnyvale", beds=3, baths=3)  # $3,000/bed as a 3bd
+    obs(conn, r, "zumper", "k2", 9000, address="2 Beds Ct, Sunnyvale", beds=4, baths=3)  # $2,250/bed as a 4bd
+    obs(conn, r, "zillow", "m1", 9000, address="3 Both Ct, Sunnyvale", beds=3, baths=2)  # 3bd and 4bd both pass
+    obs(conn, r, "zumper", "m2", 12000, address="3 Both Ct, Sunnyvale", beds=4, baths=3)  # beds and price disagree
+    identity.run(conn)
+    goal = Goal(label="lease", rules=[{"type": "size_options", "options": [{"beds": 3, "min_baths": 2},
+                                                                          {"beds": 4, "min_baths": 3}]},
+                                      {"type": "max", "field": "price_per_bed", "value": 3100, "strict": True}])
+    cfg = GoalsConfig(goals={"g": goal}, verify=VerifyConfig())
+    res = evaluate_all(conn, cfg)
+    inp = goal_inputs(conn, cfg)
+    rows = {(x["source"], x["source_id"]): x for x in inp["listings"]}
+    v = {l["source_id"]: goal_relevance(c, goal.rules, res["listings"]["g"], rows, inp["low"])
+         for c in all_conflicts(conn) for l in c["listings"]}
+    assert v["g1"] == "same"
+    assert v["k1"] == "same"  # 9000/3 and 9000/4 both under 3100, 3bd/3ba and 4bd/3ba both fit
+    # 4bd at 9000 passes, 3bd at 12000 ($4,000/bed) fails: two fields, every combination tried
+    assert v["m1"] == "shown"
+    tight = Goal(label="tight", rules=[*goal.rules[:1], {"type": "max", "field": "price_per_bed", "value": 2500}])
+    res2 = evaluate_all(conn, GoalsConfig(goals={"t": tight}, verify=VerifyConfig()))
+    k = next(c for c in all_conflicts(conn) if any(l["source_id"] == "k1" for l in c["listings"]))
+    # $3,000/bed as a 3bd fails, $2,250/bed as a 4bd passes: the beds decide
+    assert goal_relevance(k, tight.rules, res2["listings"]["t"], rows, inp["low"]) == "shown"
