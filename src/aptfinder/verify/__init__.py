@@ -586,7 +586,7 @@ def stored_value(row: sqlite3.Row, field: str) -> Any:
     return json.loads(row["data"]).get(field)
 
 
-PRICE_FIELDS = {"price", "price_month", "price_per_bed"}
+PRICE_FIELDS = {"price", "price_month", "price_per_bed", "price_per_person"}
 
 
 def rule_fields(rule: dict[str, Any]) -> set[str]:
@@ -623,7 +623,8 @@ def _with_values(row: dict[str, Any], values: dict[str, Any]) -> dict[str, Any]:
 
 
 def goal_relevance(item: dict[str, Any], rules: list[dict[str, Any]], lres: dict[tuple[str, str], Any],
-                   rows: dict[tuple[str, str], dict[str, Any]], low: set[tuple[str, str]] | None = None) -> str:
+                   rows: dict[tuple[str, str], dict[str, Any]], low: set[tuple[str, str]] | None = None,
+                   people: int | None = None) -> str:
     """'shown', 'irrelevant', 'settled' or 'same' for one Verify conflict under one goal. A conflict matters when
     choosing a different candidate value for its disputed fields could change the goal's status (pass, needs_check,
     fail) of one of its listings. The candidates of a field are the values the conflict's listings state (and the
@@ -631,7 +632,8 @@ def goal_relevance(item: dict[str, Any], rules: list[dict[str, Any]], lres: dict
     the rules reading a disputed field re-evaluated on its goal_inputs row (`rows`, sources' low-accuracy fields
     `low` as in evaluate_goal), the others taken from its stored result (`lres`). Hidden: 'irrelevant' when no hard
     rule reads a disputed field, 'settled' when one rule fails on every reading, 'same' when every reading gives the
-    same status otherwise (3bd/2ba vs 3bd/2.5ba under a '3bd with 2+ baths' rule). A too-cheap or stale listing
+    same status otherwise (3bd/2ba vs 3bd/2.5ba under a '3bd with 2+ baths' rule). `people` is the goal's (its
+    price_per_person rules). A too-cheap or stale listing
     (one listing, one reading, its alternative an unknown true price or no offer) keeps the earlier test: shown when
     a price rule reads it and no rule fails on its reading; with no price rule the general test (one reading:
     hidden). Unknown never hides: a conflict with no judged listing, or too many combinations, stays shown."""
@@ -674,7 +676,7 @@ def goal_relevance(item: dict[str, Any], rules: list[dict[str, Any]], lres: dict
         if row is None:
             every.append(stored)
             continue
-        ctx = Ctx(untrusted={f for (src, f) in low if src == l["source"]})
+        ctx = Ctx(untrusted={f for (src, f) in low if src == l["source"]}, people=people)
         overall = set()
         for c in combos:
             alt = _with_values(row, c)

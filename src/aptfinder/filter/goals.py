@@ -1,7 +1,7 @@
 """The effective goal set: config/goals.toml is the seed, overlaid by goals edited in the dashboard.
 
 An edit is an annotations row: entity_type 'goal', entity_key the goal id, attribute 'definition', comment the
-JSON {label, rules, nice}; a delete is the same row with {"deleted": true} (a tombstone). The latest row per id
+JSON {label, rules, nice, people?}; a delete is the same row with {"deleted": true} (a tombstone). The latest row per id
 wins. Seed goals keep their order; goals created in the dashboard follow in the order they were first saved."""
 
 from __future__ import annotations
@@ -36,12 +36,13 @@ def effective_goals(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) ->
         if d is None:
             goals.pop(gid, None)
         else:
-            goals[gid] = Goal(label=d["label"], rules=d["rules"], nice=d["nice"])
+            goals[gid] = Goal(label=d["label"], rules=d["rules"], nice=d["nice"], people=d.get("people"))
     return GoalsConfig(goals=goals, verify=cfg.verify)
 
 
 def validate_goal(body: Any, *, modes: list[str], points: set[str], sets: set[str]) -> dict[str, Any]:
-    """{label, rules, nice} from a dashboard request, or ValueError naming the first problem."""
+    """{label, rules, nice, people?} from a dashboard request, or ValueError naming the first problem. `people`
+    (people sharing the rent, an integer >= 1) is kept only when given; null or absent means the goal sets none."""
     if not isinstance(body, dict):
         raise ValueError("a goal must be an object")
     label = body.get("label")
@@ -57,6 +58,11 @@ def validate_goal(body: Any, *, modes: list[str], points: set[str], sets: set[st
             if err:
                 raise ValueError(f"{part} #{i + 1}: {err}")
         out[part] = rules
+    people = body.get("people")
+    if people is not None:
+        if not isinstance(people, int) or isinstance(people, bool) or people < 1:
+            raise ValueError("people must be a whole number of at least 1")
+        out["people"] = people
     return out
 
 

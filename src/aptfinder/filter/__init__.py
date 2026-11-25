@@ -309,13 +309,14 @@ def evaluate_goal(inp: dict[str, Any], goal: Goal) -> tuple[dict[tuple[str, str]
         pk = row["place_key"]
         t = trips.get(pk, {})
         ctx = Ctx(trips=t, nearest=nearest_by_set(t), annotations=anns.get(pk, {}),
-                  untrusted={f for (src, f) in low if src == row["source"]}, commute_rules=commute)
+                  untrusted={f for (src, f) in low if src == row["source"]}, commute_rules=commute,
+                  people=goal.people)
         # (status, text, rule type): the type lets callers set aside commute rules (routing_candidates)
         reasons = [(*evaluate(r, row, ctx), r["type"]) for r in goal.rules]
         nice = [(*evaluate(r, row, ctx), r["type"]) for r in goal.nice]
         decides = pk not in own or is_own_priced(row)
         # the attribute each non-pass rule judges (rules.fact), in reasons order: cards mark it red or amber
-        fails = [{"s": s, **fact(r, row)} for r, (s, _, _) in zip(goal.rules, reasons) if s != PASS]
+        fails = [{"s": s, **fact(r, row, goal.people)} for r, (s, _, _) in zip(goal.rules, reasons) if s != PASS]
         res = {"status": combine([s for s, _, _ in reasons]), "reasons": reasons, "fails": fails, "nice": nice,
                "nice_score": sum(s == PASS for s, _, _ in nice), "source": row["source"],
                "source_id": row["source_id"], "unit_key": row["unit_key"], "place_key": pk,

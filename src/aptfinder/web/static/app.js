@@ -357,12 +357,18 @@ function netFact(p, fails) {
 // "Save" stores the goal for everyone (an append-only annotation row), "Save as new goal" stores a copy,
 // "Revert" drops the draft. All shows each place's best status over every goal and edits nothing.
 S.goalsData = null; // GET api/goals
-S.draft = null; // {id, label, rules, nice}: the selected goal being edited
+S.draft = null; // {id, label, rules, nice, people}: the selected goal being edited
 S.previewMsg = "";
 const clone = (o) => JSON.parse(JSON.stringify(o));
 const savedGoal = (id) => S.goalsData?.goals.find((g) => g.id === id);
-const draftDirty = () => S.draft && JSON.stringify({ l: S.draft.label, r: S.draft.rules, n: S.draft.nice })
-  !== JSON.stringify((({ label, rules, nice }) => ({ l: label, r: rules, n: nice }))(savedGoal(S.draft.id) || {}));
+// what a goal stores (PUT / POST api/goals, the preview): `people` (sharing the rent) only when set
+const goalBody = (g) => ({ label: g.label, rules: g.rules, nice: g.nice, ...(g.people ? { people: g.people } : {}) });
+const draftDirty = () => S.draft && JSON.stringify(goalBody(S.draft)) !== JSON.stringify(goalBody(savedGoal(S.draft.id) || {}));
+// the people sharing a goal's rent (its `people`), or null: its price per person is the monthly price / people
+function goalPeople(id) {
+  const g = S.draft && S.draft.id === id ? S.draft : savedGoal(id);
+  return g?.people || null;
+}
 // the offer a goal makes: "short" term = furnished stay prices, "long" = lease prices, neither = both
 function goalTerm(id) {
   const g = S.draft && S.draft.id === id ? S.draft : savedGoal(id);
@@ -374,6 +380,8 @@ function ruleTemplates() {
   const pt = S.meta.default_target || S.meta.targets[0];
   return [
     ["price / bed at most", { type: "max", field: "price_per_bed", value: 2500 }],
+    // a goal with people sharing the rent: each person's budget (price / month ÷ people)
+    ...(S.draft?.people ? [["price / person at most", { type: "max", field: "price_per_person", value: 2500 }]] : []),
     ["price / month at most", { type: "max", field: "price_month", value: 4000 }],
     ["beds at least", { type: "min", field: "beds", value: 3 }],
     ["beds and baths", { type: "size_options", options: [{ beds: 3, min_baths: 2 }] }],
@@ -394,7 +402,7 @@ function ruleTemplates() {
   ];
 }
 const opt = (v, label, sel) => `<option value="${esc(v)}"${String(v) === String(sel) ? " selected" : ""}>${esc(label)}</option>`;
-const FIELD_LABEL = { price: "price", price_month: "price / month", price_per_bed: "price / bed", beds: "beds", baths: "baths",
+const FIELD_LABEL = { price: "price", price_month: "price / month", price_per_bed: "price / bed", price_per_person: "price / person", beds: "beds", baths: "baths",
   sqft: "sqft", term: "term", furnished: "furnished", private_bath: "private bath", kind: "kind", restriction: "who may rent",
   parking_included: "parking included", parking_spots: "parking spots", parking_usd_month: "parking $/month",
   building_units: "units in building" };
@@ -407,7 +415,9 @@ function ruleInputs(r, part) {
   const numIn = (p, v, kind, step = "any") => `<input data-p="${p}" data-num type="number" class="num-${kind}" step="${step}" value="${v ?? ""}">`;
   if (r.type === "max" || r.type === "min") {
     const op = (r.type === "max" ? (r.strict ? "<" : "≤") : (r.strict ? ">" : "≥"));
-    return `<select data-p="field">${G.numeric_fields.map((f) => opt(f, fieldName(f), r.field)).join("")}</select>
+    // price / person only under a goal with people (or a rule that already uses it, so saving keeps it)
+    const nums = G.numeric_fields.filter((f) => f !== "price_per_person" || S.draft?.people || r.field === f);
+    return `<select data-p="field">${nums.map((f) => opt(f, fieldName(f), r.field)).join("")}</select>
       <select data-op>${["≤", "<", "≥", ">"].map((o) => opt(o, o, op)).join("")}</select>${numIn("value", r.value, "money")}`;
   }
   if (r.type === "equals") {
@@ -474,6 +484,7 @@ function renderGoalEditor() {
     box.innerHTML = `<details id="g-details"${S.editorOpen ? " open" : ""}>
       <summary><b>${esc(g.label)}</b> <span class="muted small">${g.rules.length} must, ${g.nice.length} nice${dirty ? " · unsaved draft" : ""}</span><span class="spin spin-goal" aria-hidden="true"></span></summary>
       <div class="row small"><label>Name <input id="g-label" value="${esc(g.label)}" style="width:16em"></label>
+        <label title="People sharing the rent (a group lease). Set it to judge 'price / person' (the monthly price ÷ people; a spare bedroom costs nothing extra). Empty: none.">people sharing <input id="g-people" type="number" min="1" step="1" class="num-bed" value="${g.people ?? ""}"></label>
         <span class="muted">id ${esc(g.id)} · ${esc(savedGoal(g.id)?.origin || "")}</span></div>
       <div class="small"><b>Must have</b> <span class="muted">(fail = any rule fails; needs check = a value is unknown)</span></div>
       ${renderRuleList("rules")}${add("rules")}
@@ -491,6 +502,12 @@ function renderGoalEditor() {
     if (ro) $$("#goal-editor input, #goal-editor select").forEach((el) => { el.disabled = true; });
     // no re-render on a typed change: it fires on blur, e.g. while the Save button is being clicked
     $("#g-label").addEventListener("change", (e) => { g.label = e.target.value; draftChanged(false); });
+    // re-rendered: the price / person preset and field follow it
+    $("#g-people").addEventListener("change", (e) => {
+      const n = Math.floor(+e.target.value);
+      if (e.target.value === "" || !(n >= 1)) delete g.people; else g.people = n;
+      draftChanged(true);
+    });
     $$("#goal-editor .rule").forEach(wireRule);
     $$("#goal-editor .g-add").forEach((s) => s.addEventListener("change", () => {
       if (s.value === "") return;
@@ -580,7 +597,7 @@ async function previewDraft() {
   S.previewMsg = "previewing the draft…"; refreshEditorState();
   const end = busy("goal");
   try {
-    const r = await post("api/goals/preview", { label: g.label, rules: g.rules, nice: g.nice });
+    const r = await post("api/goals/preview", goalBody(g));
     if (seq !== previewDraft.seq || S.draft !== g) return; // a newer edit is on its way
     applyGoalResults(g.id, r.places);
     S.previewMsg = "draft shown in the list; not saved";
@@ -638,7 +655,7 @@ async function saveGoal() {
   const g = S.draft;
   const end = busy("goal");
   try {
-    await api(`api/goals/${encodeURIComponent(g.id)}`, { method: "PUT", body: JSON.stringify({ label: g.label, rules: g.rules, nice: g.nice }) });
+    await api(`api/goals/${encodeURIComponent(g.id)}`, { method: "PUT", body: JSON.stringify(goalBody(g)) });
     toast(`Saved "${g.label}" for everyone`);
     await reloadGoals(g.id);
   } catch (e) { toast("Not saved: " + e.message, 6000); } finally { end(); }
@@ -656,7 +673,7 @@ async function saveGoalAsNew() {
   const label = prompt("Name of the new goal", `${S.draft.label} (copy)`);
   if (!label) return;
   const g = S.draft;
-  await createGoal({ label, rules: g.rules, nice: g.nice });
+  await createGoal({ ...goalBody(g), label });
 }
 async function newGoal() {
   const label = prompt("Name of the new goal (it starts with no rules: every place passes)");
@@ -693,7 +710,7 @@ function markFor(fails, pred) {
   const st = hit.some((x) => x.s === "fail") ? "fail" : "needs_check";
   return ` data-ff="${st}" title="${esc(hit.map((x) => `${x.goal}: ${x.text}`).join("\n"))}"`;
 }
-const FACT_LABEL = { price_month: "price", price_per_bed: "$/bed", private_bath: "private bath", available: "available from" };
+const FACT_LABEL = { price_month: "price", price_per_bed: "$/bed", price_per_person: "$/person", private_bath: "private bath", available: "available from" };
 function failChip(x) {
   const fmtv = (v) => (v == null ? "?" : typeof v === "number" ? num(v) : v === true ? "yes" : v === false ? "no" : String(v));
   let t;
@@ -701,6 +718,7 @@ function failChip(x) {
   else if (x.f === "near") t = `${x.modes.map((m) => MODE_LABEL[m] || m).join("/")} to nearest ${S.meta.point_sets?.[x.set]?.label || x.set}`;
   else if (x.f === "amenity") t = `no ${x.v}`;
   else if (x.f === "net_commute") t = `net commute (${x.agg}) > ${mins(x.lim)}`;
+  else if (x.f === "price_per_person") t = `${money(x.v)}/person${x.n ? ` (÷${x.n})` : ""}${x.v != null && x.s === "fail" ? ` ${x.strict ? "≥" : ">"} ${money(x.lim)}` : ""}`;
   else t = `${FACT_LABEL[x.f] || x.f.replace(/_/g, " ")} ${fmtv(x.v)}${x.lim != null && x.s === "fail" && x.v != null ? ` ${x.min ? (x.strict ? "≤" : "<") : (x.strict ? "≥" : ">")} ${num(x.lim)}` : ""}`;
   return `<span class="chip ff-chip" data-ff="${x.s}" title="${esc(`${x.goal}: ${x.text}`)}">${esc(t)}</span>`;
 }
@@ -760,8 +778,13 @@ function priceFacts(p, fails = []) {
   let lease = "", stay = "";
   if (showLease) {
     const [lm, lmv] = mark("price_month", p.min_lease_month, (x) => !forStay(x));
-    const [lb, lbv] = mark("price_per_bed", p.min_lease_per_bed, (x) => !forStay(x));
-    lease = `<span${lm}><b>${money(p.min_lease_month)}</b>/mo${lmv}</span><span${lb || ' title="per bedroom; a studio counts as one"'}><b>${money(p.min_lease_per_bed)}</b>/bed${lbv}</span>`;
+    // a goal with people sharing the rent: the price per person (÷ people) replaces the price per bedroom
+    const ppl = goalPeople(S.goal);
+    const [lb, lbv] = ppl ? mark("price_per_person", p.min_lease_month / ppl, (x) => !forStay(x))
+      : mark("price_per_bed", p.min_lease_per_bed, (x) => !forStay(x));
+    const per = ppl ? `<span${lb || ` title="the lease price shared by the goal's ${ppl} people"`}><b>${money(p.min_lease_month / ppl)}</b>/person (÷${ppl})${lbv}</span>`
+      : `<span${lb || ' title="per bedroom; a studio counts as one"'}><b>${money(p.min_lease_per_bed)}</b>/bed${lbv}</span>`;
+    lease = `<span${lm}><b>${money(p.min_lease_month)}</b>/mo${lmv}</span>${per}`;
   }
   if (showStay) {
     const [sm, smv] = mark("price_month", p.min_stay_month, forStay);
@@ -1009,14 +1032,15 @@ async function openPlace(pk) {
     `also listed${a.price_month ? ` at ${money(a.price_month)}` : ""} on ${esc(a.source)}`).join("<br>")}</span>` : "";
   const rng = (a, f) => (!a ? '<span class="muted">?</span>' : a[0] === a[1] ? f(a[0]) : `${f(a[0])}–${f(a[1])}`);
   // leases and furnished offers (the building's own furnished option, operators' furnished stays) never mix
+  const ppl = S.goal !== "all" ? goalPeople(S.goal) : null; // a goal with people: $/person replaces $/bed
   const planRows = (plans) => `<div class="scroll-x"><table>
-    <tr><th>plan</th><th>bd / ba</th><th>sqft</th><th>$/month</th><th>$/bed</th><th>available</th><th>earliest</th><th>sources</th><th>drawing</th></tr>
+    <tr><th>plan</th><th>bd / ba</th><th>sqft</th><th>$/month</th>${ppl ? `<th title="the monthly price shared by the goal's ${ppl} people">$/person (÷${ppl})</th>` : "<th>$/bed</th>"}<th>available</th><th>earliest</th><th>sources</th><th>drawing</th></tr>
     ${plans.map((pl) => `<tr>
       <td>${esc(pl.name || "")}${pl.offer !== "lease" ? `<br><span class="chip">${esc(pl.offer)}</span>` : ""}</td>
       <td>${pl.beds === 0 ? "studio" : esc(pl.beds ?? "?")} / ${esc(pl.baths ?? "?")}${bathsMark(pl.baths_from)}</td>
       <td>${rng(pl.sqft, (v) => num(v))}</td>
       <td>${rng(pl.price_month, money)}</td>
-      <td>${pl.price_per_bed != null ? money(pl.price_per_bed) : ""}</td>
+      <td>${ppl ? rng(pl.price_month && pl.price_month.map((v) => v / ppl), money) : pl.price_per_bed != null ? money(pl.price_per_bed) : ""}</td>
       <td>${pl.plan_only ? '<span class="muted" title="Listed in the community\'s own plan data, with no price: no unit in this plan is known to be offered. Not counted for goals.">plan exists, no unit offered</span>'
         : pl.n_units ? `${pl.n_units} unit${pl.n_units > 1 ? "s" : ""}` : `${pl.n_active} listing${pl.n_active === 1 ? "" : "s"}`}</td>
       <td>${esc(pl.earliest || "")}</td>

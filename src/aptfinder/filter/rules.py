@@ -30,6 +30,7 @@ class Ctx:
     annotations: dict[str, dict[str, Any]] = field(default_factory=dict)  # attribute -> latest
     untrusted: set[str] = field(default_factory=set)  # fields of this listing's source with low accuracy
     commute_rules: list[dict[str, Any]] = field(default_factory=list)  # the goal's counted commute rules (net_commute)
+    people: int | None = None  # the goal's `people` (sharing the rent): price_per_person = price_month / people
 
 
 # ---------------------------------------------------------------- net commute: one term per commute rule of a goal
@@ -156,6 +157,18 @@ def _minutes_status(trip: dict[str, Any] | None, limit: float) -> tuple[str, str
     return CHECK, tag + ", too close to call without routing"
 
 
+NO_PEOPLE = "goal has no 'people'"
+
+
+def field_value(f: str, row: dict[str, Any], people: int | None) -> Any:
+    """A listing field as rules read it. price_per_person is derived here, never stored: the monthly price over the
+    goal's `people` (None when the price is unknown or the goal sets no people)."""
+    if f == "price_per_person":
+        pm = row.get("price_month")
+        return pm / people if pm is not None and people else None
+    return row.get(f)
+
+
 def evaluate(rule: dict[str, Any], row: dict[str, Any], ctx: Ctx) -> tuple[str, str]:
     t = rule["type"]
     label = _label(rule)
@@ -175,8 +188,11 @@ def evaluate(rule: dict[str, Any], row: dict[str, Any], ctx: Ctx) -> tuple[str, 
 
     if t in ("max", "min"):
         f = rule["field"]
-        v = row.get(f)
-        deps = ("price", "beds") if f == "price_per_bed" else ("price",) if f == "price_month" else (f,)
+        if f == "price_per_person" and not ctx.people:
+            return CHECK, f"{label}: {NO_PEOPLE}"
+        v = field_value(f, row, ctx.people)
+        deps = ("price", "beds") if f == "price_per_bed" else ("price",) if f in ("price_month", "price_per_person") \
+            else (f,)
         if v is None:
             return CHECK, f"{label}: {f} unknown"
         if (u := _untrusted(ctx, *deps)):
@@ -189,6 +205,8 @@ def evaluate(rule: dict[str, Any], row: dict[str, Any], ctx: Ctx) -> tuple[str, 
             return CHECK, f"{label}: at least {v:,.0f} known ({row.get(f'{f}_evidence') or 'lower bound'})"
         ev = f", {row[f'{f}_evidence']}" if f == "building_units" and row.get(f"{f}_evidence") else ""  # its source
         via = f", price from {row['price_from']}" if row.get("price_from") and f.startswith("price") else ""
+        if f == "price_per_person":  # "2,500 = 7,500 / 3"
+            via = f" = {row['price_month']:,.0f} / {ctx.people}{via}"
         return (PASS, f"{label} ({v:,.0f}{via}{ev})") if ok else (FAIL, f"{label}: is {v:,.0f}{via}{ev}")
 
     if t == "size_options":
@@ -256,7 +274,10 @@ def evaluate(rule: dict[str, Any], row: dict[str, Any], ctx: Ctx) -> tuple[str, 
         return (PASS, f"{label}: {hit}") if hit else (FAIL, f"{label}: not listed")
 
     if t == "known":
-        return (PASS, label) if row.get(rule["field"]) is not None else (CHECK, f"{rule['field']} unknown")
+        if rule["field"] == "price_per_person" and not ctx.people:
+            return CHECK, f"{label}: {NO_PEOPLE}"
+        known = field_value(rule["field"], row, ctx.people) is not None
+        return (PASS, label) if known else (CHECK, f"{rule['field']} unknown")
 
     if t == "net_commute":
         terms = commute_terms(ctx.commute_rules, ctx.trips, ctx.nearest)
@@ -273,18 +294,21 @@ def evaluate(rule: dict[str, Any], row: dict[str, Any], ctx: Ctx) -> tuple[str, 
     raise ValueError(f"unknown rule type {t!r}")
 
 
-def fact(rule: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+def fact(rule: dict[str, Any], row: dict[str, Any], people: int | None = None) -> dict[str, Any]:
     """The attribute a rule judges, for showing a failure on that attribute (the dashboard's cards):
     `f` names it (a listing field, or beds / baths / available / commute / near / amenity), `v` is this listing's
-    value, and commute rules carry their point (`pt` or `set`) and modes."""
+    value, and commute rules carry their point (`pt` or `set`) and modes; price_per_person carries the goal's `people`
+    (`n`)."""
     t = rule["type"]
     if t in ("equals", "max", "min", "known"):
-        v = row.get(rule["field"])
+        v = field_value(rule["field"], row, people)
         if t == "equals" and isinstance(rule["value"], bool) and v is not None:
             v = bool(v)  # SQLite returns JSON booleans as 0/1
         out = {"f": rule["field"], "v": v}
         if row.get(f"{rule['field']}_evidence"):
             out["ev"] = row[f"{rule['field']}_evidence"]
+        if rule["field"] == "price_per_person" and people:
+            out["n"] = people
         if rule.get("strict"):  # a strict limit fails on equality: the card says ">= lim" / "<= lim"
             out["strict"] = True
         if t == "min":  # a floor: the card says "< lim"
@@ -316,8 +340,10 @@ def combine(statuses: list[str]) -> str:
 # parking (extract's and render's `parking` reading, filter.parking_values): spaces that come with the home (0 when
 # the text says no parking) and the monthly price of one (0 when included)
 # building_units: how many units the building has (filter.building; 1 = a house), the same for every listing there
-NUMERIC_FIELDS = ["price", "price_month", "price_per_bed", "beds", "baths", "sqft", "parking_spots",
-                  "parking_usd_month", "building_units"]
+# price_per_person: price_month / the goal's `people` (a goal-level number, e.g. 3 roommates in a 4bd), derived at
+# evaluate time; under a goal without people it is needs_check
+NUMERIC_FIELDS = ["price", "price_month", "price_per_bed", "price_per_person", "beds", "baths", "sqft",
+                  "parking_spots", "parking_usd_month", "building_units"]
 EQUALS_FIELDS: dict[str, list[Any]] = {"term": ["short", "long"], "furnished": [True, False],
                                        "private_bath": [True, False],
                                        "kind": ["apartment", "house", "townhome", "entire_place", "room"],

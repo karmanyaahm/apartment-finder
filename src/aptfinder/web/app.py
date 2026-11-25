@@ -828,7 +828,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 low = inputs()["low"]
                 out = []
                 for c in keep:
-                    v = verify.goal_relevance(c, g.rules, lres, rows, low)
+                    v = verify.goal_relevance(c, g.rules, lres, rows, low, people=g.people)
                     if v == "shown":
                         out.append(c)
                     else:
@@ -1008,7 +1008,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         edits = goalstore.goal_edits(conn)
         refs = goal_refs()
         return {
-            "goals": [{"id": g, "label": v.label, "rules": v.rules, "nice": v.nice,
+            "goals": [{"id": g, "label": v.label, "rules": v.rules, "nice": v.nice, "people": v.people,
                        "origin": "new" if g not in seed else "edited" if g in edits else "goals.toml"}
                       for g, v in effective().goals.items()],
             "deleted": sorted(g for g, d in edits.items() if d is None),

@@ -42,6 +42,7 @@ class Goal(BaseModel):
     label: str
     rules: list[dict[str, Any]] = []
     nice: list[dict[str, Any]] = []
+    people: int | None = None  # people sharing the rent (a group lease): rules on price_per_person divide by it
 
 
 class VerifyConfig(BaseModel):
