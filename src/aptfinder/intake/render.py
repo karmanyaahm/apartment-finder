@@ -11,7 +11,7 @@ community's own path. Avalon sites are skipped: their page data already gives ev
 
 Each site's outcome is recorded in the run's counts (`areas['<site>#render']`): `ok`, `no_plans`, or a transient
 failure (`blocked`, `timeout`, `empty`, `not_returned`, `error`, `not_read`) with the HTTP status and the
-scraper's message; `dead` or `challenge` when the free precheck (`precheck.py`: DNS, one plain GET) stopped the site
+scraper's message; `dead` when the free precheck (`precheck.py`: DNS, one plain GET) stopped the site
 before Apify. A run over every site picks transient failures first, then sites never rendered, then those older than
 STALE_DAYS; `ok` and `no_plans` are done until then.
 
@@ -239,7 +239,7 @@ PAGE_BUDGET = {"start": 12000, "floorplans": 12000, "units": 6000}  # characters
 OUTCOME_LABEL = {"ok": "plans found", "no_plans": "rendered, no plans offered", "blocked": "blocked",
                  "timeout": "timed out", "empty": "rendered almost no text", "not_returned": "no page returned",
                  "error": "failed", "not_read": "not read (Claude budget reached)",
-                 "dead": "site dead (DNS)", "challenge": "Cloudflare challenge"}  # the last two: precheck.py
+                 "dead": "site dead (DNS)"}  # the last: precheck.py
 
 
 def describe(o: dict[str, Any]) -> str:
@@ -354,7 +354,7 @@ def render(conn, *, sites: list[str] | None = None, model: str = "haiku",
                 "done": {sid: describe(last[sid]) for sid in cands if sid not in pick and sid in last},
                 "estimated_apify_usd": round(0.003 * PAGES_PER_SITE * len(pick), 2),
                 "estimated_claude_usd": round(0.006 * len(pick), 2)}
-    # the free precheck (DNS, one plain GET): a dead domain or a Cloudflare challenge is recorded, not sent to Apify
+    # the free precheck (DNS, one plain GET): a dead domain is recorded, not sent to Apify
     pre = precheck_many({sid: s["url"] for sid, s in pick.items()})
     stopped = {sid: r for sid, r in pre.items() if r["outcome"] in PRECHECK_SKIP}
     areas = {f"{sid}#render": sid for sid in pick}

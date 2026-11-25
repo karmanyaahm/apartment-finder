@@ -358,7 +358,7 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
           f"{sc['done']} fresh, {sc['stale']} stale, {sc['todo']} never scraped "
           f"of {len(site_rows)} sites; rendered: "
           + (", ".join(f"{n} {k}" for k, n in rc.most_common()) or "none")
-          + f"; precheck stopped: {rc['dead']} site dead (DNS), {rc['challenge']} Cloudflare challenge", cmds,
+          + f"; precheck stopped {rc['dead']} (site dead (DNS))", cmds,
           counts=dict(sc), render_counts=dict(rc), **_run_info(runs, "intake", "direct"))
 
     # 7-9. commute: trips under the current point ids only (renamed points leave old rows behind)

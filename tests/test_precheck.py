@@ -51,6 +51,12 @@ def test_cloudflare_challenge_page():
 
 
 @pytest.mark.real_precheck
+def test_a_malformed_host_is_not_dead():
+    r = pc.precheck("https://www heritagerealtysanmateo com/", getaddrinfo=_dns_nx, client=_client())
+    assert r["outcome"] == "proceed" and "malformed host" in r["error"]
+
+
+@pytest.mark.real_precheck
 def test_a_normal_site_or_a_bare_403_proceeds():
     assert pc.precheck("https://sevensmv.com/", getaddrinfo=_dns_ok, client=_client())["outcome"] == "proceed"
     # Cloudflare's bot script on a normal 200 page is not a challenge; a plain 403 may still pass in a browser
@@ -65,25 +71,37 @@ def _stub(monkeypatch, outcomes):
                                                            "http_status": None, "error": "DNS: stub"})
 
 
-def test_render_skips_dead_and_challenge_sites_and_retry_failed_leaves_them(conn, monkeypatch):
+def test_render_skips_dead_sites_and_retry_failed_leaves_them(conn, monkeypatch, tmp_path):
+    """A dead domain is recorded and not sent to Apify; a Cloudflare challenge to the plain GET is not a reason to
+    skip (Apify's browser got through on every such site)."""
     from aptfinder.config import load_sites
     from aptfinder.intake import render
+    from aptfinder.intake.apify import ActorRun
 
     sites = load_sites()
     a, b = [sid for sid, s in sites.items() if s.get("platform") not in render.SKIP_PLATFORMS][:2]
     _stub(monkeypatch, {sites[a]["url"]: "dead", sites[b]["url"]: "challenge"})
-    monkeypatch.setattr(render, "run_actor", lambda *x, **k: (_ for _ in ()).throw(AssertionError("no Apify")))
+    sent = []
+
+    def fake(actor, inp, **kw):
+        sent.extend(u["userData"]["site"] for u in inp["startUrls"])
+        return ActorRun(actor=actor, run_id="r1", status="SUCCEEDED", cost_usd=0.0, charged_events=None,
+                        console_url="", items=[], log="")
+
+    monkeypatch.setattr(render, "run_actor", fake)
+    monkeypatch.setattr(render.settings, "RAW_DIR", tmp_path)
+    monkeypatch.setattr(render.identity, "run", lambda conn: None)
     res = render.render(conn, sites=[a, b])
-    assert res["apify_usd"] == 0 and res["outcomes"][a]["outcome"] == "dead"
+    assert sent == [b] and res["outcomes"][a]["outcome"] == "dead"
     last = render.last_outcomes(conn)
-    assert last[a]["outcome"] == "dead" and last[b]["outcome"] == "challenge"
-    assert "site dead (DNS)" in render.describe(last[a])
-    # --retry-failed never picks them; a full run does not either until they are 7 days old
-    assert render.select([a, b], last, retry_failed=True) == []
-    assert render.select([a, b], last) == []
+    assert last[a]["outcome"] == "dead" and last[b]["outcome"] == "not_returned"
+    assert "site dead (DNS)" in render.describe(last[a]) and last[a]["error"] == "DNS: stub"
+    # --retry-failed never picks it; a full run does not either until it is 7 days old
+    assert render.select([a], last, retry_failed=True) == []
+    assert render.select([a], last) == []
     old = {k: {**v, "at": "2020-01-01T00:00:00+00:00"} for k, v in last.items()}
-    assert [s for s, _ in render.select([a, b], old)] == [a, b]  # rechecked after a week (the precheck again)
-    run = json.loads(conn.execute("SELECT counts FROM runs").fetchone()[0])
+    assert [s for s, _ in render.select([a], old)] == [a]  # rechecked after a week (the precheck again)
+    run = json.loads(conn.execute("SELECT counts FROM runs ORDER BY id LIMIT 1").fetchone()[0])
     assert run["areas"][f"{a}#render"]["state"] == "failed"  # retires nothing
 
 
@@ -103,7 +121,10 @@ def test_promote_retry_skips_precheck_failures_and_rechecks_weekly(tmp_path, mon
         '[[check]]\nid = "c"\nok = false\noutcome = "blocked"\nat = "2099-01-01T00:00:00+00:00"\n')
     monkeypatch.setattr(settings, "CONFIG_DIR", tmp_path / "cfg")
     assert retryable() == ["c"]  # --retry-failed
-    assert retryable(recheck=True) == ["b", "c"]  # a plain promote: the challenge is a week old
+    assert retryable(recheck=True) == ["c"]  # a plain promote: the dead one is not a week old
+    (tmp_path / "cfg" / "discovered_sites.toml").write_text(
+        (tmp_path / "cfg" / "discovered_sites.toml").read_text().replace("2099", "2020", 1))
+    assert retryable(recheck=True) == ["a", "c"]
     assert {"a", "b", "c"} <= set(load_sites())  # a dead site is not rejected: it can come back
 
 
@@ -132,7 +153,6 @@ def test_own_site_list_reason_and_label(conn, monkeypatch):
     from aptfinder import verify
 
     assert verify.OWN_SITE_REASONS["site_dead"] == "site dead (DNS)"
-    assert verify.OWN_SITE_REASONS["challenge"] == "Cloudflare challenge"
     renders = {"s": {"outcome": "dead", "at": "2026-11-25T01:00:00+00:00", "error": "DNS: s.example: not known"}}
     monkeypatch.setattr("aptfinder.config.load_sites",
                         lambda: {"s": {"id": "s", "url": "https://s.example/", "place_key": "p1"}})

@@ -1136,7 +1136,7 @@ async function renderDuplicates() {
 
 /* buildings whose own site gave no usable offer: one list, a reason and every URL tried; add a URL or dismiss */
 const OWN_PAGE = 20;
-const URL_STATUS = { form: "fail", rejected: "fail", failed: "fail", dead: "fail", challenge: "fail", no_plans: "needs_check", pending: "", priced: "pass" };
+const URL_STATUS = { form: "fail", rejected: "fail", failed: "fail", dead: "fail", no_plans: "needs_check", pending: "", priced: "pass" };
 async function renderOwnSites() {
   const body = $("#verify-body");
   body.innerHTML = '<p class="muted">Loading…</p>';

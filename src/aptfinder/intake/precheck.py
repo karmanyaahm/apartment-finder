@@ -9,12 +9,14 @@ never stored or parsed for listing data). Outcomes:
 - `dead`: the host does not resolve (NXDOMAIN, or a CNAME to a name that does not resolve: EAI_NONAME / EAI_NODATA).
 - `challenge`: a Cloudflare bot challenge ('Just a moment...'): a `cf-mitigated: challenge` header, or a 403/429/503
   from `server: cloudflare` whose first bytes carry the challenge page's markers.
-- `proceed`: anything else, including a temporary DNS failure, a timeout, a TLS or connection error or a bare 403
-  (Apify's browser may still get through; unknown never rejects).
+- `proceed`: anything else, including a temporary DNS failure, a timeout, a TLS or connection error, a bare 403 or
+  a malformed host (spaces in it: a URL to fix, not a dead domain) (Apify's browser may still get through; unknown
+  never rejects).
 
-`render` and `promote-sites` skip `dead` and `challenge` sites (no Apify run) and record the outcome like any
-other (`config.PRECHECK_SKIP`); the standalone command records only those two, so it never overwrites a real
-render outcome.
+`render` and `promote-sites` skip only `dead` sites (no Apify run) and record the outcome like any other
+(`config.PRECHECK_SKIP`); the standalone command records only those, so it never overwrites a real render outcome.
+`challenge` is reported, never recorded or skipped: on 2026-11-25 all 8 sites challenged on the plain GET had rendered
+through Apify's browser at HTTP 200.
 """
 
 from __future__ import annotations
@@ -59,6 +61,8 @@ def precheck(url: str, *, getaddrinfo: Callable = socket.getaddrinfo,
     host = urlsplit(url).hostname or ""
     if not host:
         return {"outcome": "proceed", "http_status": None, "error": "no host in the URL"}
+    if re.search(r"\s", host):
+        return {"outcome": "proceed", "http_status": None, "error": f"malformed host {host!r} (spaces in it)"}
     if dns := resolve(host, getaddrinfo):
         return {"outcome": "dead", "http_status": None, "error": dns}
     own = client is None
@@ -94,25 +98,25 @@ def precheck_many(urls: dict[str, str], workers: int = 16, **kw) -> dict[str, di
 
 
 def run(conn, *, sites: list[str] | None = None, dry_run: bool = False) -> dict[str, Any]:
-    """Precheck every site in the list (or the ones named) and record the `dead` and `challenge` ones: as the
+    """Precheck every site in the list (or the ones named) and record the `dead` ones (config.PRECHECK_SKIP): as the
     site's render outcome (a run of its own, `params.render` and `precheck`, scope `targeted`, cost 0) and, for a
     discovered site whose address check is not `ok`, as its `[[check]]`. Nothing is sent to Apify."""
     from datetime import datetime, timezone
 
-    from ..config import last_checks, load_sites
+    from ..config import PRECHECK_SKIP, last_checks, load_sites
     from ..store import finish_run, start_run
     from .discover import _records, append
 
     all_sites = load_sites()
     pick = {sid: s["url"] for sid, s in all_sites.items() if not sites or sid in sites}
     res = precheck_many(pick)
-    skip = {sid: r for sid, r in res.items() if r["outcome"] in ("dead", "challenge")}
+    skip = {sid: r for sid, r in res.items() if r["outcome"] in PRECHECK_SKIP}
     out: dict[str, Any] = {"checked": len(res),
                            "counts": {k: sum(r["outcome"] == k for r in res.values())
                                       for k in ("dead", "challenge", "proceed")},
-                           "dead": {sid: [pick[sid], r["error"]] for sid, r in skip.items() if r["outcome"] == "dead"},
-                           "challenge": {sid: [pick[sid], r["error"]] for sid, r in skip.items()
-                                         if r["outcome"] == "challenge"},
+                           "dead": {sid: [pick[sid], r["error"]] for sid, r in res.items() if r["outcome"] == "dead"},
+                           "challenge (reported only)": {sid: [pick[sid], r["error"]] for sid, r in res.items()
+                                                         if r["outcome"] == "challenge"},
                            "proceed_errors": {sid: [pick[sid], r["error"]] for sid, r in res.items()
                                               if r["outcome"] == "proceed" and r["error"]}}
     if dry_run or not skip:
@@ -135,7 +139,7 @@ def run(conn, *, sites: list[str] | None = None, dry_run: bool = False) -> dict[
 
 
 def precheck_check(sid: str, r: dict[str, Any], at: str, run_id: int | None) -> dict[str, Any]:
-    """A `[[check]]` row for a site the precheck stopped (outcome dead or challenge)."""
+    """A `[[check]]` row for a site the precheck stopped (config.PRECHECK_SKIP)."""
     from ..config import CHECK_LABEL
 
     return {"id": sid, "ok": False, "at": at, "run_id": run_id, "outcome": r["outcome"],

@@ -280,7 +280,6 @@ OWN_SITE_REASONS = {  # reason -> label, in the order an item takes the first th
     "address_failed": "a site's page does not show the building's address",
     "no_plans": "own site read, but no floor plans or prices found",
     "site_dead": "site dead (DNS)",
-    "challenge": "Cloudflare challenge",
     "all_failed": "every site failed to load (blocked, timed out, empty or not returned)",
     "not_checked": "website known, not checked yet",
 }
@@ -427,7 +426,7 @@ def own_site_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             reason = "no_website"
         else:
             reason = next(k for k, s in (("form", "form"), ("address_failed", "rejected"), ("no_plans", "no_plans"),
-                                         ("site_dead", "dead"), ("challenge", "challenge"), ("all_failed", "failed"), ("not_checked", "pending")) if s in st)
+                                         ("site_dead", "dead"), ("all_failed", "failed"), ("not_checked", "pending")) if s in st)
         out.append({"kind": "own_site", "place_key": pk, "name": name, "address": r["address"],
                     "listings": r["n_listings"], "reason": reason, "reason_label": OWN_SITE_REASONS[reason],
                     "urls": urls})

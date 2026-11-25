@@ -257,7 +257,7 @@ def discover(conn, *, limit: int, batch: int, model: str, max_usd: float,
 
 def retryable(recheck: bool = False) -> list[str]:
     """Found sites whose latest check did not fetch the page (blocked, timed out, empty): fetched
-    again by `promote-sites`. `recheck`: also those the precheck stopped (dead, challenge) over
+    again by `promote-sites`. `recheck`: also those the precheck stopped (dead domains) over
     PRECHECK_RECHECK_DAYS ago (`--retry-failed` never takes them)."""
     rec = _records()
     last = last_checks(rec)
@@ -401,7 +401,7 @@ def fetch_and_check(conn, ids: list[str], *, browser: bool = False, residential:
     from .precheck import precheck_check, precheck_many
 
     direct.sites.cache_clear()
-    # the free precheck first: a dead domain or a Cloudflare challenge gets its check now and no Apify fetch
+    # the free precheck first: a dead domain gets its check now and no Apify fetch
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     pre = precheck_many({i: direct.sites()[i]["url"] for i in ids if i in direct.sites()})
     stopped = [precheck_check(i, r, now, None) for i, r in pre.items() if r["outcome"] in PRECHECK_SKIP]
