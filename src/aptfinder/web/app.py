@@ -126,22 +126,26 @@ def gather_photos(listings: list[dict[str, Any]], limit: int = 30,
     """Photos from every listing. A photo we have downloaded (`files`: url -> stored file, media.url_files) is
     served from our copy (`media/<sha>.jpg`, relative so it works under the base path), and photos that share one
     stored file (the same picture on several sites: the store maps near-duplicates of a place to one file) show
-    once. Others fall back to the source's URL. The community's own website comes first; hotlink-blocked URLs
-    without a local copy go last, so loadable photos fill the limit first."""
-    from ..media import listing_images
+    once, and so do photos within media.PHOTO_MAX_DISTANCE pHash bits of one already shown. Others fall back to the
+    source's URL. The community's own website comes first; hotlink-blocked URLs without a local copy go last, so
+    loadable photos fill the limit first."""
+    from ..media import listing_images, same_picture
 
     files = files or {}
-    seen, seen_files, out = set(), set(), []
+    seen, seen_files, out = set(), {}, []
     for l in sorted(listings, key=lambda l: l["source"] != "direct"):
         for u, kind in listing_images(l["data"]):
             if kind != "photo" or u in seen:
                 continue
             seen.add(u)
             f = files.get(u)
-            if f and f["file"] in seen_files:
-                continue  # a duplicate of a photo already shown
+            # a copy of a photo already shown: the same stored file, or near in pHash (copies stored before the
+            # threshold was tuned, or of another place's file)
+            if f and (f["file"] in seen_files or any(same_picture(f["phash"], ph, "photo") is not None
+                                                     for ph in seen_files.values())):
+                continue
             if f:
-                seen_files.add(f["file"])
+                seen_files[f["file"]] = f["phash"]
             # `page`: the listing or site page the photo was found on; `site`: that page's host, for the overlay
             out.append({"url": f"media/{f['file']}.jpg" if f else u, "source": l["source"], "page": l.get("url"),
                         "site": site_name(l.get("url")), "original": u})

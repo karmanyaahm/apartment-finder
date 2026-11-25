@@ -108,7 +108,7 @@ def test_fetch_dedupes_in_the_write_path_records_failures_and_resumes(place):
     # whichever copy arrived first is stored; the other points at it (downloads run in parallel)
     kept, dup = (a, small) if small["same_as"] else (small, a)
     assert kept["same_as"] is None and kept["stored_bytes"]
-    assert dup["same_as"] == kept["sha256"] and dup["stored_bytes"] is None and dup["distance"] <= 6 and dup["sha256"] != kept["sha256"]
+    assert dup["same_as"] == kept["sha256"] and dup["stored_bytes"] is None and dup["distance"] <= media.PHOTO_MAX_DISTANCE and dup["sha256"] != kept["sha256"]
     assert a["width"] == 1600 and small["width"] == 640  # original sizes: the better source is derivable
     assert rows["https://cdn2/gone.jpg"]["status"] == 404
     assert len(list((settings.MEDIA_DIR).rglob("*.jpg"))) == 2
@@ -146,3 +146,13 @@ def test_media_files_are_served_cacheable_also_redacted(tmp_path, monkeypatch):
         assert resp.status_code == 200 and resp.content == r["jpeg"]
         assert "immutable" in resp.headers["cache-control"]
         assert c.get("/media/" + "0" * 64 + ".jpg").status_code == 404
+
+
+def test_drawer_collapses_near_copies_stored_as_separate_files():
+    """Files stored before the threshold was tuned (or under an exact-only pilot) still show once."""
+    a, a2, b = (media.encode(x, "photo") for x in (picture(1), picture(1, (640, 480), 40), picture(2)))
+    files = {u: {"file": r["sha256"], "phash": r["phash"], "kind": "photo"}
+             for u, r in (("https://x/a", a), ("https://y/a2", a2), ("https://x/b", b))}
+    listings = [{"source": "zillow", "url": "https://z", "data": {"extra": {"images": ["https://x/a", "https://x/b"]}}},
+                {"source": "zumper", "url": "https://u", "data": {"extra": {"images": ["https://y/a2"]}}}]
+    assert [p["original"] for p in gather_photos(listings, files=files)] == ["https://x/a", "https://x/b"]
