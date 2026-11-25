@@ -6,7 +6,8 @@ Many community sites load floor plans, prices and availability with JavaScript, 
 (`direct`, cheerio) never sees. This step fetches each site in the site list (`config.load_sites`) through Apify's
 `apify/playwright-scraper`: it waits for the page, clicks "view more" / "load more" / "show all" style expanders (never
 anything that applies, books, contacts or signs in: AGENTS.md rule 7), scrolls to the bottom, and also opens the
-site's own floor-plans page once. Avalon sites are skipped: their page data already gives every unit exactly.
+site's own floor-plans page once, and up to MAX_UNIT_PAGES per-plan unit lists ("View apartments"), all inside the
+community's own path. Avalon sites are skipped: their page data already gives every unit exactly.
 
 Each site's rendered text goes to headless `claude -p --model haiku` (no tools) with a fixed schema of plans and
 units. An answer counts only if what it states is on the page: the plan or unit name, the price (as written, with or
@@ -37,10 +38,14 @@ from .lease import _avail
 ACTOR = "apify/playwright-scraper"
 SKIP_PLATFORMS = {"avalon"}  # exact units from the page data already
 
+MAX_UNIT_PAGES = 5  # per site: per-plan "view apartments" pages followed (about $0.003 a page)
+PAGES_PER_SITE = 2 + MAX_UNIT_PAGES  # start page, its floor-plans page, the plans' unit pages
 PAGE_FUNCTION = r"""async function pageFunction(context) {
   const { page, request, response } = context;
   const MORE = /^(show|load|view|see)\s+(more|all)\b|more\s+(floor\s*plans|units|apartments|results)|view\s+all\s+(floor\s*plans|units|availab)|^show\s+unavailable|^all\s+floor\s*plans$/i;
   const NEVER = /apply|tour|contact|schedule|lease\s*now|submit|sign\s*(in|up)|log\s*in|book|call|email|text\s+us|chat|reserve|deposit/i;
+  const UNITS = /^(view|see|show)\s+(available\s+)?(apartments|units|homes)\b|^available\s+(units|apartments)\b|^view\s+availability$/i;
+  const MAX_UNITS = __MAX_UNIT_PAGES__;
   try { await page.waitForLoadState('networkidle', { timeout: 20000 }); } catch (e) {}
   const clicked = [];
   for (let round = 0; round < 10; round++) {
@@ -57,23 +62,65 @@ PAGE_FUNCTION = r"""async function pageFunction(context) {
     }
     if (!n) break;
   }
-  if (!request.userData.child) {
-    const links = await page.$$eval('a[href]', (as) => as.map((a) => [a.href, (a.innerText || '').trim()]));
-    const here = page.url().split('#')[0];
-    // stay inside this community's own pages: on an operator's site (greystar.com/<community>/...) a same-site link
-    // can lead to another building (Central Park at Whisman's page linked to Encasa in Sunnyvale, 2026-11-24)
+  const ud = request.userData;
+  const kind = ud.kind || 'start';
+  const here = page.url().split('#')[0];
+  // stay inside this community's own pages: on an operator's site (greystar.com/<community>/...) a same-site link
+  // can lead to another building (Central Park at Whisman's page linked to Encasa in Sunnyvale, 2026-11-24).
+  // The scope is the start page's (origin + first path segment), handed down to the pages it opens.
+  let scope = ud.scope;
+  if (!scope) {
     const u = new URL(here);
     const seg = u.pathname.split('/').filter(Boolean)[0];
-    const scope = u.origin + (seg ? '/' + seg : '');
-    const fp = links.find(([h, t]) => h.startsWith(scope) && /floor-?plans|floorplans|availability/i.test(h + ' ' + t)
-                                      && !/apply|tour|contact/i.test(h) && h.split('#')[0] !== here);
-    if (fp) await context.enqueueRequest({ url: fp[0], userData: { child: true, site: request.userData.site } });
+    scope = u.origin + (seg ? '/' + seg : '');
+  }
+  const inScope = (h) => h.startsWith(scope) && !NEVER.test(h.slice(scope.length)) && h.split('#')[0] !== here;
+  const followed = [];
+  const extra = [];
+  // a plan's own unit list ("VIEW APARTMENTS", "View units", "Available units"): a link is opened as a page, at
+  // most MAX_UNITS per site (the start page hands what is left to the floor-plans page); a button without a link
+  // is clicked in place and the dialog it opens is read
+  let unitsLeft = kind === 'start' ? MAX_UNITS : (ud.unitsLeft || 0);
+  if (kind !== 'units') {
+    const seen = new Set();
+    for (const el of await page.$$('a, button, [role=button]')) {
+      if (unitsLeft <= 0) break;
+      const t = ((await el.innerText().catch(() => '')) || '').trim().replace(/\s+/g, ' ');
+      if (!t || t.length > 40 || !UNITS.test(t) || NEVER.test(t)) continue;
+      const href = await el.evaluate((a) => a.href || null).catch(() => null);
+      if (href && !href.startsWith('javascript') && href.split('#')[0] !== here) {
+        const h = href.split('#')[0];
+        if (seen.has(h) || !inScope(h)) continue;
+        seen.add(h);
+        await context.enqueueRequest({ url: h, userData: { site: ud.site, kind: 'units', scope, from: here, label: t } });
+        followed.push(h); unitsLeft--;
+      } else if (await el.isVisible().catch(() => false)) {
+        try {
+          await el.click({ timeout: 3000 }); await page.waitForTimeout(2000); unitsLeft--; clicked.push(t);
+          const dlg = await page.$$eval('[role=dialog], [aria-modal=true], .modal.show, .modal.in',
+                                        (ds) => ds.map((d) => d.innerText || '').filter(Boolean).join('\n'));
+          if (dlg) extra.push(dlg.slice(0, 8000));
+          await page.keyboard.press('Escape').catch(() => {}); await page.waitForTimeout(500);
+        } catch (e) {}
+      }
+    }
+  }
+  if (kind === 'start') {
+    const links = await page.$$eval('a[href]', (as) => as.map((a) => [a.href, (a.innerText || '').trim()]));
+    const fp = links.find(([h, t]) => inScope(h) && /floor-?plans|floorplans|availability/i.test(h + ' ' + t)
+                                      && !followed.includes(h.split('#')[0]));
+    if (fp) {
+      const h = fp[0].split('#')[0];
+      await context.enqueueRequest({ url: h, userData: { site: ud.site, kind: 'floorplans', scope, unitsLeft, from: here } });
+      followed.push(h);
+    }
   }
   const text = await page.evaluate(() => document.body ? document.body.innerText : '');
-  return { site: request.userData.site || null, child: !!request.userData.child, requested: request.url,
-           url: page.url(), status: response ? (typeof response.status === 'function' ? response.status() : response.status) : null,
-           title: await page.title(), clicked, text: text.slice(0, 80000) };
-}"""
+  return { site: ud.site || null, kind, child: kind !== 'start', requested: request.url, url: page.url(),
+           status: response ? (typeof response.status === 'function' ? response.status() : response.status) : null,
+           title: await page.title(), clicked, followed, from: ud.from || null, label: ud.label || null,
+           text: (text + (extra.length ? '\n\n[opened in place]\n' + extra.join('\n\n') : '')).slice(0, 80000) };
+}""".replace("__MAX_UNIT_PAGES__", str(MAX_UNIT_PAGES))
 
 SYSTEM = ("You read an apartment community's own website (rendered page text) and list the floor plans or units it "
           "currently offers. Use only what the text states; never infer. Copy names, prices, square feet and "
@@ -169,6 +216,20 @@ def _site_address(conn, sid: str, site: dict[str, Any]) -> tuple[str | None, str
     return (r["address"], r["place_key"]) if r else (site.get("address"), None)
 
 
+PAGE_BUDGET = {"start": 12000, "floorplans": 12000, "units": 6000}  # characters of each page sent to Haiku
+
+
+def site_text(pages: list[dict[str, Any]]) -> str:
+    """The text Haiku reads for one site: the start page, its floor-plans page, then at most MAX_UNIT_PAGES unit
+    pages, each cut to its budget so unit lists are not crowded out by a long start page."""
+    order = {"start": 0, "floorplans": 1, "units": 2}
+    kind = lambda p: p.get("kind") or ("floorplans" if p.get("child") else "start")  # noqa: E731
+    ps = sorted(pages, key=lambda p: order.get(kind(p), 3))
+    units = [p for p in ps if kind(p) == "units"][:MAX_UNIT_PAGES]
+    ps = [p for p in ps if kind(p) != "units"] + units
+    return "\n\n".join(f"[page {p['url']}]\n{(p.get('text') or '')[:PAGE_BUDGET.get(kind(p), 6000)]}" for p in ps)
+
+
 def render(conn, chunks: list[str], *, sites: list[str] | None = None, model: str = "haiku",
            max_claude_usd: float = 1.0, max_apify_usd: float = 1.0, dry_run: bool = False) -> dict[str, Any]:
     all_sites = load_sites()
@@ -186,15 +247,16 @@ def render(conn, chunks: list[str], *, sites: list[str] | None = None, model: st
         pick[sid] = s
     if dry_run or not pick:
         return {"sites": [(sid, s["url"]) for sid, s in pick.items()],
-                "estimated_apify_usd": round(0.006 * len(pick), 2), "estimated_claude_usd": round(0.004 * len(pick), 2)}
+                "estimated_apify_usd": round(0.003 * PAGES_PER_SITE * len(pick), 2), "estimated_claude_usd": round(0.004 * len(pick), 2)}
     areas = {f"{sid}#render": sid for sid in pick}
     run = start_run(conn, "intake", "direct", {"areas": list(areas), "render": True, "scope": "partial",
                                                "actor": ACTOR, "model": model})
     res = run_actor(ACTOR, {"startUrls": [{"url": s["url"], "userData": {"site": sid}} for sid, s in pick.items()],
                             "pageFunction": PAGE_FUNCTION, "proxyConfiguration": {"useApifyProxy": True},
-                            "maxRequestsPerCrawl": 2 * len(pick), "maxRequestRetries": 2, "headless": True,
-                            "pageLoadTimeoutSecs": 120, "pageFunctionTimeoutSecs": 180, "waitUntil": "domcontentloaded"},
-                    max_items=2 * len(pick), max_charge_usd=max_apify_usd, timeout_s=1800, memory_mb=2048)
+                            "maxRequestsPerCrawl": PAGES_PER_SITE * len(pick), "maxRequestRetries": 2,
+                            "headless": True, "pageLoadTimeoutSecs": 120, "pageFunctionTimeoutSecs": 240,
+                            "waitUntil": "domcontentloaded"},
+                    max_items=PAGES_PER_SITE * len(pick), max_charge_usd=max_apify_usd, timeout_s=1800, memory_mb=2048)
     raw_dir = settings.RAW_DIR / "render"
     raw_dir.mkdir(parents=True, exist_ok=True)
     raw_path = raw_dir / f"run{run}.json"
@@ -207,8 +269,8 @@ def render(conn, chunks: list[str], *, sites: list[str] | None = None, model: st
     spent, per_area, n_obs, report = 0.0, {}, 0, {}
     try:
         for sid, s in pick.items():
-            its = sorted(pages.get(sid, []), key=lambda i: i.get("child", False))
-            text = "\n\n".join(f"[page {i['url']}]\n{i.get('text') or ''}" for i in its)[:24000]
+            its = pages.get(sid, [])
+            text = site_text(its)
             if not its or len((text or "").strip()) < 200:
                 per_area[f"{sid}#render"] = {"state": "failed", "items": 0}
                 report[sid] = "page not rendered (blocked or empty)"

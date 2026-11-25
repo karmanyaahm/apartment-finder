@@ -118,6 +118,7 @@ def test_avail_and_numbers():
     assert _avail("now", ref) == "2026-11-24"
     assert _avail("Jan 5", ref) == "2027-01-05"  # earlier month than ref rolls to next year
     assert _avail("2026-12-01T00:00:00-05:00", ref) == "2026-12-01"
+    assert _avail("12/1/2026", ref) == "2026-12-01" and _avail("Available 1/29/2027", ref) == "2027-01-29"  # UDR units
     assert _first_num("1,248 Sq Ft") == 1248
 
 

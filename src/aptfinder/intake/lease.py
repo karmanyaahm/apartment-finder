@@ -53,6 +53,12 @@ def _avail(text: str | None, ref: date | None = None) -> str | None:
     m = re.match(r"(\d{4}-\d{2}-\d{2})", t)
     if m:
         return m.group(1)
+    m = re.search(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", t)  # US numeric, as UDR's unit lists write it: 12/1/2026
+    if m:
+        try:
+            return date(int(m.group(3)), int(m.group(1)), int(m.group(2))).isoformat()
+        except ValueError:
+            return None
     m = re.search(r"([a-z]{3})[a-z]*\.?\s+(\d{1,2})", t)
     if m:
         try:
