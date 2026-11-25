@@ -113,6 +113,11 @@ def test_active_flag_follows_latest_full_run(conn):
     finish_run(conn, r3)
     active = dict(conn.execute("SELECT source_id, active FROM listings").fetchall())
     assert active == {"1": 1, "2": 1}
+    # a website check run (no observations) never retires anything, even one recorded without a scope
+    r4 = start_run(conn, "intake", "zillow", {"check": True})
+    finish_run(conn, r4)
+    active = dict(conn.execute("SELECT source_id, active FROM listings").fetchall())
+    assert active == {"1": 1, "2": 1}
 
 
 def test_wrong_check_overrides_until_source_changes(conn):

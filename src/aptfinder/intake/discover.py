@@ -339,7 +339,7 @@ def _browser_fetch(conn, ids: list[str], residential: bool) -> tuple[int, float,
     sites = direct.sites()
     reqs = [{"url": sites[i]["url"], "userData": {"site": i}} for i in ids if i in sites]
     proxy = "residential" if residential else "datacenter"
-    run_id = start_run(conn, "intake", "direct", {"check": True, "browser": True, "proxy": proxy,
+    run_id = start_run(conn, "intake", "direct", {"check": True, "browser": True, "scope": "targeted", "proxy": proxy,
                                                   "sites": [r["userData"]["site"] for r in reqs], "actor": ACTOR})
     res = run_actor(ACTOR, {"startUrls": reqs, "pageFunction": BROWSER_CHECK_PAGE, **browser_proxy(residential),
                             "maxRequestsPerCrawl": len(reqs), "maxRequestRetries": 2, "headless": True,

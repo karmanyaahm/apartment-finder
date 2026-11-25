@@ -172,10 +172,12 @@ SELECT source, source_id, MIN(observed_at) AS first_seen, MAX(observed_at) AS la
 FROM observations GROUP BY source, source_id;
 
 -- Latest successful full-coverage run per source. A listing absent from it is no longer active.
--- Runs whose params.scope is 'targeted' (direct enrichment of one place) do not count.
+-- Runs whose params.scope is 'targeted' (direct enrichment of one place) do not count, nor do website checks
+-- (params.check: address checks of discovered sites, which observe nothing; two ran without a scope on 2026-11-25).
 CREATE VIEW source_last_full_run AS
 SELECT source, MAX(id) AS run_id FROM runs
 WHERE status = 'ok' AND component = 'intake' AND COALESCE(json_extract(params, '$.scope'), 'full') = 'full'
+  AND json_extract(params, '$.check') IS NULL
 GROUP BY source;
 
 -- The newest user link wins over any rule link; otherwise the newest rule link.
