@@ -19,7 +19,7 @@ import re
 from typing import Any
 
 from .. import settings
-from ..store.keys import _h, _norm_tokens
+from ..store.keys import _h, _norm_tokens, house_numbers
 
 GEO_CACHE = "geocode_cache.json"
 
@@ -66,14 +66,15 @@ def _lead_number(address: str) -> str | None:
 
 def geocode_parts(result: dict[str, Any], address: str) -> dict[str, Any] | None:
     """Google's canonical street and city for an address, only for a street-level match whose house number is the
-    one written in the address (a vague or different match keeps the other readings)."""
+    one written in the address, or one of a number list's (a vague or different match keeps the other readings)."""
     if not PRECISE & set(result.get("types") or []):
         return None
     comp = {t: c for c in result.get("address_components") or [] for t in c.get("types") or []}
     num = (comp.get("street_number") or {}).get("long_name")
     route = (comp.get("route") or {}).get("long_name")
     city = (comp.get("locality") or comp.get("sublocality") or {}).get("long_name")
-    if not num or not route or num != _lead_number(address):
+    # a number-list address ('1024, 1026, 1028 Middle Avenue') takes Google's pick among its numbers (1028)
+    if not num or not route or (num != _lead_number(address) and num.lower() not in house_numbers(address)):
         return None
     return {"street": " ".join(_toks(f"{num} {route}")), "city": " ".join(_toks(city)) if city else None,
             "zip": (comp.get("postal_code") or {}).get("long_name"), "place_id": result.get("place_id"),

@@ -204,6 +204,48 @@ def test_address_parsing_and_keys():
     assert place_key(None, None, None, None) is None
 
 
+def test_a_floor_plan_beats_a_unit_written_in_the_building_address():
+    # 850 Roble: the own site's 1bd plan carried '#C' from a Craigslist ad and joined the 2bd unit C
+    k = place_key("850 Roble Ave #C, Menlo Park, CA 94025", None, None, None)
+    assert unit_key(k, "850 Roble Ave #C, Menlo Park, CA 94025", None, "One Bedroom One Bathroom") == \
+        f"{k}/onebedroomonebathroom"
+    assert unit_key(k, "850 Roble Ave APT C, Menlo Park, CA 94025", None, None) == f"{k}/c"
+    assert unit_key(k, "850 Roble Ave #C, Menlo Park", "7", "One Bedroom One Bathroom") == f"{k}/7"  # own unit first
+
+
+def test_a_bare_unit_after_the_street_type_is_not_the_city():
+    # Craigslist 365 Forest Ave 2A: '2a' was read as the city, so the ad became its own place 800 m from Zillow's
+    for a in ("365 Forest Ave 2A, Palo Alto, CA 94301", "365 Forest Ave 2A | Palo Alto, CA 94301"):
+        assert parse_address(a) == {"street": "365 forest ave", "unit": "2a", "city": "palo alto"}
+    assert place_key("365 Forest Ave 2A, Palo Alto, CA 94301", None, None, None) == \
+        place_key("365 Forest Ave APT 2A, Palo Alto, CA 94301", None, None, None)
+    assert parse_address("234 Escuela Avenue Mountain View, CA")["city"] == "mountain view"  # a word is still a city
+    assert parse_address("100 N Whisman Rd #10 #1024, Mountain View, CA 94043") == \
+        {"street": "100 n whisman rd", "unit": "10", "city": "mountain view"}
+    assert parse_address("4250 El Camino Real C323 Palo C323, Palo Alto, CA 94306") == \
+        {"street": "4250 el camino real", "unit": "c323", "city": "palo alto"}
+    assert parse_address("2615 State Highway 82, Santa Clara, CA 95051") == \
+        {"street": "2615 state hwy 82", "unit": None, "city": "santa clara"}
+
+
+def test_a_list_of_house_numbers_is_one_street_not_a_unit_and_a_city():
+    from aptfinder.store.keys import house_numbers
+
+    a = "1024, 1026, 1028 Middle Avenue, Menlo Park, CA 94025"
+    assert parse_address(a) == {"street": "1024 middle ave", "unit": None, "city": "menlo park"}
+    assert house_numbers(a) == ["1024", "1026", "1028"]
+    assert parse_address("670,680,690,2333 Eastridge Ave,680 Sharon Park Dr, Menlo Park, CA 94025") == \
+        {"street": "670 eastridge ave", "unit": None, "city": "menlo park"}
+    assert parse_address("2491 2483, 2485, 2489, 2491 Whitney Drive, Mountain View")["street"] == "2491 whitney dr"
+    assert parse_address("431 - 439, 445 - 453 Stanford Avenue, Palo Alto")["street"] == "431 stanford ave"
+    assert parse_address("4180-4190 El Camino Real, Palo Alto")["street"] == "4180-4190 el camino real"  # a range
+    # not lists: a unit in its own slot, a numbered street
+    assert parse_address("1870 California St, 11, Mountain View") == \
+        {"street": "1870 california st", "unit": "11", "city": "mountain view"}
+    assert parse_address("555 W Middlefield Rd, 1, 555 W Middlefield, Mountain View")["city"] == "mountain view"
+    assert parse_address("123 4th St, San Mateo")["street"] == "123 4th st" and house_numbers("123 4th St") == []
+
+
 def test_init_db_is_noop_when_schema_unchanged(conn):
     v = conn.execute("PRAGMA user_version").fetchone()[0]
     assert v != 0

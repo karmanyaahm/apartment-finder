@@ -12,6 +12,7 @@ def example_config(monkeypatch):
     monkeypatch.setattr(settings, "CONFIG_DIR", settings.ROOT / "config.example")
     # nor the live address cache (identity/addresses.py): tests see the hand-written parser only
     monkeypatch.setattr("aptfinder.identity.addresses.load_geocodes", lambda: {})
+    monkeypatch.delenv("GOOGLE_MAPS_API_KEY", raising=False)  # never geocode for real (extract geocodes new strings)
 
 
 @pytest.fixture(autouse=True)

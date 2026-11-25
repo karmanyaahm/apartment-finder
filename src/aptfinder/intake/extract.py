@@ -831,6 +831,9 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
     finish_run(conn, run, "error" if err else "ok", counts, est_cost=round(res["spent"], 4),
                error=str(err)[:500] if err else None)
     if n_obs and rebuild_identity:
+        # an address read from the text is a new string: geocode it first, else identity keys it by the parser alone
+        # (run 595 rewrote 32 Craigslist addresses that then never reached Google)
+        print(_geocode_new(conn), flush=True)
         identity.run(conn)
     if err:
         raise Blocker(f"{source}: {err} (answers before it were applied: {n_obs} listings)") from err

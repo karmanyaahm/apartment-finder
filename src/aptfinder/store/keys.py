@@ -21,6 +21,21 @@ UNIT_RE = re.compile(
 STREET_TYPES = set(SUFFIXES.values()) | {"way", "real", "row", "walk", "plz", "plaza", "loop", "aly", "pass", "path",
                                          "cres", "crescent", "run", "xing", "mall"}
 STATE_ZIP_RE = re.compile(r"^(ca|california)?\s*(\d{5})?(-\d{4})?$", re.IGNORECASE)
+# a complex written as a list of house numbers on one street: '1024, 1026, 1028 Middle Avenue',
+# '670,680,690,2333 Eastridge Ave', '2491 2483, 2485, 2489, 2491 Whitney Drive' (the list ends before a word)
+NUM_LIST_RE = re.compile(r"\s*(\d+[a-z]?)((?:(?:\s*[,&]\s*|\s+and\s+|\s+-\s+|\s+)\d+[a-z]?)+)(?=\s+[a-z])",
+                         re.IGNORECASE)
+# a route number belongs to the street ('2615 State Highway 82')
+NUMBERED_ROUTES = {"hwy", "route", "rte"}
+
+
+def house_numbers(address: str | None) -> list[str]:
+    """The house numbers a number-list address names, in order ('1024, 1026, 1028 Middle Ave' -> 1024, 1026, 1028);
+    [] for any other address."""
+    parts = (address or "").split(",")
+    idx = next((i for i, p in enumerate(parts) if re.match(r"^\s*\d+[a-z]?\b", p, re.IGNORECASE)), None)
+    m = NUM_LIST_RE.match(",".join(parts[idx:])) if idx is not None else None
+    return re.findall(r"\d+[a-z]?", m.group(0).lower()) if m else []
 
 
 def _norm_tokens(text: str) -> str:
@@ -52,6 +67,11 @@ def parse_address(address: str | None, city: str | None = None) -> dict[str, str
     if idx is None:
         result["city"] = fallback_city
         return result
+    # a list of house numbers is the first of them ('1024, 1026, 1028 Middle Avenue' -> '1024 Middle Avenue'):
+    # before, '1026' was read as a unit in its own comma slot and '1028 Middle Avenue' as the city
+    rest = ", ".join(parts[idx:])
+    if (m := NUM_LIST_RE.match(rest)):
+        parts = parts[:idx] + [p.strip() for p in (m.group(1) + rest[m.end():]).split(",")]
     # a unit in its own comma slot right after the street ("1870 California St, 11, Mountain View")
     if idx + 2 < len(parts) and re.fullmatch(r"#?\s*[a-z]?\d{1,5}[a-z]?", parts[idx + 1], re.IGNORECASE):
         result["unit"] = parts[idx + 1].lstrip("# ").lower()
@@ -71,10 +91,23 @@ def parse_address(address: str | None, city: str | None = None) -> dict[str, str
     last = max((i for i, tok in enumerate(toks) if tok in STREET_TYPES and i > 1), default=None)
     if last is not None and last < len(toks) - 1 and len(toks) - last - 1 <= 3:
         result["street"] = " ".join(toks[:last + 1])
-        if not result["city"]:
-            result["city"] = " ".join(toks[last + 1:])
-    if idx + 1 < len(parts) and not result["city"]:
-        cand = re.split(r"\s+-\s+", parts[idx + 1])[0]
+        rest = toks[last + 1:]
+        # a bare unit after the street type ('365 Forest Ave 2A, Palo Alto') is the unit, not the city: no city
+        # has a digit in its first word (a ZIP is not a unit)
+        if toks[last] in NUMBERED_ROUTES and rest[0].isdigit():
+            result["street"], rest = " ".join(toks[:last + 2]), rest[1:]
+        elif re.search(r"\d", rest[0]) and not re.fullmatch(r"\d{5}", rest[0]):
+            result["unit"] = result["unit"] or rest[0]
+            rest = rest[1:]
+        if any(re.search(r"\d", t) for t in rest):  # 'C323 Palo C323': not a city, read the next comma part
+            rest = []
+        if rest and not result["city"]:
+            result["city"] = " ".join(rest)
+    # the city is the next comma part that is not another street of the same complex ('670 Eastridge Ave,
+    # 680 Sharon Park Dr, Menlo Park') nor a state and ZIP
+    cand = next((p for p in parts[idx + 1:] if not re.match(r"^\d", p)), None) if not result["city"] else None
+    if cand is not None:
+        cand = re.split(r"\s+-\s+", cand)[0]
         if not STATE_ZIP_RE.match(cand.strip()):
             result["city"] = _norm_tokens(cand)
     result["city"] = result["city"] or fallback_city
@@ -107,7 +140,10 @@ def place_key(address: str | None, city: str | None, lat: float | None, lon: flo
 
 
 def unit_key(pkey: str, address: str | None, unit: str | None, floor_plan: str | None) -> str:
-    label = (unit or parse_address(address)["unit"] or floor_plan or "").strip().lower()
+    """The listing's own unit, else its floor plan, else a unit written in the address. A floor-plan row (an own
+    site's plan, a RentCafe or Zumper plan) carries the building's address, which may name some other listing's unit
+    (850 Roble's site took '850 Roble Ave #C' from the Craigslist ad that named it): that unit is not the plan's."""
+    label = (unit or floor_plan or parse_address(address)["unit"] or "").strip().lower()
     label = re.sub(r"[^\w-]", "", label)
     return f"{pkey}/{label}" if label else pkey
 
