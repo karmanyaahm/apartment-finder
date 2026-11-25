@@ -63,11 +63,12 @@ def test_render_commits_each_site_before_the_next_claude_call(conn, tmp_path, mo
 
     def ask(name, text, model, cap):
         open_during_ask.append(conn.in_transaction)  # a pending write here would hold the lock for the whole call
-        return [], None, 0.0
+        return [], {"value": "income", "evidence": "This community is income restricted."}, 0.0
 
     monkeypatch.setattr(render, "load_sites", lambda **k: sites)
     monkeypatch.setattr(render, "run_actor", lambda *a, **k: ActorRun(
-        "x", "r1", "SUCCEEDED", [{"site": s, "url": v["url"], "text": "Plan A $3,000 700 sqft"}
+        "x", "r1", "SUCCEEDED", [{"site": s, "url": v["url"], "text": "Plan A $3,000 700 sqft"
+                                  + (" This community is income restricted." if s == "b" else "")}
                                  for s, v in sites.items()], 0.0, {}, "u"))
     monkeypatch.setattr(render, "site_outcome", lambda *a: {"outcome": "read"})
     monkeypatch.setattr(render, "ask", ask)
@@ -79,6 +80,10 @@ def test_render_commits_each_site_before_the_next_claude_call(conn, tmp_path, mo
     render.render(conn, sites=list(sites))
     assert open_during_ask == [False, False, False]
     assert conn.execute("SELECT COUNT(*) FROM observations WHERE source = 'direct'").fetchone()[0] == 3
+    # who may rent, from the same call: kept on the plan rows only where its quote is on the site's pages
+    got = dict(conn.execute("SELECT source_id, json_extract(data, '$.extra.page_restriction.value') "
+                            "FROM observations WHERE source = 'direct'").fetchall())
+    assert got == {"a:r:a": None, "b:r:a": "income", "c:r:a": None}
 
 
 def test_begin_write_says_it_is_waiting_then_proceeds(tmp_path):
