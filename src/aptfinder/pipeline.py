@@ -409,13 +409,14 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
     pending = sum(c["pending_render"] for c in open_conflicts)  # an own-site render will likely settle these
     # the own-site queue: named buildings in a walk zone whose own site gave no usable offer
     no_web = len(verify.own_site_queue(conn))  # named buildings whose own site gave nothing usable
+    n_dup = len(verify.duplicate_queue(conn))  # pairs of places that are probably one building
     stage("verify", "Verify (hand checks)",
-          "done" if not conflicts and not no_web else "todo" if not n_checks else "partial",
+          "done" if not conflicts and not no_web and not n_dup else "todo" if not n_checks else "partial",
           f"{n_checks} checks made; {conflicts} open conflicts ({pending} waiting for an own-site render); "
-          f"{no_web} named buildings whose own site gave no usable offer",
-          ["Verify button in this dashboard"] if conflicts or no_web else [],
+          f"{n_dup} possible duplicate buildings; {no_web} named buildings whose own site gave no usable offer",
+          ["Verify button in this dashboard"] if conflicts or no_web or n_dup else [],
           counts={"checks": n_checks, "conflicts": conflicts, "conflicts_pending_render": pending,
-                  "own_site": no_web})
+                  "duplicates": n_dup, "own_site": no_web})
 
     # 11. filter (computed on every read)
     per_goal = {g: dict(Counter(r["status"] for r in pres.values())) for g, pres in res["places"].items()}

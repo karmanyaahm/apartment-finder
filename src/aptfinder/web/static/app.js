@@ -4,7 +4,7 @@
 
 const S = {
   meta: null, places: [], points: {}, goal: "all", base: "sat", markers: {}, layers: {},
-  selected: null, verifySkip: 0, verifySeed: 0, verifyMode: "conflict", conflictSkip: 0, ownSkip: 0,
+  selected: null, verifySkip: 0, verifySeed: 0, verifyMode: "conflict", conflictSkip: 0, ownSkip: 0, dupSkip: 0,
 };
 const $ = (sel, el = document) => el.querySelector(sel);
 const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
@@ -660,16 +660,16 @@ async function renderConflicts() {
   body.innerHTML = '<p class="muted">Loading…</p>';
   const d = await api(`api/verify/batch?kind=conflict&skip=${S.conflictSkip}&n=${CONFLICT_PAGE}`);
   if (!d.items.length && S.conflictSkip > 0 && d.total > 0) { S.conflictSkip = Math.max(0, d.total - CONFLICT_PAGE); return renderConflicts(); }
-  if (!d.items.length) { S.verifyMode = "own"; S.ownSkip = 0; return renderVerify(); }
+  if (!d.items.length) { S.verifyMode = "dup"; S.dupSkip = 0; return renderVerify(); }
   const from = S.conflictSkip + 1, to = S.conflictSkip + d.items.length;
   const more = to < d.total;
   body.innerHTML = `<h2>${d.total} conflicts: ${d.actionable} to check, ${d.pending} waiting for an own-site render</h2>
     <p class="small">Sources disagree on these units. Open each listing, then mark every stored value: ✓ correct, ✗ wrong (type the true value), ? cannot tell. Conflicts tagged <i>own-site render pending</i> come last: the building's own site will be read again and will likely settle them.</p>
-    <p class="muted small">Showing ${from}–${to} of ${d.total}</p>
+    <p class="muted small">Showing ${from}–${to} of ${d.total} · <a href="#" id="v-dups">possible duplicate buildings (${S.status?.queues?.duplicates ?? "…"})</a></p>
     ${d.items.map(conflictBlock).join("")}
     <p style="margin-top:14px"><button id="v-prev" ${S.conflictSkip ? "" : "disabled"}>Previous ${CONFLICT_PAGE}</button>
       ${more ? `<button id="v-more" class="accent">Next ${CONFLICT_PAGE}</button>` : ""}
-      <button id="v-rest" class="${more ? "" : "accent"}">${more ? "Skip to" : "Continue:"} buildings whose own site gave nothing usable, then the sample</button></p>`;
+      <button id="v-rest" class="${more ? "" : "accent"}">${more ? "Skip to" : "Continue:"} possible duplicate buildings, then own sites and the sample</button></p>`;
   $$(".vbtns", body).forEach(wireVbtns);
   $$("[data-goto]", body).forEach((a) => a.addEventListener("click", (ev) => { ev.preventDefault(); gotoPlace(a.dataset.goto); }));
   $("#v-prev").addEventListener("click", () => { S.conflictSkip = Math.max(0, S.conflictSkip - CONFLICT_PAGE); renderConflicts(); loadStatus(); });
@@ -678,12 +678,15 @@ async function renderConflicts() {
     const done = $$(".vconf", body).filter((b) => $$(".vbtns", b).every((v) => $("button.on", v))).length;
     S.conflictSkip += d.items.length - done; renderConflicts(); loadStatus();
   });
-  $("#v-rest").addEventListener("click", () => { S.verifyMode = "own"; S.ownSkip = 0; renderVerify(); loadStatus(); });
+  const toDups = (ev) => { ev?.preventDefault(); S.verifyMode = "dup"; S.dupSkip = 0; renderVerify(); loadStatus(); };
+  $("#v-rest").addEventListener("click", toDups);
+  $("#v-dups").addEventListener("click", toDups);
 }
 
 async function renderVerify() {
   if (S.verifyMode === "conflict") return renderConflicts();
   if (S.verifyMode === "own") return renderOwnSites();
+  if (S.verifyMode === "dup") return renderDuplicates();
   const body = $("#verify-body");
   body.innerHTML = '<p class="muted">Loading…</p>';
   const d = await api(`api/verify/next?seed=${S.verifySeed}&skip=${S.verifySkip}&conflicts=false`);
@@ -718,6 +721,61 @@ async function renderVerify() {
   $("#v-back").addEventListener("click", backToConflicts);
   $("#v-skip").addEventListener("click", () => { S.verifySkip++; renderVerify(); });
   $("#v-next").addEventListener("click", () => { renderVerify(); loadStatus(); });
+}
+
+/* pairs of places that are probably one building: merge either way (into the bigger by default) or say they differ */
+const DUP_PAGE = 20;
+async function renderDuplicates() {
+  const body = $("#verify-body");
+  body.innerHTML = '<p class="muted">Loading…</p>';
+  const d = await api(`api/verify/duplicates?skip=${S.dupSkip}&n=${DUP_PAGE}`);
+  if (!d.items.length && S.dupSkip > 0 && d.total > 0) { S.dupSkip = Math.max(0, d.total - DUP_PAGE); return renderDuplicates(); }
+  const counts = Object.entries(d.by_reason).map(([k, n]) => `${n} ${esc(d.labels[k])}`).join(" · ");
+  // the two places are A and B (names are often identical, so the buttons name the letter)
+  const side = (p, l) => `<div style="flex:1 1 220px;min-width:0"><b>${l}</b> <a href="#" data-goto="${esc(p.place_key)}">${esc(p.label)}</a>
+    <div class="small">${esc(p.address || "(no address)")}</div>
+    <div class="muted small">${p.n_listings} listing(s) · ${esc(p.sources.join(", ") || "no sources")}</div></div>`;
+  const block = (e) => {
+    const [a, b] = e.places;
+    a.l = "A"; b.l = "B";
+    const [big, small] = b.n_listings > a.n_listings ? [b, a] : [a, b];  // merge into the bigger place by default
+    const btn = (from, into, accent) => `<button class="${accent ? "accent " : ""}dup-merge" data-from="${esc(from.place_key)}" data-into="${esc(into.place_key)}" title="every listing of ${esc(from.label)} moves to ${esc(into.label)}">Merge ${from.l} into ${into.l}</button>`;
+    return `<div class="vconf" data-pair="${esc(e.pair_key)}">
+      <div class="vconf-head">${e.reasons.map((r) => `<span class="chip" title="${esc(r.detail)}">${esc(r.label)}</span>`).join(" ")}
+        <span class="muted small">${e.metres} m apart</span></div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap">${side(a, "A")}${side(b, "B")}</div>
+      <p class="small muted" style="word-break:break-word">${e.reasons.map((r) => `${esc(r.label)}: ${esc(r.detail)}`).join("<br>")}</p>
+      <p class="small">${btn(small, big, true)} ${btn(big, small, false)} <button class="dup-no">Not the same building</button></p></div>`;
+  };
+  const more = S.dupSkip + d.items.length < d.total;
+  body.innerHTML = `<h2>Possible duplicate buildings (${d.total})</h2>
+    <p class="small">${counts || "none"}. Pairs of places that look like one building, strongest evidence first. A merge moves every listing of one place to the other (each keeps its unit; undo per listing with split in the drawer).</p>
+    <p class="muted small"><a href="#" id="v-back">back to the conflicts</a></p>
+    ${d.items.map(block).join("") || "<p>Nothing here.</p>"}
+    <p style="margin-top:14px"><button id="d-prev" ${S.dupSkip ? "" : "disabled"}>Previous ${DUP_PAGE}</button>
+      ${more ? `<button id="d-more" class="accent">Next ${DUP_PAGE}</button>` : ""}
+      <button id="d-rest" class="${more ? "" : "accent"}">${more ? "Skip to" : "Continue:"} buildings whose own site gave nothing usable, then the sample</button></p>`;
+  const done = async (msg) => { toast(msg); await renderDuplicates(); loadStatus(); loadPlaces(); };
+  $$(".vconf", body).forEach((box) => {
+    $$(".dup-merge", box).forEach((b) => b.addEventListener("click", async () => {
+      $$("button", box).forEach((x) => { x.disabled = true; });
+      try {
+        const r = await post(`api/places/${encodeURIComponent(b.dataset.from)}/merge`, { into: b.dataset.into });
+        await done(`Merged ${r.merged} listing(s)`);
+      } catch (err) { toast("Merge failed: " + err.message, 6000); $$("button", box).forEach((x) => { x.disabled = false; }); }
+    }));
+    $(".dup-no", box).addEventListener("click", async () => {
+      try {
+        await post("api/annotations", { entity_type: "place_pair", entity_key: box.dataset.pair, attribute: "same_building", comment: "no" });
+        await done("Recorded: not the same building");
+      } catch (err) { toast("Not saved: " + err.message, 5000); }
+    });
+  });
+  $$("[data-goto]", body).forEach((a) => a.addEventListener("click", (ev) => { ev.preventDefault(); gotoPlace(a.dataset.goto); }));
+  $("#v-back").addEventListener("click", backToConflicts);
+  $("#d-prev").addEventListener("click", () => { S.dupSkip = Math.max(0, S.dupSkip - DUP_PAGE); renderDuplicates(); });
+  $("#d-more")?.addEventListener("click", () => { S.dupSkip += DUP_PAGE; renderDuplicates(); });
+  $("#d-rest").addEventListener("click", () => { S.verifyMode = "own"; S.ownSkip = 0; renderVerify(); loadStatus(); });
 }
 
 /* buildings whose own site gave no usable offer: one list, a reason and every URL tried; add a URL or dismiss */
@@ -1074,7 +1132,7 @@ async function loadStatus() {
   const el = $("#status-errors");
   if (el) el.addEventListener("click", (e) => { e.preventDefault(); openPipeline(); });
   const pend = s.queues.conflict_pending ? ` + ${s.queues.conflict_pending} pending render` : "";
-  $("#queue-count").textContent = `(${s.queues.conflict} conflicts${pend} · ${s.queues.own_site ?? 0} own site · ${s.queues.sample})`;
+  $("#queue-count").textContent = `(${s.queues.conflict} conflicts${pend} · ${s.queues.duplicates ?? 0} duplicates · ${s.queues.own_site ?? 0} own site · ${s.queues.sample})`;
 }
 
 function statusBlock(s) {

@@ -496,6 +496,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             n_pending = sum(c["pending_render"] for c in conflicts)
             n_sample = cached("n_sample", lambda: len(verify.sample_queue(conn)))
             n_own = len(cached("own_site_queue", lambda: verify.own_site_queue(conn)))
+            n_dup = len(duplicates())
         from ..trips import google_usage
 
         with lock:
@@ -505,7 +506,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             "accuracy": [{"source": s, "field": f, **a} for (s, f), a in sorted(acc.items())],
             "agreement": agree, "queues": {"conflict": len(conflicts) - n_pending, "conflict_pending": n_pending,
                                            "sample": n_sample,
-                                           "own_site": n_own},
+                                           "own_site": n_own, "duplicates": n_dup},
             "counts": cached("counts", lambda: q("SELECT (SELECT COUNT(*) FROM places) AS places, "
                                                  "(SELECT COUNT(*) FROM listings) AS listings, "
                                                  "(SELECT COUNT(*) FROM listings WHERE active = 1) AS active")[0]),
@@ -575,6 +576,24 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
 
         return {"total": len(items), "skip": skip, "n": n, "items": items[skip:skip + n],
                 "by_reason": dict(Counter(i["reason"] for i in items)), "labels": verify.OWN_SITE_REASONS}
+
+    def duplicates() -> list[dict[str, Any]]:
+        return cached("duplicate_queue", lambda: verify.duplicate_queue(conn, list(all_places().values())))
+
+    @app.get("/api/verify/duplicates")
+    def verify_duplicates(skip: int = 0, n: int = 20) -> dict[str, Any]:
+        """Pairs of places that are probably one building, n at a time, each with its reasons (verify.duplicate_queue),
+        plus the count per reason. Answer with POST /api/places/{key}/merge or an annotation place_pair / pair_key /
+        same_building = no."""
+        from collections import Counter
+
+        with lock:
+            items = duplicates()
+        allp = all_places()
+        page = [{**e, "places": [{**p, "label": place_label(allp.get(p["place_key"]) or p) or p["place_key"]}
+                                 for p in e["places"]]} for e in items[max(0, skip):max(0, skip) + n]]
+        return {"total": len(items), "skip": skip, "n": n, "items": page, "labels": verify.DUP_REASONS,
+                "by_reason": dict(Counter(r["kind"] for e in items for r in e["reasons"]))}
 
     @app.get("/api/verify/next")
     def verify_next(seed: int = 0, skip: int = 0, conflicts: bool = True) -> dict[str, Any]:

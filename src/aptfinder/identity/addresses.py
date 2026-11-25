@@ -143,16 +143,20 @@ def datetime_month() -> str:
 
 
 
-def suspected_duplicates(conn, min_similarity: float = 0.85, max_m: float = 150.0) -> list[dict[str, Any]]:
+def suspected_duplicates(conn, min_similarity: float = 0.85, max_m: float = 150.0,
+                         places: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """Address-keyed buildings (third-party stay places excluded: separate on purpose) with the same street number,
-    street names at least `min_similarity` alike and within `max_m` metres, that still have different keys."""
+    street names at least `min_similarity` alike and within `max_m` metres, that still have different keys.
+    `places`: rows of the places view already read (the view is computed over everything)."""
     import difflib
 
     from ..commute.geo import haversine_m
 
-    rows = [dict(r) for r in conn.execute(
-        "SELECT place_key, address, property_name, lat, lon, n_listings FROM places WHERE place_key LIKE 'p_%' "
-        "AND place_key NOT LIKE '%~%' AND address IS NOT NULL AND lat IS NOT NULL")]
+    if places is None:
+        places = [dict(r) for r in conn.execute("SELECT place_key, address, property_name, lat, lon, n_listings "
+                                                "FROM places")]
+    rows = [dict(r) for r in places if r["place_key"].startswith("p_") and "~" not in r["place_key"]
+            and r.get("address") is not None and r.get("lat") is not None]
     by_num: dict[str, list[dict[str, Any]]] = {}
     for r in rows:
         m = re.match(r"(\d+)\s+(.*)", " ".join(_toks(r["address"].split(",")[0])))

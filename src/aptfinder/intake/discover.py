@@ -32,11 +32,19 @@ from ..store import finish_run, start_run
 
 FILE = "discovered_sites.toml"
 SECRET_ENV = ("APIFY_TOKEN", "GOOGLE_MAPS_API_KEY")
-AGGREGATORS = re.compile(
-    r"(^|\.)(apartments|zillow|trulia|hotpads|rent|rentcafe|apartmentlist|apartmentguide|zumper|padmapper|"
-    r"craigslist|realtor|redfin|forrent|apartmentfinder|apartmenthomeliving|yelp|facebook|instagram|google|"
-    r"linkedin|twitter|x|youtube|tiktok|nextdoor|bbb|mapquest|yahoo|bing|airbnb|furnishedfinder|blueground|"
-    r"rentable|rentals|homes|move|liveapartments|apartmentratings|niche|wikipedia)\.(com|org|net)$", re.I)
+# Listing platforms, aggregators, social sites and virtual-tour hosts: a URL on one (or a subdomain) is never a
+# building's own site. Operator portfolio domains (greystar.com, avaloncommunities.com, udr.com, ...) and
+# rentcafewebsite.com community sites are not here; nor are leasing short-link hosts (apt-rental.com,
+# *.leasehomenow.com, ...), which redirect to the building's page and are judged where they land.
+AGGREGATOR_HOSTS = {
+    "apartments.com", "zillow.com", "trulia.com", "hotpads.com", "rent.com", "rentcafe.com", "apartmentlist.com",
+    "apartmentguide.com", "zumper.com", "padmapper.com", "craigslist.org", "craigslist.com", "realtor.com",
+    "redfin.com", "forrent.com", "apartmentfinder.com", "apartmenthomeliving.com", "rentals.com", "rentable.co",
+    "homes.com", "move.com", "liveapartments.com", "apartmentratings.com", "niche.com", "airbnb.com", "vrbo.com",
+    "furnishedfinder.com", "blueground.com", "vrent.com", "turbotenant.com", "hemlane.com",
+    "matterport.com", "ricoh360.com",
+    "yelp.com", "facebook.com", "instagram.com", "google.com", "linkedin.com", "twitter.com", "x.com",
+    "youtube.com", "tiktok.com", "nextdoor.com", "bbb.org", "mapquest.com", "yahoo.com", "bing.com", "wikipedia.org"}
 ACTION_PATH = re.compile(r"/(book|schedule|tour|apply|application|contact|lease-now|virtual-tour|self-guided|"
                          r"guest-card|email)", re.I)
 PLATFORMS = {"avaloncommunities.com": "avalon", "prometheusapartments.com": "prometheus"}
@@ -89,9 +97,8 @@ def clean_url(url: str | None, keep_query: bool = False) -> tuple[str | None, st
     if not url or not url.startswith("http"):
         return None, "no url"
     p = urlsplit(url.strip())
-    host = p.netloc.lower().removeprefix("www.")
-    if AGGREGATORS.search(host):
-        return None, f"aggregator or social host {host}"
+    if is_aggregator(url):
+        return None, f"aggregator or social host {p.netloc.lower().removeprefix('www.')}"
     if keep_query:
         return urlunsplit((p.scheme, p.netloc, p.path or "/", p.query, "")), ""
     path = ACTION_PATH.split(p.path)[0] if ACTION_PATH.search(p.path) else p.path
@@ -103,6 +110,13 @@ def is_form(url: str | None) -> bool:
     """A tour, apply, contact or lead form (`/guest-card/`, `/emailus.cfm`): never a building's site, even when it
     shows the building's address. A listing's short link often lands on one."""
     return bool(url and ACTION_PATH.search(urlsplit(url).path))
+
+
+def is_aggregator(url: str | None) -> bool:
+    """A URL on a listing platform, aggregator, social or tour host (AGGREGATOR_HOSTS): never a building's own
+    site. Craigslist and Zumper links to vrent.com or turbotenant.com single-listing pages are the usual case."""
+    host = urlsplit(url or "").netloc.lower().split(":")[0]
+    return any(host == h or host.endswith("." + h) for h in AGGREGATOR_HOSTS)
 
 
 def platform_of(url: str) -> str:
@@ -127,6 +141,13 @@ def _rank(model: str | None) -> int:
     return next((v for k, v in MODEL_RANK.items() if k in (model or "").lower()), 0)
 
 
+def scraped_places(conn) -> set[str]:
+    """Places with own-site (`direct`) rows, leaving out rows read from an aggregator page (vrent.com,
+    turbotenant.com, ...): such a place still has no own site."""
+    return {r[0] for r in conn.execute("SELECT DISTINCT place_key, url FROM listings WHERE source = 'direct' "
+                                       "AND place_key IS NOT NULL") if not is_aggregator(r[1])}
+
+
 def candidates(conn, model: str = "sonnet") -> list[dict[str, Any]]:
     """Named buildings in a station walk zone with no community site yet, not searched before by this model or a
     stronger one (a weaker model's "no site" does not block a stronger search); most listings first."""
@@ -139,7 +160,7 @@ def candidates(conn, model: str = "sonnet") -> list[dict[str, Any]]:
     seen |= {r.get("place_key") for r in rec.get("found", [])
              if str(r.get("found_by", "")).startswith("claude") and searched_well(r)}
     have = {s.get("place_key") for s in load_sites().values()}  # passed or not yet checked
-    have |= {r["place_key"] for r in conn.execute("SELECT DISTINCT place_key FROM listings WHERE source = 'direct'")}
+    have |= scraped_places(conn)
     out = []
     for r in conn.execute("SELECT place_key, property_name, address, lat, lon, n_listings FROM places "
                           "WHERE property_name IS NOT NULL AND address IS NOT NULL ORDER BY n_listings DESC"):
@@ -238,8 +259,8 @@ def retryable() -> list[str]:
     again by `promote-sites`."""
     rec = _records()
     last = last_checks(rec)
-    return [f["id"] for f in rec.get("found", [])
-            if f["id"] in last and check_outcome(last[f["id"]]) in CHECK_RETRY]
+    return [f["id"] for f in rec.get("found", []) if not is_aggregator(f["url"])
+            and f["id"] in last and check_outcome(last[f["id"]]) in CHECK_RETRY]
 
 
 def promote(conn, *, limit: int, dry_run: bool = False, fetch: bool = True,
@@ -257,9 +278,8 @@ def promote(conn, *, limit: int, dry_run: bool = False, fetch: bool = True,
             return {"retry": retry}
         return {"retry": retry, "fetch": fetch_and_check(conn, retry, browser=browser, residential=residential)}
     rec = _records()
-    proposed = {r.get("place_key") for r in rec.get("found", [])}
-    have = {s.get("place_key") for s in load_sites().values()} | proposed
-    have |= {r["place_key"] for r in conn.execute("SELECT DISTINCT place_key FROM listings WHERE source = 'direct'")}
+    proposed = {r.get("place_key") for r in rec.get("found", []) if not is_aggregator(r["url"])}
+    have = {s.get("place_key") for s in load_sites().values()} | proposed | scraped_places(conn)
     by_place: dict[str, Counter] = {}
     info: dict[str, Any] = {}
     for r in conn.execute(
@@ -267,7 +287,7 @@ def promote(conn, *, limit: int, dry_run: bool = False, fetch: bool = True,
             "p.address, p.lat, p.lon FROM listings l JOIN places p ON p.place_key = l.place_key "
             "WHERE l.active = 1 AND l.source <> 'direct' AND p.address IS NOT NULL "
             "AND json_extract(l.data, '$.extra.website') IS NOT NULL"):
-        if r["place_key"] in have or not in_walk_zone(r["lat"], r["lon"]):
+        if r["place_key"] in have or is_aggregator(r["website"]) or not in_walk_zone(r["lat"], r["lon"]):
             continue
         by_place.setdefault(r["place_key"], Counter())[(r["website"], r["source"])] += 1
         info[r["place_key"]] = r
@@ -284,7 +304,7 @@ def promote(conn, *, limit: int, dry_run: bool = False, fetch: bool = True,
             "WHERE a.entity_type = 'place' AND a.attribute = 'website' AND a.comment LIKE 'http%' "
             "AND p.address IS NOT NULL ORDER BY a.id"):
         url = clean_url(r["website"], keep_query=True)[0] or r["website"]
-        if norm(url) in known or not in_walk_zone(r["lat"], r["lon"]):
+        if norm(url) in known or is_aggregator(url) or not in_walk_zone(r["lat"], r["lon"]):
             continue
         known.add(norm(url))
         by_place.pop(r["place_key"], None)  # your URL outranks a listing's link for the same place

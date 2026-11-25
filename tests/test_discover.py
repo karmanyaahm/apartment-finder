@@ -205,3 +205,73 @@ def test_browser_check_reads_the_rendered_page(tmp_path, monkeypatch, conn):
     assert res["ok"] == ["station-245"]
     assert seen["proxyConfiguration"]["apifyProxyGroups"] == ["RESIDENTIAL"] and seen["maxRequestsPerCrawl"] == 1
     assert not [k for k in coverage(conn) if k[0] == "direct"]
+
+
+def test_aggregator_hosts_are_never_own_sites():
+    from aptfinder.intake.discover import is_aggregator
+
+    for u in ("https://www.vrent.com/residential/533-bryant-street/02", "https://rental.turbotenant.com/p/x/1",
+              "https://www.zillow.com/b/x/", "https://sfbay.craigslist.org/pen/apa/d/x.html",
+              "https://www.rentcafe.com/apartments/ca/mountain-view/", "https://my.matterport.com/show/?m=abc"):
+        assert is_aggregator(u) and clean_url(u)[0] is None, u
+    for u in ("https://central-park-1.rentcafewebsite.com/", "https://www.greystar.com/x", "https://udr.com/x",
+              "https://www.avaloncommunities.com/x", "https://www.essexapartmenthomes.com/x",
+              "https://www.prometheusapartments.com/x", "https://www.equityapartments.com/x",
+              "https://www.irvinecompanyapartments.com/x", "https://www.mvapartments.com/",
+              "https://www.rentbalmoral.com/", "https://www.apt-rental.com/?n=x", None):
+        assert not is_aggregator(u), u
+
+
+def test_a_vrent_link_is_not_promoted_and_its_place_goes_back_to_no_website(conn, tmp_path, monkeypatch):
+    """Craigslist posts link vrent.com single-listing pages; those were promoted, checked and rendered as the
+    building's own site. They are dropped everywhere, and the building is searchable again."""
+    import shutil
+
+    from aptfinder import identity, settings, verify
+    from aptfinder.config import load_sites
+    from aptfinder.intake.discover import append, candidates, promote
+    from aptfinder.store import append_annotation, append_observation, start_run
+
+    shutil.copytree(settings.ROOT / "config.example", tmp_path / "cfg")
+    monkeypatch.setattr(settings, "CONFIG_DIR", tmp_path / "cfg")
+    run = start_run(conn, "intake", "craigslist", {})
+    vrent = "https://www.vrent.com/residential/100-view-street/02"
+    append_observation(conn, run, "craigslist", "c1", {
+        "property_name": "Harken", "address": "100 View St, Mountain View, CA 94041", "lat": 37.3947,
+        "lon": -122.0763, "extra": {"website": vrent}})
+    identity.run(conn)
+    pk = conn.execute("SELECT place_key FROM places").fetchone()[0]
+    assert promote(conn, limit=10, dry_run=True)["sites"] == []
+    append_annotation(conn, "user", "place", pk, "website", comment="https://rental.turbotenant.com/p/harken/1")
+    assert promote(conn, limit=10, dry_run=True)["sites"] == []
+    # one promoted earlier and scraped (a priced row from the vrent page): dropped from the site list
+    append("found", [{"id": "harken", "place_key": pk, "name": "Harken", "url": vrent, "platform": "photos",
+                      "found_by": "craigslist listing"}])
+    append_observation(conn, run, "direct", "harken:r:02", {
+        "address": "100 View St, Mountain View, CA 94041", "lat": 37.3947, "lon": -122.0763}, price=3000, url=vrent)
+    identity.run(conn)
+    assert "harken" not in load_sites()
+    assert conn.execute("SELECT place_key FROM listings WHERE source = 'direct'").fetchone()[0] == pk
+    (item,) = verify.own_site_queue(conn)
+    assert item["reason"] == "no_website" and item["urls"] == []
+    assert [c["name"] for c in candidates(conn, "sonnet")] == ["Harken"]
+    # a real link from another listing is still promoted
+    append_observation(conn, run, "craigslist", "c2", {
+        "property_name": "Harken", "address": "100 View St, Mountain View, CA 94041", "lat": 37.3947,
+        "lon": -122.0763, "extra": {"website": "https://harken.example/"}})
+    identity.run(conn)
+    assert promote(conn, limit=10, dry_run=True)["sites"] == [("Harken", "https://harken.example/")]
+
+
+def test_load_sites_drops_aggregator_urls(tmp_path):
+    from aptfinder.config import load_sites
+
+    (tmp_path / "direct_sites.toml").write_text(
+        '[[site]]\nid = "z"\nurl = "https://www.zillow.com/b/x/"\nplatform = "photos"\n'
+        '[[site]]\nid = "sevens"\nurl = "https://sevensmv.com/"\nplatform = "photos"\n')
+    (tmp_path / "discovered_sites.toml").write_text(
+        '[[found]]\nid = "v"\nplace_key = "p_v"\nurl = "https://www.vrent.com/residential/x/1"\nplatform = "photos"\n'
+        '[[found]]\nid = "r"\nplace_key = "p_r"\nurl = "https://short.example/abc"\nplatform = "photos"\n'
+        '[[found]]\nid = "ok"\nplace_key = "p_ok"\nurl = "https://ok.example/"\nplatform = "photos"\n'
+        '[[check]]\nid = "r"\nok = true\nfinal_url = "https://rental.turbotenant.com/p/x/1"\n')
+    assert sorted(load_sites(tmp_path)) == ["ok", "sevens"]

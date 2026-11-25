@@ -152,14 +152,15 @@ def load_sites(config_dir: Path | None = None) -> dict[str, dict[str, Any]]:
     """Community websites: hand-listed ones (config/direct_sites.toml) plus ones found by `aptf-intake
     discover-sites` (config/discovered_sites.toml, machine-appended). A discovered site is left out once a
     `[[check]]` rejected it (its latest check: the page was fetched and lacks the address, or is a contact/tour
-    form; a page not fetched is retried), when it is or landed on a contact/tour form, or when a hand entry has
+    form; a page not fetched is retried), when it is or landed on a contact/tour form or an aggregator host
+    (`discover.AGGREGATOR_HOSTS`, also for hand entries), or when a hand entry has
     the same id or URL, or the same place (unless you added it in Verify); it carries `verify_address`."""
-    from .intake.discover import is_form
+    from .intake.discover import is_aggregator, is_form
 
     d = config_dir or settings.CONFIG_DIR
     out: dict[str, dict[str, Any]] = {}
     if (d / "direct_sites.toml").exists():
-        out = {s["id"]: s for s in _toml(d / "direct_sites.toml").get("site", [])}
+        out = {s["id"]: s for s in _toml(d / "direct_sites.toml").get("site", []) if not is_aggregator(s["url"])}
     if (d / "discovered_sites.toml").exists():
         raw = _toml(d / "discovered_sites.toml")
         # only a page that was fetched and lacks the address rejects a site; a page not fetched (blocked, timed
@@ -174,7 +175,8 @@ def load_sites(config_dir: Path | None = None) -> dict[str, dict[str, Any]]:
             if s["id"] in failed or s["id"] in out or s["url"].rstrip("/") in urls or same_place:
                 continue
             m = moved.get(s["id"])  # a redirect link that landed on the building's page: use where it landed
-            if is_form(m["final_url"] if m else s["url"]):
+            landed = m["final_url"] if m else s["url"]
+            if is_form(landed) or is_aggregator(landed) or is_aggregator(s["url"]):
                 continue
             s = {**s, "url": m["final_url"], "platform": m.get("platform") or s.get("platform"),
                  "link": s["url"]} if m else s

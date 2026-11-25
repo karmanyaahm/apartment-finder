@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import random
+import re
 import sqlite3
 from urllib.parse import urlsplit
 from collections import defaultdict
@@ -365,6 +366,112 @@ def own_site_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                     "listings": r["n_listings"], "reason": reason, "reason_label": OWN_SITE_REASONS[reason],
                     "urls": urls})
     return out
+
+
+DUP_SITE_MAX_M = 600.0  # one own website: the same building's places sit within ~570 m (Central Park at Whisman)
+DUP_SITE_MAX_PLACES = 6  # a URL more places share is a manager's site (rentbt.com: 17), not one building's
+DUP_NAME_MAX_M = 200.0
+DUP_WEIGHT = {"website": 3, "address": 2, "name": 2}
+DUP_REASONS = {"address": "similar address", "website": "same own website", "name": "same name"}
+_NAME_FILLER = {"the", "apartments", "apartment", "apts", "apt", "homes", "residences", "community"}
+
+
+def pair_key(a: str, b: str) -> str:
+    """The annotation key of a pair of places: both keys, sorted, joined by '|'."""
+    return "|".join(sorted((a, b)))
+
+
+def _site_key(url: str | None) -> str | None:
+    """A website as host + path: lowercase, no scheme, www., query, fragment, trailing slash or spaces."""
+    u = re.sub(r"\s+", "", url or "").lower()
+    if not u:
+        return None
+    s = urlsplit(u if "://" in u else "https://" + u)
+    host = s.netloc.removeprefix("www.")
+    return (host + s.path.rstrip("/")) if "." in host else None
+
+
+def _name_key(name: str | None) -> str | None:
+    words = [w for w in re.sub(r"[^a-z0-9 ]+", " ", (name or "").lower()).split() if w not in _NAME_FILLER]
+    return " ".join(words) if words and not words[0][0].isdigit() else None
+
+
+def duplicate_queue(conn: sqlite3.Connection, places: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """Pairs of places that are probably one building, each with its reasons, strongest evidence first:
+    `address` (identity.addresses.suspected_duplicates: same number, street 85%+ alike, within 150 m), `website`
+    (the same own website, host and path, within DUP_SITE_MAX_M: a `direct` site scraped at both, or the website
+    a listing names) and `name` (the same property name within DUP_NAME_MAX_M). Third-party stay places (`~`) and
+    places you split off (`u_`) are left out. Bucketed by number, URL and name, never all pairs. A pair leaves once
+    you merge it (one place is gone) or answer 'not the same building' (annotation place_pair / 'a|b' /
+    same_building = no). `places`: rows of the places view already read."""
+    from ..commute.geo import haversine_m
+    from ..identity.addresses import suspected_duplicates
+
+    if places is None:
+        places = [dict(r) for r in conn.execute("SELECT * FROM places")]
+    by_key = {p["place_key"]: p for p in places if "~" not in p["place_key"]
+              and not p["place_key"].startswith("u_") and p.get("lat") is not None}
+    answered = {}
+    for r in conn.execute("SELECT entity_key, comment FROM annotations WHERE entity_type = 'place_pair' "
+                          "AND attribute = 'same_building' ORDER BY id"):
+        answered[r["entity_key"]] = (r["comment"] or "").strip().lower()
+    pairs: dict[str, dict[str, Any]] = {}
+
+    def add(a: str, b: str, kind: str, detail: str) -> None:
+        if a == b or a not in by_key or b not in by_key:
+            return
+        k = pair_key(a, b)
+        if answered.get(k) == "no":
+            return
+        e = pairs.setdefault(k, {"pair_key": k, "a": min(a, b), "b": max(a, b), "reasons": []})
+        if kind not in {x["kind"] for x in e["reasons"]}:
+            e["reasons"].append({"kind": kind, "label": DUP_REASONS[kind], "detail": detail})
+
+    def metres(a: str, b: str) -> float:
+        pa, pb = by_key[a], by_key[b]
+        return haversine_m((pa["lat"], pa["lon"]), (pb["lat"], pb["lon"]))
+
+    for d in suspected_duplicates(conn, places=list(by_key.values())):
+        add(d["a_key"], d["b_key"], "address", f"{d['a']} / {d['b']} ({round(d['similarity'] * 100)}% alike)")
+    sites: dict[str, set[str]] = defaultdict(set)
+    inputs = own_site_inputs(conn)
+    for pk, rows in inputs["scraped"].items():
+        for r in rows:
+            if r["site"]:
+                sites["site " + r["site"]].add(pk)
+    for pk, rows in inputs["listing_sites"].items():
+        for r in rows:
+            if (k := _site_key(r["w"])):
+                sites[k].add(pk)
+    for url, pks in sites.items():
+        ks = sorted(k for k in pks if k in by_key)
+        if len(ks) > DUP_SITE_MAX_PLACES:
+            continue
+        for i, a in enumerate(ks):
+            for b in ks[i + 1:]:
+                if metres(a, b) <= DUP_SITE_MAX_M:
+                    own = url.startswith("site ")
+                    add(a, b, "website", f"own site {url[5:]} scraped at both" if own else url)
+    names: dict[str, list[str]] = defaultdict(list)
+    for pk, p in by_key.items():
+        if (n := _name_key(p.get("property_name"))):
+            names[n].append(pk)
+    for n, ks in names.items():
+        for i, a in enumerate(ks):
+            for b in ks[i + 1:]:
+                if metres(a, b) <= DUP_NAME_MAX_M:
+                    add(a, b, "name", by_key[a]["property_name"])
+    out = []
+    for e in pairs.values():
+        pa, pb = by_key[e["a"]], by_key[e["b"]]
+        e["metres"] = round(metres(e["a"], e["b"]))
+        e["score"] = sum(DUP_WEIGHT[r["kind"]] for r in e["reasons"])
+        e["places"] = [{"place_key": p["place_key"], "name": p.get("property_name"), "address": p.get("address"),
+                        "n_listings": p.get("n_listings") or 0,
+                        "sources": sorted(set((p.get("sources") or "").split(",")) - {""})}
+                       for p in (pa, pb)]
+        out.append(e)
+    return sorted(out, key=lambda e: (-e["score"], e["metres"], e["pair_key"]))
 
 
 def agreement(conn: sqlite3.Connection) -> dict[str, dict[str, int]]:
