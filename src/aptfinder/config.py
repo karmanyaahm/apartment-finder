@@ -113,7 +113,6 @@ class Area(BaseModel):
     kind: str
     id: str
     label: str
-    chunks: list[str]
     city: str | None = None
     bbox: list[float] | None = None
     slug: str | None = None  # box: Airbnb place slug for the search URL (default Palo-Alto--CA)
@@ -177,15 +176,12 @@ def load_sites(config_dir: Path | None = None) -> dict[str, dict[str, Any]]:
     return out
 
 
-def load_areas(config_dir: Path | None = None) -> tuple[list[str], list[Area]]:
+def load_areas(config_dir: Path | None = None) -> list[Area]:
+    """Every intake area; a source covers every area of its own kind (`Adapter.area_kind`)."""
     raw = _toml((config_dir or settings.CONFIG_DIR) / "areas.toml")
-    out = [Area(kind="zip", id=z["code"], label=f"{z['code']} {z['city']}", chunks=z["chunks"], city=z["city"])
-           for z in raw.get("zip", [])]
-    out += [Area(kind="city", id=c["name"], label=c["name"], chunks=c["chunks"], city=c["name"])
-            for c in raw.get("city", [])]
-    out += [Area(kind="box", id=b["id"], label=f"{b['station']} station zone", chunks=[b["chunk"]], bbox=b["bbox"],
-                 slug=b.get("slug"))
+    out = [Area(kind="zip", id=z["code"], label=f"{z['code']} {z['city']}", city=z["city"]) for z in raw.get("zip", [])]
+    out += [Area(kind="city", id=c["name"], label=c["name"], city=c["name"]) for c in raw.get("city", [])]
+    out += [Area(kind="box", id=b["id"], label=f"{b['station']} station zone", bbox=b["bbox"], slug=b.get("slug"))
             for b in raw.get("box", [])]
-    out += [Area(kind="site", id=d["id"], label=d.get("name", d["id"]), chunks=[d["chunk"]] if d.get("chunk") else [])
-            for d in load_sites(config_dir).values()]
-    return raw.get("chunks", []), out
+    out += [Area(kind="site", id=d["id"], label=d.get("name", d["id"])) for d in load_sites(config_dir).values()]
+    return out

@@ -47,7 +47,7 @@ def test_portfolio_blocked_and_empty_pages():
 def test_portfolio_input_is_every_operator_by_city():
     cfg = {"operators": [{"name": "A", "url": "https://a.example/{slug}-apartments"},
                          {"name": "B", "url": "https://b.example/s/{slug}-ca"}]}
-    inp = portfolio.build_input(cfg, [Area(kind="city", id="Mountain View", label="", chunks=[])])
+    inp = portfolio.build_input(cfg, [Area(kind="city", id="Mountain View", label="")])
     assert [r["url"] for r in inp["startUrls"]] == ["https://a.example/mountain-view-apartments",
                                                      "https://b.example/s/mountain-view-ca"]
     assert inp["startUrls"][0]["userData"] == {"operator": "A", "city": "Mountain View"}

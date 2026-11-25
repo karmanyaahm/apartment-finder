@@ -1,6 +1,6 @@
 """Google Places API (New) Text Search: apartment communities per station box, as buildings (`site_info` rows).
 
-  aptf-intake run google_places --chunk mountain_view [--dry-run]
+  aptf-intake run google_places [--area ID] [--dry-run]
 
 Not a listing site, an official API (AGENTS.md rule 6 allows calling it directly). Each station walk-zone box
 (`[[box]]` in config/areas.toml) is searched with `locationRestriction` = the box, once per query in

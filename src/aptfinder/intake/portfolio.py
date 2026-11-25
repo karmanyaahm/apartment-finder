@@ -1,6 +1,6 @@
 """Operator portfolios: the big landlords' own city pages, listing their communities, as buildings (`site_info`).
 
-  aptf-intake run portfolio --chunk mountain_view [--dry-run]
+  aptf-intake run portfolio [--area ID] [--dry-run]
 
 Each operator in `[portfolio] operators` (config/sources.toml) has a URL template per city (`{slug}` =
 'mountain-view'). Every operator x city page is fetched through Apify's `apify/playwright-scraper` (one run for all

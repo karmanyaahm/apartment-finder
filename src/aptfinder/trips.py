@@ -208,7 +208,7 @@ def main(argv: list[str] | None = None) -> None:
     c.add_argument("--place", action="append", help="place_key (repeatable); default all")
     c.add_argument("--on-demand", action="store_true", help="ignore straight-line prefilters")
     c.add_argument("--candidates", action="store_true",
-                   help="only places in active chunks that can still pass a goal apart from commute rules")
+                   help="only places in a station walk zone that can still pass a goal apart from commute rules")
     c.add_argument("--dry-run", action="store_true",
                    help="count the uncached paid calls this would make, using estimates in a scratch cache copy")
     args = ap.parse_args(argv)
@@ -224,7 +224,7 @@ def main(argv: list[str] | None = None) -> None:
         print(json.dumps(route_anchors(conn, args.db, args.provider, args.max_calls, args.dry_run), indent=1))
         return
     if args.cmd == "compute" and args.candidates:
-        from .areas import chunk_of, is_active
+        from .areas import in_walk_zone
         from .filter import routing_candidates
 
         cands = routing_candidates(conn)
@@ -235,8 +235,8 @@ def main(argv: list[str] | None = None) -> None:
         for pk, goals in cands.items():
             base = pk.split("~", 1)[0]
             merged.setdefault(base if base in located else pk, set()).update(goals)
-        args.place = sorted(pk for pk in merged if pk in located and is_active(chunk_of(*located[pk])))
-        print(f"{len(args.place)} candidate places in active chunks; routing the `auto` modes in point_sets.toml")
+        args.place = sorted(pk for pk in merged if pk in located and in_walk_zone(*located[pk]))
+        print(f"{len(args.place)} candidate places in station walk zones; routing the `auto` modes in point_sets.toml")
     if args.cmd == "compute" and args.dry_run:
         import shutil
         import tempfile

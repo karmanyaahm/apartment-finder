@@ -274,7 +274,7 @@ def coverage(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
     state: complete | empty | partial (cap hit or actor failed). Areas never reached are absent (TODO)."""
     from .. import intake
 
-    _, areas = load_areas()
+    areas = load_areas()
     out: dict[tuple[str, str], dict[str, Any]] = {}
     legacy_box = load_sources().get("airbnb", {}).get("box")
     for r in conn.execute("SELECT id, source, started_at, params, counts FROM runs WHERE component = 'intake' "
@@ -326,7 +326,7 @@ def reparse(conn: sqlite3.Connection, adapter: Adapter, raw_file: str, covers: s
                               "cities": [blob.get("city")]}
     area_ids: list[str] = []
     if covers:
-        _, areas = load_areas()
+        areas = load_areas()
         named = set(blob.get("areas") or [blob.get("city")])
         area_ids = [a.id for a in areas if a.kind == adapter.area_kind and (a.id in named or a.city in named)]
         if not area_ids:

@@ -28,14 +28,17 @@ def test_api_pipeline_shape(db):
     for s in d["stages"]:
         assert s["state"] in ("done", "partial", "todo", "stale", "blocked")
         assert isinstance(s["commands"], list) and s["summary"]
-    assert d["active"] == ["mountain_view"] and d["stale_days"] == 7
-    # the seed's intake runs predate areas: every active area-source pair is still to do, with its command
+    assert d["stale_days"] == 7 and "active" not in d and "chunks" not in d
+    # the seed's intake runs predate areas: every area-source pair is still to do, one command per source
     intake = next(s for s in d["stages"] if s["id"] == "intake")
     assert intake["state"] == "todo"
-    assert "nix run .#intake -- run zillow --chunk mountain_view" in intake["commands"]
+    assert "nix run .#intake -- run zillow" in intake["commands"]
+    assert not any("--chunk" in c for s in d["stages"] for c in s["commands"])
     row = next(r for r in d["intake"]["rows"] if r["area_id"] == "94043")
-    assert row["active"] and set(row["cells"]) == set(d["intake"]["sources"]["zip"])
-    assert any(not r["active"] for r in d["intake"]["rows"])  # other chunks are listed, dimmed
+    assert set(row["cells"]) == set(d["intake"]["sources"]["zip"]) and "chunk" not in row
+    # every area of each kind is a row (the example has 22 ZIPs, 9 cities, 8 boxes)
+    assert {k: sum(r["kind"] == k for r in d["intake"]["rows"]) for k in ("zip", "city", "box")} == \
+        {"zip": 22, "city": 9, "box": 8}
     est = next(s for s in d["stages"] if s["id"] == "estimates")
     assert est["state"] == "done"  # the seed computes estimates for every place
     assert next(s for s in d["stages"] if s["id"] == "verify")["counts"]["conflicts"] >= 1
@@ -94,5 +97,5 @@ def test_sites_show_the_last_render_outcome_failure_or_not(db):
     assert rows["sevens"]["render"]["retry"] and not rows["the-dean"]["render"]["retry"]
     assert rows["avalon-mountain-view"]["render"]["outcome"] == "skipped" and rows["landsby"]["render"] is None
     sites = next(s for s in d["stages"] if s["id"] == "sites")
-    assert "nix run .#intake -- render --chunk mountain_view --retry-failed" in sites["commands"]
+    assert "nix run .#intake -- render --retry-failed" in sites["commands"]
     assert sites["render_counts"]["blocked"] == 1

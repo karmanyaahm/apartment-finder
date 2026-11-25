@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .. import pipeline, settings, verify
-from ..areas import chunk_of, is_active
+from ..areas import in_walk_zone
 from ..areas import zones as area_zones
 from ..config import load_goals, load_point_sets, load_points
 from ..filter import best_trips, evaluate_all, nearest_by_set
@@ -317,10 +317,9 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             title = next((x["title"] for x in rows if x.get("title")), None)
             cover = gather_photos([{**x, "data": json.loads(x["data"])} for x in rows], limit=1)
             a = anns.get(pk, {})
-            chunk = chunk_of(p["lat"], p["lon"])
             out.append({
                 **p,
-                "chunk": chunk, "todo": not is_active(chunk),
+                "in_zone": in_walk_zone(p["lat"], p["lon"]),
                 "label": place_label(p) or title or pk,
                 "title": title,
                 "photo": cover[0]["url"] if cover else None,  # map hover

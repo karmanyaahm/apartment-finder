@@ -326,11 +326,11 @@ def own_site_urls(conn: sqlite3.Connection, place_key: str, *, sites: dict | Non
 
 
 def own_site_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    """Named buildings in active chunks whose own site gives no usable offer (no active priced `direct` row), each
+    """Named buildings in a station walk zone whose own site gives no usable offer (no active priced `direct` row), each
     with one reason (OWN_SITE_REASONS) and every URL tried with its last outcome. An item leaves the list by itself
     once a site yields priced offers, or when you dismiss it (annotation `own_site`, newer than any URL you added)
     or say it has no website (annotation `website` = none)."""
-    from ..areas import chunk_of, is_active
+    from ..areas import in_walk_zone
     from ..config import load_sites
     from ..intake.discover import _records
     from ..intake.render import last_outcomes
@@ -347,7 +347,7 @@ def own_site_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     for r in conn.execute("SELECT place_key, property_name, address, lat, lon, n_listings FROM places "
                           "WHERE property_name IS NOT NULL AND address IS NOT NULL ORDER BY n_listings DESC"):
         pk, name = r["place_key"], r["property_name"].strip()
-        if pk in priced or not is_named_building(name, r["address"]) or not is_active(chunk_of(r["lat"], r["lon"])):
+        if pk in priced or not is_named_building(name, r["address"]) or not in_walk_zone(r["lat"], r["lon"]):
             continue
         web, dis = last_ann.get((pk, "website")), last_ann.get((pk, "own_site"))
         if dis and (not web or dis["id"] > web["id"]):

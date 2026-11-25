@@ -121,7 +121,6 @@ svg.chart text { fill: var(--muted); font-size: 10px; }
 tr.inactive td { opacity: .5; }
 details > summary { cursor: pointer; margin: 14px 0 6px; font-size: 14px; text-transform: uppercase; letter-spacing: .04em;
   color: var(--muted); }
-.chip.todo { background: transparent; border: 1px dashed var(--muted); color: var(--muted); }
 
 .raw-row.hidden { display: none; }
 .raw-row pre.raw { max-height: 320px; overflow: auto; margin: 4px 0; }
@@ -137,6 +136,5 @@ td.nowrap { white-space: nowrap; }
 .stages td.cmd code { display: block; font-size: 11px; white-space: nowrap; }
 .stages td { min-width: 6em; }
 .pipe h3 { margin: 18px 0 6px; font-size: 14px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
-.pipe tr.off td { opacity: .5; }
 .pipe td.cell { white-space: nowrap; }
 .pipe-place td { white-space: nowrap; }
