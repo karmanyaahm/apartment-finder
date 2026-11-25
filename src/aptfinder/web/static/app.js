@@ -169,7 +169,9 @@ function applyFilters(f) {
   if (f.inactive != null) $("#inactive").checked = !!f.inactive;
   if (f.outzone != null) $("#outzone").checked = !!f.outzone;
   if (f.keepUnknown != null) $("#limit-keep-unknown").checked = !!f.keepUnknown;
-  S.limits = (f.limits || []).filter((l) => l && l.target && l.mode).map((l) => ({ ...l }));
+  // old rows carried `target`; they become `point`
+  S.limits = (f.limits || []).filter((l) => l && limitPoint(l) && l.mode)
+    .map(({ target, ...l }) => ({ ...l, point: l.point || target }));
   renderLimits();
 }
 // the working copy if this browser has unsaved changes, else the saved set, else the page's defaults
@@ -219,14 +221,32 @@ function resetFilters() {
   renderList();
 }
 const saveLimits = filtersChanged;
+// A requirement row: "at most N minutes by <mode> to <point>", where the point is one commute target
+// (`commute_targets:Meta HQ`) or the nearest point of a set (`set:google_bus_stops`). Rows saved before 2026-11-25
+// carried `target` (always a commute target); they read as that point.
+const limitPoint = (l) => l.point || l.target;
+function limitOptions() {
+  return [...S.meta.targets.map((t) => [t, t.split(":")[1]]),
+    ...Object.entries(S.meta.point_sets).filter(([k]) => k !== "commute_targets").map(([k, v]) => [`set:${k}`, `nearest ${v.label}`])];
+}
+function limitName(l) {
+  const pt = limitPoint(l);
+  const where = pt.startsWith("set:") ? `nearest ${S.meta.point_sets[pt.slice(4)]?.label || pt.slice(4)}` : pt.split(":")[1];
+  return `${MODE_LABEL[l.mode] || l.mode} to ${where}`;
+}
+function limitValue(p, l) {
+  const pt = limitPoint(l);
+  return pt.startsWith("set:") ? (p.nearest || {})[`${pt.slice(4)}|${l.mode}`] : p.minutes[`${pt}|${l.mode}`];
+}
 function renderLimits() {
-  const tOpts = (sel) => S.meta.targets.map((t) => `<option value="${esc(t)}"${t === sel ? " selected" : ""}>${esc(t.split(":")[1])}</option>`).join("");
+  const opts = limitOptions();
+  const pOpts = (sel) => opts.map(([v, label]) => `<option value="${esc(v)}"${v === sel ? " selected" : ""}>${esc(label)}</option>`).join("");
   const mOpts = (sel) => S.meta.modes.map((m) => `<option value="${esc(m)}"${m === sel ? " selected" : ""}>${esc(MODE_LABEL[m])}</option>`).join("");
   $("#commute-limits").innerHTML = S.limits.map((l, i) => `<div class="limit" data-i="${i}">
-      <select data-k="target">${tOpts(l.target)}</select>
+      <select data-k="point">${pOpts(limitPoint(l))}</select>
       <select data-k="mode">${mOpts(l.mode)}</select>
       ≤ <input data-k="max" type="number" min="0" step="5" value="${l.max ?? ""}" style="width:4em"> min
-      <button type="button" data-rm="${i}" title="remove this limit">×</button></div>`).join("");
+      <button type="button" data-rm="${i}" title="remove this requirement">×</button></div>`).join("");
   $$("#commute-limits .limit").forEach((row) => {
     const l = S.limits[+row.dataset.i];
     $$("[data-k]", row).forEach((el) => el.addEventListener("input", () => {
@@ -243,17 +263,18 @@ function renderLimits() {
   }));
 }
 function addLimit() {
-  S.limits.push({ target: $("#target").value, mode: $("#mode").value, max: 30 });
+  S.limits.push({ point: $("#target").value, mode: $("#mode").value, max: 30 });
   saveLimits();
   renderLimits();
   renderList();
 }
-// each limit's time on a card, so the filter is visible: "bike+train to Downtown Palo Alto 18 min (est.)"
+// each requirement's time on a card, so the filter is visible: "walk to nearest Google bus 6 min (stop name, est.)"
 function limitFacts(p) {
   return S.limits.filter((l) => l.max > 0).map((l) => {
-    const v = p.minutes[`${l.target}|${l.mode}`];
-    const name = `${MODE_LABEL[l.mode]} to ${l.target.split(":")[1]}`;
-    return v && v.minutes != null ? `<span>${esc(name)} <b>${num(v.minutes)}</b> min${v.provider === "estimate" ? " (est.)" : ""}</span>`
+    const v = limitValue(p, l);
+    const name = limitName(l);
+    const pt = v && v.point ? ` (${v.point})` : "";
+    return v && v.minutes != null ? `<span>${esc(name)} <b>${num(v.minutes)}</b> min${esc(pt)}${v.provider === "estimate" ? " (est.)" : ""}</span>`
       : `<span class="muted">${esc(name)}: no time</span>`;
   }).join("");
 }
@@ -275,7 +296,7 @@ function filtered() {
     if (!isNaN(maxPpb) && p.min_price_per_bed != null && p.min_price_per_bed > maxPpb) return false;
     for (const lim of S.limits) {
       if (!(lim.max > 0)) continue;
-      const v = p.minutes[`${lim.target}|${lim.mode}`];
+      const v = limitValue(p, lim);
       if (v && v.minutes != null ? v.minutes > lim.max : !keepUnknown) return false;
     }
     if (q) {

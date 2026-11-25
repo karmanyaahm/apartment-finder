@@ -305,6 +305,12 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         for row in listings:
             by_place.setdefault(row["place_key"], []).append(row)
         anns = latest_annotations("place")
+        # per place, the fastest trip to any point of each set and mode ("walk to the nearest Google bus stop"),
+        # for the list's requirement rows; commute targets are in `minutes` one by one
+        nearest_all = cached("nearest_sets", lambda: {
+            pk: {f"{s}|{m}": {"minutes": t["minutes"], "provider": t["provider"], "point": t["point_id"].split(":", 1)[1]}
+                 for (s, m), t in nearest_by_set(tr).items() if s != "commute_targets"}
+            for pk, tr in trips.items()})
         out = []
         for p in q("SELECT * FROM places"):
             pk = p["place_key"]
@@ -331,6 +337,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 "goals": goals,
                 "minutes": {f"{pt}|{m}": {"minutes": t["minutes"], "provider": t["provider"]}
                             for (pt, m), t in trips.get(pk, {}).items()},
+                "nearest": nearest_all.get(pk, {}),
                 "rating": (a.get("overall") or {}).get("rating"),
                 "user_status": (a.get("status") or {}).get("comment"),
             })

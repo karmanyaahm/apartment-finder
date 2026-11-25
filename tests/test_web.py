@@ -206,3 +206,13 @@ def test_saving_filters_is_refused_in_the_redacted_view(tmp_path):
     c = TestClient(create_app(db, redact={}))
     assert c.post("/api/view/filters", json={"filters": {"sort": "price"}}).status_code == 403
     assert c.get("/api/view/filters").json()["filters"] is None
+
+
+def test_places_carry_the_nearest_point_of_each_set(client):
+    c, db = client
+    places = c.get("/api/places").json()
+    p = next(p for p in places if "caltrain_stations|walk" in p["nearest"])
+    assert not any(k.startswith("commute_targets|") for k in p["nearest"])  # targets are in `minutes`, one by one
+    n = p["nearest"]["caltrain_stations|walk"]
+    walks = [v["minutes"] for k, v in p["minutes"].items() if k.startswith("caltrain_stations:") and k.endswith("|walk")]
+    assert n["minutes"] == min(m for m in walks if m is not None) and n["point"] and n["provider"]
