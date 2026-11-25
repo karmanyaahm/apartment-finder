@@ -257,7 +257,7 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
           "partial" if (dups or done_ < len(addrs)) else "done",
           f"{done_} of {len(addrs)} address strings geocoded by Google ({precise} placed precisely; the rest keep "
           f"the parser's reading); {len(dups)} suspected duplicate buildings (same number, similar street, "
-          "within 150 m)",
+          "within 150 m); new addresses are geocoded after each intake run (`--no-followup` skips)",
           (["nix run .#identity -- geocode"] if done_ < len(addrs) else [])
           + (["nix run .#identity -- duplicates"] if dups else []),
           duplicates=dups[:20])
@@ -359,7 +359,7 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
     est = sum(1 for pk in routable if "estimate" in provs.get(pk, ()))
     stage("estimates", "Commute estimates (free)",
           "done" if est == len(routable) else "todo" if not est else "partial",
-          f"{est} of {len(routable)} places have straight-line estimates",
+          f"{est} of {len(routable)} places have straight-line estimates (added after each intake run)",
           [] if est == len(routable) else [f"{COMMUTE} compute"], **_run_info(runs, "commute", "estimate"))
 
     pts = load_points()

@@ -9,6 +9,8 @@
   aptf-intake render [--site ID] [--retry-failed] [--dry-run]   # every site in the list by default
   aptf-intake extract <text source>|all [--workers 8] [--dry-run]   # Haiku reads each listing's whole entry
   (`run` of a text source then reads its rows automatically, `--no-extract` skips; `reparse` applies cached readings)
+  (then, after any `run` or `reparse` that wrote rows: geocode new addresses (not on reparse), identity, free commute
+   estimates for places without any; `--no-followup` skips)
 """
 
 from __future__ import annotations
@@ -72,6 +74,8 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--max-usd", type=float)
     r.add_argument("--dry-run", action="store_true", help="show which areas would run, spend nothing")
     r.add_argument("--no-extract", action="store_true", help="do not read the new rows' text with Haiku afterwards")
+    r.add_argument("--no-followup", action="store_true",
+                   help="do not geocode new addresses, rebuild identity or estimate commutes afterwards")
     r.add_argument("--workers", type=int, default=8, help="parallel Claude calls for the text reading")
     r.add_argument("--extract-max-usd", type=float, default=1.0, help="cap on Claude spend for the text reading")
     rp = sub.add_parser("reparse", help="re-ingest a saved raw file with the current parser (no new scrape)")
@@ -79,6 +83,7 @@ def main(argv: list[str] | None = None) -> None:
     rp.add_argument("raw_file")
     rp.add_argument("--covers", choices=["complete", "partial"],
                     help="credit the file's areas in the coverage ledger (a trial scraped on another copy)")
+    rp.add_argument("--no-followup", action="store_true", help="do not rebuild identity or estimate commutes afterwards")
     ds = sub.add_parser("discover-sites", help="find community websites with a local headless Claude (web search "
                                                "only), then fetch and address-check them through Apify")
     ds.add_argument("--limit", type=int, default=10)
@@ -130,7 +135,8 @@ def main(argv: list[str] | None = None) -> None:
         print(json.dumps(res, indent=1))
         from .extract import after_intake  # the new rows hide earlier readings: apply cached ones (free)
 
-        ex = after_intake(conn, args.source, res["observations"], cached_only=True)
+        ex = after_intake(conn, args.source, res["observations"], cached_only=True, followup=not args.no_followup,
+                          geocode=False, db_path=args.db)
         if ex:
             print(json.dumps({"extract (cached)": ex}, indent=1, default=str))
         return
@@ -209,7 +215,8 @@ def main(argv: list[str] | None = None) -> None:
 
     try:
         ex = after_intake(conn, args.source, res.counts.get("observations", 0), skip=args.no_extract,
-                          workers=args.workers, max_usd=args.extract_max_usd)
+                          followup=not args.no_followup, db_path=args.db, workers=args.workers,
+                          max_usd=args.extract_max_usd)
     except Blocker as e:
         raise SystemExit(f"BLOCKED: extract {e} (the intake run above is stored)")
     if ex:

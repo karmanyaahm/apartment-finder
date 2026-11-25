@@ -1,3 +1,5 @@
+import pytest
+
 from aptfinder.intake.extract import check_answer
 
 TEXT = ("Welcome home to Palmetto!\nPalmetto Apartments\n2235 California St\nMountain View, CA 94040\n"
@@ -187,6 +189,7 @@ def test_after_intake_hook_reads_text_sources_only(conn, tmp_path, monkeypatch):
     from aptfinder import settings
     from aptfinder.intake import extract as ex
     monkeypatch.setattr(settings, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(ex, "after_steps", lambda *a, **k: "after intake: stub")
     _listings(conn, "zumper", [("plan:1", {"title": "The Laurel", "amenities": ["Fitness Center"]})])
     stub = lambda b, m, c: ([{"key": x["key"]} for x in b], 0.0)  # noqa: E731
     assert ex.after_intake(conn, "google_places", 5, ask_fn=stub) is None
@@ -199,6 +202,78 @@ def test_after_intake_hook_reads_text_sources_only(conn, tmp_path, monkeypatch):
     def boom(*a):
         raise AssertionError("asked")
     assert ex.after_intake(conn, "zumper", 1, cached_only=True, ask_fn=boom)["observations"] == 1
+
+
+def _stub_steps(monkeypatch, ex):
+    calls = []
+    monkeypatch.setattr(ex, "_geocode_new", lambda conn: calls.append("geocode") or "geocoded 2 (cached 5)")
+    monkeypatch.setattr(ex, "_identity", lambda conn: calls.append("identity") or "identity rebuilt (3 links)")
+    monkeypatch.setattr(ex, "_estimates", lambda conn, db: calls.append("estimates") or "estimates for 1 new places")
+    return calls
+
+
+def test_after_intake_runs_free_steps_in_order(conn, capsys, monkeypatch):
+    from aptfinder.intake import extract as ex
+    calls = _stub_steps(monkeypatch, ex)
+    assert ex.after_intake(conn, "google_places", 5) is None  # not a text source: no reading, the steps still run
+    assert calls == ["geocode", "identity", "estimates"]
+    assert capsys.readouterr().out.strip() == ("after intake: geocoded 2 (cached 5), identity rebuilt (3 links), "
+                                               "estimates for 1 new places")
+    calls.clear()
+    ex.after_intake(conn, "google_places", 5, followup=False)
+    ex.after_intake(conn, "google_places", 0)  # nothing written
+    assert calls == []
+    ex.after_intake(conn, "google_places", 5, geocode=False)  # a reparse: no Google calls
+    assert calls == ["identity", "estimates"]
+
+
+def test_after_intake_steps_run_when_reading_is_blocked(conn, monkeypatch):
+    from aptfinder.intake import extract as ex
+
+    def blocked(*a, **k):
+        raise ex.Blocker("claude: rate limited")
+    calls = _stub_steps(monkeypatch, ex)
+    monkeypatch.setattr(ex, "extract", blocked)
+    with pytest.raises(ex.Blocker):
+        ex.after_intake(conn, "zumper", 1)
+    assert calls == ["geocode", "identity", "estimates"]
+
+
+def test_cli_reparse_never_geocodes(monkeypatch, tmp_path):
+    from aptfinder.intake import cli, extract as ex
+    calls = _stub_steps(monkeypatch, ex)
+    monkeypatch.setattr(cli, "reparse", lambda *a: {"observations": 4})
+    cli.main(["--db", str(tmp_path / "x.db"), "reparse", "google_places", "raw.json"])
+    assert calls == ["identity", "estimates"]
+    calls.clear()
+    cli.main(["--db", str(tmp_path / "x.db"), "reparse", "google_places", "raw.json", "--no-followup"])
+    assert calls == []
+
+
+def test_geocode_step_skips_quietly_without_key(conn, monkeypatch):
+    from aptfinder import settings
+    from aptfinder.identity import addresses
+    from aptfinder.intake import extract as ex
+    monkeypatch.setattr(addresses, "geocode", lambda conn, dry_run=False: {"to_geocode": 3, "cached": 7})
+    monkeypatch.setattr(settings, "secret", lambda name: None)
+    assert ex._geocode_new(conn) == "geocoding skipped, no GOOGLE_MAPS_API_KEY (3 new addresses)"
+
+
+def test_estimates_only_for_places_without_any(conn, tmp_path, monkeypatch):
+    from aptfinder import trips
+    seen = []
+    monkeypatch.setattr(trips, "compute_all", lambda conn, commute, keys: seen.append(keys) or
+                        {"places": len(keys), "places_done": len(keys), "new_trips": 0, "error": None})
+    monkeypatch.setattr(trips, "build_commute", lambda db, src: None)
+    conn.execute("DROP VIEW places")
+    conn.execute("CREATE TEMP TABLE places (place_key TEXT, lat REAL, lon REAL)")
+    conn.executemany("INSERT INTO places VALUES (?, ?, ?)",
+                     [("p_a", 37.4, -122.1), ("p_b", 37.5, -122.2), ("p_b~blueground", 37.5, -122.2),
+                      ("p_c", None, None)])
+    point = next(p.id for pts in trips.load_points().values() for p in pts)
+    trips.append_trip(conn, "p_a", point, "bike", 10.0, 3000, [], "08:30", "estimate")
+    assert trips.estimate_missing(conn, str(tmp_path / "x.db"))["places_done"] == 1
+    assert seen == [["p_b"]]
 
 
 def test_cli_run_calls_the_hook(monkeypatch):

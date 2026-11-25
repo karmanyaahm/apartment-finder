@@ -486,10 +486,58 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
     return {"run_id": run, "claude_usd": round(res["spent"], 4), **counts}
 
 
-def after_intake(conn, source: str, observations: int, *, skip: bool = False, **kw) -> dict[str, Any] | None:
-    """The core-pipeline hook: after an intake run (or a reparse, `cached_only`) of a text source wrote rows, read
-    them. Every new scraped row supersedes the listing's reading, so this runs whenever rows were written;
-    unchanged text comes from the cache for free."""
-    if skip or source not in TEXT_SOURCES or not observations:
+def after_intake(conn, source: str, observations: int, *, skip: bool = False, followup: bool = True,
+                 geocode: bool = True, db_path: str | None = None, **kw) -> dict[str, Any] | None:
+    """The core-pipeline hook: after an intake run (or a reparse, `cached_only`) wrote rows, read a text source's
+    rows (every new scraped row supersedes the listing's reading; unchanged text comes from the cache for free),
+    then the free follow-up steps (`after_steps`) for any source, even when the reading is blocked."""
+    if not observations:
         return None
-    return extract(conn, source, **kw)
+    try:
+        return None if skip or source not in TEXT_SOURCES else extract(conn, source, **kw)
+    finally:
+        if followup:
+            print(after_steps(conn, db_path or str(settings.DB_PATH), geocode=geocode), flush=True)
+
+
+def _geocode_new(conn) -> str:
+    """Google geocoding of address strings not in the cache (capped by `geocode`; within the free tier)."""
+    from ..identity.addresses import geocode
+
+    plan = geocode(conn, dry_run=True)
+    if not plan["to_geocode"]:
+        return f"geocoded 0 (cached {plan['cached']})"
+    if not settings.secret("GOOGLE_MAPS_API_KEY"):
+        return f"geocoding skipped, no GOOGLE_MAPS_API_KEY ({plan['to_geocode']} new addresses)"
+    try:
+        res = geocode(conn)
+    except SystemExit as e:  # the API refused: say so, the free steps still run
+        return f"geocoding BLOCKED: {e}"
+    left = plan["to_geocode"] - res["calls"]
+    return (f"geocoded {res['calls']} (cached {plan['cached']}"
+            + (f"; {left} left at the cap, {res['used_this_month']}/{res['monthly_cap']} this month" if left else "")
+            + ")")
+
+
+def _identity(conn) -> str:
+    rid = start_run(conn, "identity")
+    counts = identity.run(conn)
+    finish_run(conn, rid, "ok", counts)
+    return f"identity rebuilt ({counts.get('linked', 0)} links)"
+
+
+def _estimates(conn, db_path: str) -> str:
+    from ..trips import estimate_missing
+
+    res = estimate_missing(conn, db_path)
+    return f"estimates for {res['places_done']} new places ({res['new_trips']} trips)" + (
+        f", stopped: {res['error']}" if res["error"] else "")
+
+
+def after_steps(conn, db_path: str, *, geocode: bool = True) -> str:
+    """Free steps after every intake run that wrote rows: geocode new address strings (not on a reparse), rebuild
+    identity, straight-line commute estimates for places without any. One summary line."""
+    parts = [_geocode_new(conn)] if geocode else []
+    parts.append(_identity(conn))
+    parts.append(_estimates(conn, db_path))
+    return "after intake: " + ", ".join(parts)

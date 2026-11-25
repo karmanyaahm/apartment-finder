@@ -201,6 +201,26 @@ def compute_all(conn: sqlite3.Connection, commute: Commute, place_keys: list[str
     return {"places": len(places), "places_done": done, "new_trips": total, "error": error}
 
 
+def estimate_missing(conn: sqlite3.Connection, db_path: str) -> dict[str, Any]:
+    """Free straight-line trips for the places that have none yet under the current point ids (the Pipeline
+    panel's rule, stay places routed as their building), logged as a `commute`/`estimate` run. Places that
+    already have estimates are not routed again (`compute_all` would walk every place)."""
+    from .store import finish_run, start_run
+
+    located = {r[0] for r in conn.execute("SELECT place_key FROM places WHERE lat IS NOT NULL")}
+    routable = {pk for pk in located if pk.split("~", 1)[0] == pk or pk.split("~", 1)[0] not in located}
+    current = {p.id for pts in load_points().values() for p in pts}
+    have = {pk for pk, pt in conn.execute("SELECT DISTINCT place_key, point_id FROM trips WHERE provider = 'estimate'")
+            if pt in current}
+    todo = sorted(routable - have)
+    if not todo:
+        return {"places": 0, "places_done": 0, "new_trips": 0, "error": None}
+    run = start_run(conn, "commute", "estimate", {"places": len(todo), "after": "intake"})
+    res = compute_all(conn, build_commute(db_path, make_source("estimate")), todo)
+    finish_run(conn, run, "error" if res["error"] else "ok", {**res, "api_calls": 0}, est_cost=0.0, error=res["error"])
+    return res
+
+
 def dry_run(db_path: str, provider: str, place_keys: list[str] | None = None, on_demand: bool = False,
             only: tuple[str, str] | None = None) -> dict[str, Any]:
     """The uncached calls `provider` would make for these places, counted on a scratch copy of the database
