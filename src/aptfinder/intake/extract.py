@@ -5,7 +5,7 @@ tools), several calls in parallel.
 
 Every source whose rows carry text (`TEXT_SOURCES`). The entry sent is the listing's title, name, description and
 amenity list as stored, plus, for sources that keep more in their raw item than the parser stores (Apartments.com's
-'about' text, fees, utilities and parking; Zumper's full description, pet policy and fees; Zillow's highlights),
+'about' text, fees, utilities and parking; Zumper's full description, pet policy and fees; Zillow's detail page by zpid),
 those raw fields, found by re-parsing the listing's raw file (`raw_path`). Unit-specific values (price, unit) are
 left out, so a building's units send the same text and are read once. Answers are in a fixed JSON schema:
 
@@ -214,6 +214,10 @@ def raw_lines(source: str, item: dict[str, Any]) -> list[str]:
                ("Parking", item.get("detail_entity_data_parking_data")),
                ("Specials", item.get("detail_entity_data_specials")),
                ("Unit features", item.get("amenity_tags")), ("Building features", item.get("building_amenity_tags"))]
+    elif source == "zillow":  # the listing's detail page (intake/zillow_detail.py), never its unit's beds or price
+        from .zillow_detail import detail_lines
+
+        out = detail_lines(item)
     return [f"{k}: {s}" for k, v in out if (s := _flat(v))]
 
 
@@ -361,13 +365,19 @@ def save_cache(new: dict[str, Any]) -> None:
 
 # --- the run ------------------------------------------------------------------------------------------------------
 
-def _pending(conn, source: str, reread: bool = False) -> list[dict[str, Any]]:
+def _pending(conn, source: str, reread: bool = False, pages: set[str] | None = None) -> list[dict[str, Any]]:
     """Active listings with text not read under the current schema; with `reread`, also those already read (their
-    answers come from the cache). A listing already read starts from its scraped observation under the reading."""
+    answers come from the cache). A listing already read starts from its scraped observation under the reading.
+    `pages`: zpids with a Zillow detail page, which is text even when the stored row has none."""
+    has_text = HAS_TEXT_SQL.replace('data', 'lo.data')
+    if pages:
+        has_text = (f"({has_text} OR CAST(json_extract(lo.data, '$.extra.zpid') AS TEXT) IN "
+                    "(SELECT value FROM json_each(?)))")
     rows = conn.execute(
         "SELECT lo.* FROM latest_obs lo JOIN listings l ON l.source = lo.source AND l.source_id = lo.source_id "
         f"WHERE lo.source = ? AND l.active = 1 AND (? OR {UNREAD_SQL.replace('data', 'lo.data')}) "
-        f"AND {HAS_TEXT_SQL.replace('data', 'lo.data')} ORDER BY lo.source_id", (source, reread)).fetchall()
+        f"AND {has_text} ORDER BY lo.source_id",
+        (source, reread, *([json.dumps(sorted(pages))] if pages else []))).fetchall()
     out = []
     for r in rows:
         if (json.loads(r["data"]).get("extra") or {}).get("extracted") is not None:
@@ -386,12 +396,20 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
     nothing (after a reparse). `ask_fn` replaces `ask` (tests). `rebuild_identity=False`: the caller rebuilds it."""
     if source not in TEXT_SOURCES:
         raise SystemExit(f"extract supports {', '.join(TEXT_SOURCES)} or all")
-    todo = _pending(conn, source, reread)[:limit]
+    pages = None
+    if source == "zillow":  # detail pages, by zpid (a building's bedroom rows share one)
+        from .zillow_detail import load_pages
+
+        pages = load_pages()
+    todo = _pending(conn, source, reread, set(pages or ()))[:limit]
     raws = RawIndex(source) if source in RAW_SOURCES else None
     raw_missing = 0
     for t in todo:
         lines = None
-        if raws is not None:
+        if pages is not None:
+            page = pages.get(str((t["data"].get("extra") or {}).get("zpid")))
+            lines = raw_lines(source, page) if page else None
+        elif raws is not None:
             item = raws.item(t["row"]["raw_path"], t["row"]["source_id"])
             raw_missing += item is None
             lines = raw_lines(source, item) if item else None

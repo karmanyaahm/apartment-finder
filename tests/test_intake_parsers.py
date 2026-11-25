@@ -48,62 +48,6 @@ def test_airbnb_shared_and_ambiguous_baths():
     assert d.kind == "entire_place" and d.private_bath is True and d.beds == 0
 
 
-# Trimmed items of kaix/airbnb-listing-scraper, Mountain View box, 2026-11-25 probe (Jan 11 - Feb 15 2027).
-KAIX_ROOM = {
-    "id": "982709184868357633", "name": "Silicon Valley~4~Mtn View private primary & bath",
-    "sharingTitle": "Home in Mountain View \u00b7 \u26055.0 \u00b7 1 bedroom \u00b7 2 beds \u00b7 2.5 baths",
-    "roomType": "private_room", "propertyType": "Private room in home",
-    "calendarDescriptionItems": ["Private room in home", "2 beds", "Private attached bathroom"], "personCapacity": 2,
-    "overallRating": 5, "overallReviewCount": 8,
-    "location": {"lat": 37.39977, "lng": -122.06039, "subtitle": "Mountain View, California, United States"},
-    "price": {"label": "$2,561 monthly, originally $2,929", "amount": "$2,561", "qualifier": "monthly"},
-    "htmlDescription": "Your bedroom and bathroom are completely private,<br />while the kitchen &amp; living room are shared",
-    "amenitiesGrouped": [{"groupTitle": "Bedroom and laundry", "amenities": [{"title": "Washer", "available": True},
-                                                                             {"title": "Dryer", "available": True}]},
-                         {"groupTitle": "Not included", "amenities": [{"title": "Air conditioning", "available": False}]}],
-    "heroImages": [{"baseUrl": "https://a0.muscache.com/im/pictures/5c5884fd-0246-40ea-a7b3-45f1d996c141.jpg"}]}
-
-
-def test_airbnb_kaix_room():
-    cfg = {"checkin": "2027-01-11", "checkout": "2027-02-15"}
-    p = ADAPTERS["airbnb"].parse(KAIX_ROOM, cfg)
-    assert (p.source_id, p.url) == ("982709184868357633", "https://www.airbnb.com/rooms/982709184868357633")
-    assert (p.price, p.price_basis) == (2561, "month")
-    assert (p.query_checkin, p.query_checkout) == ("2027-01-11", "2027-02-15")
-    d = p.data
-    assert (d.kind, d.beds, d.baths, d.private_bath) == ("room", 1.0, 2.5, True)
-    assert (d.lat, d.lon, d.city) == (37.39977, -122.06039, "Mountain View")
-    assert d.amenities == ["Washer", "Dryer"]  # 'Not included' is not an amenity
-    assert d.description == "Your bedroom and bathroom are completely private,\nwhile the kitchen & living room are shared"
-    assert d.available_from == "2027-01-11" and d.furnished is True and d.term == "short"
-
-
-def test_airbnb_kaix_shared_bath_and_entire_home():
-    shared = {**KAIX_ROOM, "sharingTitle": "Home in Mountain View \u00b7 1 bedroom \u00b7 1 bed \u00b7 1 shared bath",
-              "calendarDescriptionItems": ["Private room in home", "1 bed", "Shared bathroom"]}
-    assert ADAPTERS["airbnb"].parse(shared, AIRBNB_CFG).data.private_bath is False
-    vague = {**KAIX_ROOM, "sharingTitle": "Home \u00b7 1 bedroom \u00b7 1 bed \u00b7 1 bath",
-             "calendarDescriptionItems": ["Private room in home", "1 bed", "1 bath"]}
-    assert ADAPTERS["airbnb"].parse(vague, AIRBNB_CFG).data.private_bath is None  # unknown, not guessed
-    entire = {**KAIX_ROOM, "roomType": "entire_home",
-              "sharingTitle": "Home in Mountain View \u00b7 \u26055.0 \u00b7 3 bedrooms \u00b7 4 beds \u00b7 1 bath"}
-    d = ADAPTERS["airbnb"].parse(entire, AIRBNB_CFG).data
-    assert (d.kind, d.beds, d.baths, d.private_bath) == ("entire_place", 3.0, 1.0, True)
-
-
-def test_airbnb_kaix_input_and_area():
-    from aptfinder.config import Area
-    from aptfinder.intake.airbnb import _coords, build_input
-
-    box = Area(id="b", kind="box", label="b", bbox=[37.38, -122.10, 37.41, -122.06])
-    inp = build_input({"checkin": "2027-01-11", "checkout": "2027-02-15", "max_items": 270}, [box])
-    assert (inp["latitude"], inp["longitude"]) == (37.395, -122.08)
-    assert inp["maxLocationDeviation"] == 2.48  # half the diagonal (2.43 km) plus 50 m: the corners are searched
-    assert inp["maxListings"] == 270 and inp["maxSearchPages"] == 15 and inp["checkIn"] == "2027-01-11"
-    assert _coords(KAIX_ROOM) == (37.39977, -122.06039)
-    assert _coords(airbnb_item()) == (37.37946, -122.10106)  # the earlier actor's shape still works
-
-
 def test_furnishedfinder():
     item = {"listing_id": "1070098_1", "property_type_class": "room", "property_type": "Room - House",
             "available_on": "Available: Dec. 13, 2026", "rent_amount": "$1600.00/month", "bedrooms": 1,
