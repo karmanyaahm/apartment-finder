@@ -134,7 +134,7 @@ def check_outcome(c: dict[str, Any]) -> str:
     if c.get("ok"):
         return "ok"
     reason = c.get("reason") or ""
-    return ("rejected" if reason.startswith("page does not show") else "empty" if reason == "page has no text"
+    return ("rejected" if reason.startswith(("page does not show", "landed on a contact")) else "empty" if reason == "page has no text"
             else "not_fetched")
 
 
@@ -146,8 +146,11 @@ def last_checks(raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
 def load_sites(config_dir: Path | None = None) -> dict[str, dict[str, Any]]:
     """Community websites: hand-listed ones (config/direct_sites.toml) plus ones found by `aptf-intake
     discover-sites` (config/discovered_sites.toml, machine-appended). A discovered site is left out once a
-    `[[check]]` rejected it (its latest check: the page was fetched and lacks the address; a page not fetched is
-    retried), or when a hand entry has the same id, URL or place; it carries `verify_address`."""
+    `[[check]]` rejected it (its latest check: the page was fetched and lacks the address, or is a contact/tour
+    form; a page not fetched is retried), when it is or landed on a contact/tour form, or when a hand entry has
+    the same id, URL or place; it carries `verify_address`."""
+    from .intake.discover import is_form
+
     d = config_dir or settings.CONFIG_DIR
     out: dict[str, dict[str, Any]] = {}
     if (d / "direct_sites.toml").exists():
@@ -164,6 +167,8 @@ def load_sites(config_dir: Path | None = None) -> dict[str, dict[str, Any]]:
             if s["id"] in failed or s["id"] in out or s["url"].rstrip("/") in urls or s.get("place_key") in places:
                 continue
             m = moved.get(s["id"])  # a redirect link that landed on the building's page: use where it landed
+            if is_form(m["final_url"] if m else s["url"]):
+                continue
             s = {**s, "url": m["final_url"], "platform": m.get("platform") or s.get("platform"),
                  "link": s["url"]} if m else s
             out[s["id"]] = {**s, "verify_address": True}

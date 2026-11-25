@@ -90,3 +90,44 @@ def test_named_building_without_website_is_queued_and_your_url_is_promoted(conn,
     assert verify.no_website_queue(conn) == []
     (site,) = promote(conn, ["mountain_view"], limit=10, dry_run=True)["sites"]
     assert site == ("Harken", "https://harken.example/?utm=x")
+
+
+FORMS = ('[[found]]\nid = "station-245"\nplace_key = "p_s"\nurl = "http://station245.prospectportal.com/su/6ks5m6"\n'
+         'platform = "photos"\naddress = "245 Bush St, Mountain View, CA 94041"\n'
+         '[[found]]\nid = "woodside-place"\nplace_key = "p_w"\nurl = "https://amc.touraptnow.com/rip8j3"\n'
+         'platform = "photos"\naddress = "881 Woodside Pl, Mountain View, CA 94040"\n')
+
+
+def test_a_listing_link_that_lands_on_a_lead_form_is_not_a_site(tmp_path, monkeypatch):
+    """Station 245's and Woodside Place's Craigslist short links redirect to a guest card and an email-us form,
+    which show the address: the address check passed, and the form was scraped as the building's site."""
+    import json
+    import shutil
+    from types import SimpleNamespace
+
+    from aptfinder import settings
+    from aptfinder.config import load_sites
+    from aptfinder.intake import base
+    from aptfinder.intake.discover import fetch_and_check, is_form
+
+    landed = {"station-245": "https://station245.prospectportal.com/mountain-view/station-245/guest-card/",
+              "woodside-place": "https://amc.touraptnow.com/emailus.cfm?pid=1234"}
+    assert all(is_form(u) for u in landed.values()) and not is_form("https://sevensmv.com/")
+    # ok checks stored before this rule are read as rejected
+    (tmp_path / "discovered_sites.toml").write_text(FORMS + "".join(
+        f'[[check]]\nid = "{i}"\nok = true\nfinal_url = "{u.split("?")[0]}"\n' for i, u in landed.items()))
+    assert load_sites(tmp_path) == {}
+    # a new check records the rejection
+    shutil.copytree(settings.ROOT / "config.example", tmp_path / "cfg")
+    (tmp_path / "cfg" / "discovered_sites.toml").write_text(FORMS)
+    (tmp_path / "raw" / "direct").mkdir(parents=True)
+    (tmp_path / "raw" / "direct" / "run7_x.json").write_text(json.dumps({"items": [
+        {"site": "station-245", "url": landed["station-245"], "text": "Station 245, 245 Bush Street", "scripts": []},
+        {"site": "woodside-place", "url": landed["woodside-place"], "text": "881 Woodside Place", "scripts": []}]}))
+    monkeypatch.setattr(settings, "CONFIG_DIR", tmp_path / "cfg")
+    monkeypatch.setattr(settings, "RAW_DIR", tmp_path / "raw")
+    monkeypatch.setattr(base, "run_source", lambda conn, adapter, areas: SimpleNamespace(run_id=7, cost_usd=0.0))
+    res = fetch_and_check(None, ["station-245", "woodside-place"])
+    assert res["ok"] == [] and all(r.startswith("landed on a contact or tour form") for r in res["rejected"].values())
+    assert set(res["rejected"]) == {"station-245", "woodside-place"}
+    assert "station-245" not in load_sites() and "woodside-place" not in load_sites()

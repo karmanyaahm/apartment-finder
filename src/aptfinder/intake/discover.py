@@ -37,8 +37,8 @@ AGGREGATORS = re.compile(
     r"craigslist|realtor|redfin|forrent|apartmentfinder|apartmenthomeliving|yelp|facebook|instagram|google|"
     r"linkedin|twitter|x|youtube|tiktok|nextdoor|bbb|mapquest|yahoo|bing|airbnb|furnishedfinder|blueground|"
     r"rentable|rentals|homes|move|liveapartments|apartmentratings|niche|wikipedia)\.(com|org|net)$", re.I)
-ACTION_PATH = re.compile(r"/(book|schedule|tour|apply|application|contact|lease-now|virtual-tour|self-guided)",
-                         re.I)
+ACTION_PATH = re.compile(r"/(book|schedule|tour|apply|application|contact|lease-now|virtual-tour|self-guided|"
+                         r"guest-card|email)", re.I)
 PLATFORMS = {"avaloncommunities.com": "avalon", "prometheusapartments.com": "prometheus"}
 
 SYSTEM = ("You find the official website of apartment communities with web search. The official website is the "
@@ -97,6 +97,12 @@ def clean_url(url: str | None, keep_query: bool = False) -> tuple[str | None, st
     path = ACTION_PATH.split(p.path)[0] if ACTION_PATH.search(p.path) else p.path
     path = path if path.endswith("/") or "." in path.rsplit("/", 1)[-1] else path + "/"
     return urlunsplit((p.scheme, p.netloc, path, "", "")), ""
+
+
+def is_form(url: str | None) -> bool:
+    """A tour, apply, contact or lead form (`/guest-card/`, `/emailus.cfm`): never a building's site, even when it
+    shows the building's address. A listing's short link often lands on one."""
+    return bool(url and ACTION_PATH.search(urlsplit(url).path))
 
 
 def platform_of(url: str) -> str:
@@ -320,7 +326,8 @@ def fetch_and_check(conn, ids: list[str]) -> dict[str, Any]:
         if not s or s["id"] not in ids:
             continue
         seen.add(s["id"])
-        ok = direct.address_on_page(it, s.get("address"))
+        form = is_form(it.get("url"))  # the page it landed on, before `clean_url` cuts the form off
+        ok = False if form else direct.address_on_page(it, s.get("address"))
         n = len(direct.PARSERS[s["platform"]](it, s)) if ok else 0
         # where the link landed after redirects; later scrapes go there directly
         final, _ = clean_url(it.get("url"))
@@ -329,6 +336,7 @@ def fetch_and_check(conn, ids: list[str]) -> dict[str, Any]:
                        "outcome": "ok" if ok else "rejected" if ok is False else "empty",
                        "final_url": moved, "platform": platform_of(moved) if moved and ok else None,
                        "reason": ("address shown; rows: %d" % n) if ok else
+                       f"landed on a contact or tour form: {it.get('url')}" if form else
                        ("page does not show the street address" if ok is False else "page has no text")})
     missing = [i for i in ids if i not in seen and i in sites]
     log = ""
