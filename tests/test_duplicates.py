@@ -76,3 +76,33 @@ def test_merge_removes_the_pair_and_status_counts_it(tmp_path):
     assert c.post("/api/annotations", json={"entity_type": "place_pair", "entity_key": n["pair_key"],
                                             "attribute": "same_building", "comment": "no"}).status_code == 200
     assert c.get("/api/status").json()["queues"]["duplicates"] == 1
+
+
+def test_site_list_gives_website_evidence(tmp_path, monkeypatch):
+    """Two places the site list (or a site search) gives the same own website pair up, even when no listing names
+    it; a found site whose address check failed does not count."""
+    from aptfinder import config
+    from aptfinder.intake import discover
+
+    conn = connect(tmp_path / "s.db")
+    init_db(conn)
+    r = start_run(conn, "intake", "test")
+    append_observation(conn, r, "zillow", "z", {"address": "100 Whisman Station Dr, Mountain View, CA",
+                                                "lat": 37.39, "lon": -122.06}, price=3000)
+    append_observation(conn, r, "zumper", "u", {"address": "300 Hope St, Mountain View, CA",
+                                                "lat": 37.393, "lon": -122.06}, price=3000)
+    append_observation(conn, r, "zumper", "v", {"address": "500 Hope St, Mountain View, CA",
+                                                "lat": 37.392, "lon": -122.06}, price=3000)
+    identity.run(conn)
+    pk = {row[0]: row[1] for row in conn.execute("SELECT source_id, place_key FROM listings")}
+    url = "https://www.greystar.com/properties/mountain-view-ca/central-park/"
+    monkeypatch.setattr(config, "load_sites", lambda *a, **k: {"cp": {"url": url, "place_key": pk["z"]}})
+    monkeypatch.setattr(discover, "_records", lambda *a, **k: {
+        "found": [{"id": "f1", "url": url, "place_key": pk["u"]},
+                  {"id": "f2", "url": url.upper(), "place_key": pk["v"]}],
+        "check": [{"id": "f1", "ok": True, "at": "2026-11-24"},
+                  {"id": "f2", "ok": False, "outcome": "rejected", "at": "2026-11-24"}]})
+    q = duplicate_queue(conn)
+    assert len(q) == 1 and q[0]["reasons"][0]["kind"] == "website"
+    assert {q[0]["a"], q[0]["b"]} == {pk["z"], pk["u"]}
+    assert q[0]["reasons"][0]["detail"] == "greystar.com/properties/mountain-view-ca/central-park"

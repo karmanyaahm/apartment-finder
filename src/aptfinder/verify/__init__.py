@@ -401,13 +401,15 @@ def _name_key(name: str | None) -> str | None:
 def duplicate_queue(conn: sqlite3.Connection, places: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """Pairs of places that are probably one building, each with its reasons, strongest evidence first:
     `address` (identity.addresses.suspected_duplicates: same number, street 85%+ alike, within 150 m), `website`
-    (the same own website, host and path, within DUP_SITE_MAX_M: a `direct` site scraped at both, or the website
-    a listing names) and `name` (the same property name within DUP_NAME_MAX_M). Third-party stay places (`~`) and
+    (the same own website, host and path, within DUP_SITE_MAX_M: the site list or a site search found for the
+    place, a `direct` site scraped at both, or the website a listing names) and `name` (the same property name within DUP_NAME_MAX_M). Third-party stay places (`~`) and
     places you split off (`u_`) are left out. Bucketed by number, URL and name, never all pairs. A pair leaves once
     you merge it (one place is gone) or answer 'not the same building' (annotation place_pair / 'a|b' /
     same_building = no). `places`: rows of the places view already read."""
     from ..commute.geo import haversine_m
+    from ..config import check_outcome, last_checks, load_sites
     from ..identity.addresses import suspected_duplicates
+    from ..intake.discover import _records
 
     if places is None:
         places = [dict(r) for r in conn.execute("SELECT * FROM places")]
@@ -436,6 +438,12 @@ def duplicate_queue(conn: sqlite3.Connection, places: list[dict[str, Any]] | Non
     for d in suspected_duplicates(conn, places=list(by_key.values())):
         add(d["a_key"], d["b_key"], "address", f"{d['a']} / {d['b']} ({round(d['similarity'] * 100)}% alike)")
     sites: dict[str, set[str]] = defaultdict(set)
+    # the site list and the sites search found for a place (an address check that failed rules one out)
+    rec = _records()
+    rejected = {i for i, c in last_checks(rec).items() if check_outcome(c) == "rejected"}
+    for s in [*load_sites().values(), *(f for f in rec.get("found", []) if f.get("id") not in rejected)]:
+        if s.get("place_key") and (k := _site_key(s.get("url"))):
+            sites[k].add(s["place_key"])
     inputs = own_site_inputs(conn)
     for pk, rows in inputs["scraped"].items():
         for r in rows:
