@@ -129,6 +129,8 @@ def _label(rule: dict[str, Any]) -> str:
         return f"net commute ({rule['agg']}) <= {rule['max']}"
     if t == "not_operator":
         return f"not {rule['name']}"
+    if t == "parking_cost":
+        return f"parking for {rule['spots']:g} spot{'s' if rule['spots'] != 1 else ''}"
     return t
 
 
@@ -168,6 +170,43 @@ def _minutes_status(trip: dict[str, Any] | None, limit: float) -> tuple[str, str
 NO_PEOPLE = "goal has no 'people'"
 
 
+def parking_cost(readings: list[dict[str, Any]], spots: int) -> dict[str, Any]:
+    """What `spots` parking spaces add to the rent a month, from ONE reading (never fields mixed from two): the
+    first of a row's ordered parking readings (filter.parking_fields' order: the row's own, then its place's building
+    statements) that says no parking, included or paid. Included and stating at least `spots` spaces -> 0; paid with
+    a monthly price -> spots x that price (each space at the stated price); no parking -> `none`; anything else
+    (included with fewer or no stated spaces, paid without a price, cost never stated) -> usd None, `why` says what
+    is missing. {usd, spots, why, ev (the quote and its source)}."""
+    out: dict[str, Any] = {"spots": spots, "usd": None}
+    for p in readings:
+        ev = f'"{" | ".join(p.get("evidence") or [])}" ({p.get("source")})'
+        if p.get("offered") == "no":
+            return {**out, "none": True, "why": "no parking offered", "ev": ev}
+        if p.get("offered") != "yes" or p.get("cost") not in ("included", "paid"):
+            continue
+        k, usd = p.get("spots"), p.get("usd_month")
+        if p["cost"] == "included":
+            if k is not None and k >= spots:
+                return {**out, "usd": 0.0, "why": f"{k:g} included", "ev": ev}
+            more = f"{k:g} included, {spots - k:g} more at a price not stated" if k is not None else \
+                "included, number of spaces not stated"
+            return {**out, "why": more, "ev": ev}
+        if usd is None:
+            return {**out, "why": "paid, price not stated", "ev": ev}
+        return {**out, "usd": float(usd) * spots, "why": f"${usd:,.0f}/spot", "ev": ev}
+    return {**out, "why": "parking cost not stated", "ev": None}
+
+
+def parking_cost_text(c: dict[str, Any]) -> str:
+    """'+$150/mo for 2 spots', '$0 for 2 spots', 'no parking', '? for 2 spots': the card's and the reason's words."""
+    n = f"{c['spots']:g} spot{'s' if c['spots'] != 1 else ''}"
+    if c.get("none"):
+        return "no parking"
+    if c["usd"] is None:
+        return f"? for {n}"
+    return f"+${c['usd']:,.0f}/mo for {n}" if c["usd"] else f"$0 for {n}"
+
+
 def field_value(f: str, row: dict[str, Any], people: int | None) -> Any:
     """A listing field as rules read it. price_per_person is derived here, never stored: the monthly price over the
     goal's `people` (None when the price is unknown or the goal sets no people)."""
@@ -200,6 +239,13 @@ def evaluate(rule: dict[str, Any], row: dict[str, Any], ctx: Ctx) -> tuple[str, 
         name = rule["name"].strip().lower()
         how = next((v for k, v in (row.get("operators") or {}).items() if k.lower() == name), None)
         return (FAIL, f"{label}: is {rule['name']}, {how}") if how else (PASS, label)
+
+    if t == "parking_cost":
+        # the added monthly cost of the wanted spaces (lower is better): pass only at $0, a stated cost or no parking
+        # is a fail (a nice-to-have: it only ranks), unknown is needs_check naming what is missing
+        c = parking_cost(row.get("parking_readings") or [], rule["spots"])
+        why = f"{parking_cost_text(c)} ({c['why']}{', ' + c['ev'] if c.get('ev') else ''})"
+        return (CHECK if c["usd"] is None and not c.get("none") else PASS if c["usd"] == 0 else FAIL), f"{label}: {why}"
 
     if t in ("max", "min"):
         f = rule["field"]
@@ -346,6 +392,9 @@ def fact(rule: dict[str, Any], row: dict[str, Any], people: int | None = None) -
         return {"f": "net_commute", "agg": rule["agg"], "lim": rule["max"]}
     if t == "not_operator":
         return {"f": "operator", "v": rule["name"]}
+    if t == "parking_cost":
+        c = parking_cost(row.get("parking_readings") or [], rule["spots"])
+        return {"f": "parking_cost", "v": c["usd"], "spots": rule["spots"]}
     return {"f": t}
 
 
@@ -387,6 +436,8 @@ RULE_TYPES: dict[str, tuple[str, list[str], list[str]]] = {
     "known": ("field known", ["field"], []),
     "net_commute": ("net commute", ["agg", "max"], []),
     "not_operator": ("not rented out by", ["name"], []),  # an operator of config/operators.toml
+    # what N parking spaces add to the rent a month (parking_cost; lower is better, $0 passes): for nice-to-haves
+    "parking_cost": ("parking cost for spots", ["spots"], []),
 }
 
 
@@ -461,6 +512,8 @@ def validate_rule(rule: Any, *, modes: list[str], points: set[str], sets: set[st
             return f"net_commute: agg must be one of {', '.join(AGGS)}"
         if not _num(rule["max"]) or rule["max"] <= 0:
             return "net_commute: max must be minutes > 0"
+    if t == "parking_cost" and not (_num(rule["spots"]) and rule["spots"] >= 1 and rule["spots"] == int(rule["spots"])):
+        return "parking_cost: spots must be a whole number of spaces, 1 or more"
     if t == "not_operator" and not (isinstance(rule["name"], str) and rule["name"].strip()):
         return "not_operator: name must be text"
     if t == "amenity":

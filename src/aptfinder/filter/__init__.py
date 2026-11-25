@@ -12,7 +12,8 @@ from ..config import Goal, GoalsConfig, load_goals, match_operators, operator_re
 from ..plans import inherit_baths, inherit_prices, is_own_priced
 from ..verify import accuracy, low_accuracy
 from .building import building_note, building_units_by_place, place_building_units
-from .rules import CHECK, FAIL, NO_LISTINGS, PASS, RANK, Ctx, combine, commute_trips, evaluate, fact, in_net
+from .rules import (CHECK, FAIL, NO_LISTINGS, PASS, RANK, Ctx, combine, commute_trips, evaluate, fact, in_net,
+                    parking_cost)
 
 PROVIDER_PREF = {"google": 0, "knn": 1, "estimate": 9}
 
@@ -195,8 +196,10 @@ def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None, trips:
         rx = annotated_restriction(anns.get(r["place_key"] or "", {})) or rx
         r["restriction"] = rx.get("value")
         r["restriction_evidence"] = restriction_note(rx)
-        r.update(parking_fields(pk_of.get((r["source"], r["source_id"]), []) +
-                                sorted(pk_place.get(r["place_key"] or "", []), key=lambda x: not x["page"])))
+        # the ordered readings stay on the row: a parking_cost rule reads one reading whole (rules.parking_cost)
+        r["parking_readings"] = (pk_of.get((r["source"], r["source_id"]), []) +
+                                 sorted(pk_place.get(r["place_key"] or "", []), key=lambda x: not x["page"]))
+        r.update(parking_fields(r["parking_readings"]))
     return {"listings": listings, "unpriced": unpriced, "places": places, "trips": trips, "anns": anns, "low": low,
             "own": own}
 
@@ -378,6 +381,8 @@ def evaluate_goal(inp: dict[str, Any], goal: Goal) -> tuple[dict[tuple[str, str]
     is that too, or `no_listings` (place_outcome)."""
     listings, trips, anns, low, own = inp["listings"], inp["trips"], inp["anns"], inp["low"], inp["own"]
     commute = net_rules(goal)[0]  # the terms of a net_commute rule
+    # a parking_cost rule (must or nice): each result carries its cost for the cards and the sort
+    pc = next((r for r in [*goal.rules, *goal.nice] if r["type"] == "parking_cost"), None)
     lres: dict[tuple[str, str], Any] = {}
     by_place: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = defaultdict(list)
     unpriced = inp.get("unpriced") or []
@@ -396,6 +401,7 @@ def evaluate_goal(inp: dict[str, Any], goal: Goal) -> tuple[dict[tuple[str, str]
         # the attribute each non-pass rule judges (rules.fact), in reasons order: cards mark it red or amber
         fails = [{"s": s, **fact(r, row, goal.people)} for r, (s, _, _) in zip(goal.rules, reasons) if s != PASS]
         res = {"status": combine([s for s, _, _ in reasons]), "reasons": reasons, "fails": fails, "nice": nice,
+               **({"parking_cost": parking_cost(row.get("parking_readings") or [], pc["spots"])} if pc else {}),
                "nice_score": sum(s == PASS for s, _, _ in nice), "source": row["source"],
                "source_id": row["source_id"], "unit_key": row["unit_key"], "place_key": pk,
                "decides": decides, "own_site": pk in own, "active": bool(row.get("active"))}

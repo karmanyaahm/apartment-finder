@@ -330,7 +330,10 @@ def goal_view(r: dict[str, Any], commute: list[dict[str, Any]] | None = None) ->
             "unit_key": r["unit_key"], "source": r["source"], "source_id": r["source_id"],
             **({"why": r["why"]} if r.get("why") else {}),  # no_listings: none / no_price / unavailable
             # the card's price for this goal: the cheapest offer of the best status (filter.goal_offer)
-            **({"offer": r["offer"]} if r.get("offer") else {})}
+            **({"offer": r["offer"]} if r.get("offer") else {}),
+            # a goal with a parking_cost rule: what its spaces add a month at the deciding offer (rules.parking_cost)
+            **({"parking_cost": {k: r["parking_cost"].get(k) for k in ("usd", "spots", "none", "why", "ev")}}
+               if r.get("parking_cost") else {})}
 
 
 def _parse_value(v: Any) -> Any:

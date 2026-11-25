@@ -94,3 +94,25 @@ def test_building_statements_pool_a_unit_post_does_not(conn):
     assert own and not pooled
     parsed = [{**dict(r), "data": json.loads(r["data"])} for r in conn.execute("SELECT * FROM listings")]
     assert place_parking(parsed)["page"] is True  # both decided; an own site's page wins the tie
+
+
+def test_parking_cost_reads_one_reading_whole_and_passes_only_at_zero():
+    from aptfinder.filter.rules import FAIL, PASS, CHECK, Ctx, evaluate, parking_cost, parking_cost_text, validate_rule
+
+    def rd(**k):
+        return {"evidence": ["q"], "source": "x", "page": False, **k}
+
+    inc2 = rd(offered="yes", cost="included", spots=2)
+    paid = rd(offered="yes", cost="paid", usd_month=75)
+    assert parking_cost([inc2], 2)["usd"] == 0
+    assert parking_cost([paid], 2)["usd"] == 150 and parking_cost_text(parking_cost([paid], 2)) == "+$150/mo for 2 spots"
+    assert parking_cost([rd(offered="yes", cost="included", spots=1), paid], 2)["usd"] is None  # 1 included: not mixed
+    assert parking_cost([rd(offered="yes", cost=None), paid], 2)["usd"] == 150  # a cost-less reading is skipped
+    assert parking_cost([rd(offered="no", spots=0), paid], 2)["none"]  # street only: not paired with another's $
+    assert parking_cost([rd(offered="yes", cost="paid")], 2)["why"] == "paid, price not stated"
+    rule = {"type": "parking_cost", "spots": 2}
+    assert validate_rule(rule, modes=[], points=set(), sets=set()) is None
+    assert validate_rule({**rule, "spots": 0}, modes=[], points=set(), sets=set())
+    st = lambda rs: evaluate(rule, {"parking_readings": rs}, Ctx())[0]  # noqa: E731
+    assert (st([inc2]), st([paid]), st([]), st([rd(offered="no")])) == (PASS, FAIL, CHECK, FAIL)
+    assert evaluate(rule, {"parking_readings": [paid]}, Ctx())[1].startswith("parking for 2 spots: +$150/mo for 2 spots ($75/spot")

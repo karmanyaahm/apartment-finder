@@ -400,6 +400,8 @@ function ruleTemplates() {
     ["parking included", { type: "equals", field: "parking_included", value: true }],
     ["parking spots at least", { type: "min", field: "parking_spots", value: 1 }],
     ["parking cost at most ($/month)", { type: "max", field: "parking_usd_month", value: 100 }],
+    // what N spaces add to the rent a month (lower is better; $0 passes): a nice-to-have that ranks, and a sort
+    ["parking cost for N spots", { type: "parking_cost", spots: 2 }],
     ["apartment building", { type: "equals", field: "is_apartment_building", value: true }],
     ["units in building at least", { type: "min", field: "building_units", value: 5 }],
     ["available for dates", { type: "dates_cover", start: new Date().toISOString().slice(0, 10), end: new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10) }],
@@ -462,6 +464,9 @@ function ruleInputs(r, part) {
       ${preset ? "" : `<input data-p="name" value="${esc(r.name)}" placeholder="name" style="width:7em">`}
       <input data-words="match" value="${esc((r.match || []).join(", "))}" placeholder="words, comma separated" title="matches when an amenity entry contains any of these words" style="width:11em">
       not <input data-words="exclude" value="${esc((r.exclude || []).join(", "))}" placeholder="except words" title="an entry containing any of these words never matches (e.g. no parking)" style="width:8em">`;
+  }
+  if (r.type === "parking_cost") {
+    return `${numIn("spots", r.spots, "bed", 1)} spots: the added monthly cost (included spaces $0, paid ones at their price; $0 passes)`;
   }
   if (r.type === "not_operator") {
     // operators of config/operators.toml (GET /api/goals `operators`); a name no longer listed stays selectable
@@ -766,6 +771,9 @@ function sorted(list) {
     // complete, then partial (mean / median of the known trips), then a total missing a time, then no time at all
     net: (p) => { const n = netCommute(p); return n && n.v != null ? [n.known < n.n ? 1 : 0, n.v] : [n && n.known ? 2 : 3, 0]; },
     rating: (p) => [-(p.rating || 0)], nice: (p) => [-(Math.max(0, ...Object.values(p.goals).map((g) => g.nice_score || 0)))],
+    // the selected goal's parking_cost (All: the lowest over goals): known costs low to high, then unknown, no parking
+    parking: (p) => { const cs = parkingCosts(p); const k = cs.filter((c) => c.usd != null).map((c) => c.usd);
+      return k.length ? [0, Math.min(...k)] : [cs.some((c) => !c.none) ? 1 : 2, 0]; },
   };
   const f = fns[key];
   return [...list].sort((a, b) => {
@@ -865,6 +873,19 @@ function parkingFact(pk, fails = []) {
   return `<span${mk || ` title="${esc(`"${(pk.evidence || []).join(" | ")}" (${pk.source})`)}"`}>🅿 ${esc(parkingText(pk))}</span>`;
 }
 
+// What the goal's wanted parking spaces add to the rent a month (rules.parking_cost, a goal's parking_cost rule):
+// "🅿 +$150/mo for 2 spots", "🅿 $0 for 2 spots", "🅿 ? for 2 spots"; the reading on hover
+const parkingCosts = (p) => Object.entries(p.goals).filter(([g, r]) => r.parking_cost && (S.goal === "all" || g === S.goal))
+  .map(([, r]) => r.parking_cost);
+function parkingCostText(c) {
+  const n = `${c.spots} spot${c.spots === 1 ? "" : "s"}`;
+  return c.none ? "no parking" : c.usd == null ? `? for ${n}` : c.usd ? `+${money(c.usd)}/mo for ${n}` : `$0 for ${n}`;
+}
+function parkingCostFact(c) {
+  if (!c) return "";
+  return `<span class="${c.usd == null ? "muted" : ""}" title="${esc(`${c.why}${c.ev ? `: ${c.ev}` : ""}`)}">🅿 ${esc(parkingCostText(c))}</span>`;
+}
+
 // How many units the building has (filter.place_building_units): "🏢 167 units", "🏢 ≥ 7 units" (a floor: the units
 // and plans one source lists), "🏠 single-family", "🏢 apartment building, units ?"; evidence and source on hover;
 // red / amber when the selected goal's building_units or is_apartment_building rule fails or needs a check on it
@@ -897,7 +918,7 @@ function renderList() {
       : `<span${bm || am}>beds ?</span>`;
     const facts = `${priceFacts(p, fails)}
         <span>${bb}</span>
-        ${limitFacts(p, fails)}${netFact(p, fails)}${parkingFact(p.parking, fails)}${buildingFact(p.building_units, fails)}`;
+        ${limitFacts(p, fails)}${netFact(p, fails)}${parkingFact(p.parking, fails)}${S.goal !== "all" ? parkingCostFact(p.goals[S.goal]?.parking_cost) : ""}${buildingFact(p.building_units, fails)}`;
     const rxb = restrictionBadge(p.restriction, fails);
     const extra = rxb + fails.filter((x) => !x.used).map(failChip).join("");
     return `<div class="card ${st === "fail" ? "dim" : ""} ${S.selected === p.place_key ? "sel" : ""}" data-pk="${esc(p.place_key)}">
@@ -1047,7 +1068,7 @@ async function openPlace(pk) {
     const nt = nc.length ? netTrips(nc, lp.goals[g].commute_off) : [];
     const ntTip = nt.length ? ` title="${esc(`trips in the net commute:\n${nt.join("\n")}`)}"` : "";
     return `
-    <div><span class="chip ${r.status}">${esc(g)}: ${esc(STATUS_LABEL[r.status])}</span>${r.own_site ? ' <span class="small muted" title="The building\'s own website prices offers here, so only its listings decide the goals; other sources are shown as \'also listed\'.">judged on the own website</span>' : ""}
+    <div><span class="chip ${r.status}">${esc(g)}: ${esc(STATUS_LABEL[r.status])}</span>${r.parking_cost ? ` <span class="small">${parkingCostFact(r.parking_cost)}</span>` : ""}${r.own_site ? ' <span class="small muted" title="The building\'s own website prices offers here, so only its listings decide the goals; other sources are shown as \'also listed\'.">judged on the own website</span>' : ""}
       ${r.reasons.map(([s, t, ty]) => `<div class="reason ${s}"${ty === "net_commute" ? ntTip : ""}>${s === "pass" ? "✓" : s === "fail" ? "✗" : s === "no_listings" ? "–" : "?"} ${esc(t)}</div>`).join("")}
       ${nt.length ? `<details class="net-trips small"><summary>net commute: ${nc.length} trip${nc.length > 1 ? "s" : ""}</summary>${nt.map((x) => `<div>${esc(x)}</div>`).join("")}</details>` : ""}
       ${r.nice.length ? `<div class="small muted">nice to have: ${r.nice.map(([s, t]) => `${s === "pass" ? "✓" : s === "fail" ? "✗" : "?"} ${esc(t)}`).join(" · ")}</div>` : ""}
