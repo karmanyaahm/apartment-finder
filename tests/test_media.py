@@ -184,6 +184,7 @@ def test_residential_hosts_go_through_the_proxy_smaller_variant_first(conn, monk
     monkeypatch.setattr(httpx, "Client", lambda **kw: made.append(kw.get("proxy")) or real(
         transport=httpx.MockTransport(handler), **{k: v for k, v in kw.items() if k != "proxy"}))
     monkeypatch.setattr(media, "residential_proxy", lambda: ("http://user:s3cret@proxy.example:8000", "s3cret"))
+    monkeypatch.setattr("aptfinder.config.load_media", lambda: {"residential_hosts": ["staticproperties.furnishedfinder.com"]})
     monkeypatch.setattr(media, "DELAY_S", 0)
     monkeypatch.setattr(settings, "MEDIA_DIR", tmp_path / "media")
     c = media.fetch(conn, log=lambda m: None)
@@ -213,3 +214,38 @@ def test_a_merge_above_the_threshold_is_dropped_and_fetched_again(place, monkeyp
     assert dup["url"] not in media.url_files(conn) and media.status(conn)["to_fetch"] == 1
     c = media.fetch(conn, log=lambda m: None)
     assert c["written"] == 1 and dup["url"] in media.url_files(conn)
+
+
+SVG = b"""<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+ width="300" height="200"><rect x="10" y="10" width="280" height="180" fill="none" stroke="black" stroke-width="4"/>
+<line x1="120" y1="10" x2="120" y2="190" stroke="black" stroke-width="3"/>
+<image xlink:href="http://example.invalid/tracker.png" width="10" height="10"/></svg>"""
+
+
+def test_svg_drawings_are_rasterised_without_fetching_anything():
+    assert media.is_svg(SVG) and not media.is_svg(picture(1)[:100])
+    r = media.encode(SVG, "plan")
+    im = Image.open(io.BytesIO(r["jpeg"]))
+    assert im.format == "JPEG" and max(im.size) == media.PLAN_PX
+    assert im.getpixel((5, 5)) > (240, 240, 240)  # white background, not black
+
+
+def test_drawings_dedupe_only_on_identical_bytes(tmp_path):
+    a = media.encode(SVG, "plan")
+    other = {"sha256": "0" * 64, "phash": a["phash"]}  # same pHash, different bytes
+    assert media.decide(other, "plan", {a["sha256"]: (a["phash"], "plan")}, tmp_path) == (None, None)
+
+
+def test_curl_hosts_download_through_curl(place, monkeypatch):
+    conn = place
+    calls = []
+
+    def fake_get(self, url, headers=None):
+        calls.append(url)
+        return media.CurlClient.Response(200, picture(7))
+
+    monkeypatch.setattr(media.CurlClient, "get", fake_get)
+    monkeypatch.setattr("aptfinder.config.load_media", lambda: {"curl_hosts": ["cdn2"]})
+    c = media.fetch(conn, log=lambda m: None)
+    assert sorted(calls) == ["https://cdn2/a_small.jpg", "https://cdn2/gone.jpg"]  # only cdn2 went through curl
+    assert not c.get("failed")

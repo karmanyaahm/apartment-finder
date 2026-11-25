@@ -105,12 +105,53 @@ def same_picture(a: str, b: str, kind: str) -> int | None:
     return d if d <= (0 if kind == "plan" else PHOTO_MAX_DISTANCE) else None
 
 
+def is_svg(content: bytes) -> bool:
+    head = content[:2048].lstrip().lower()
+    return head.startswith(b"<svg") or (head.startswith((b"<?xml", b"<!doctype svg", b"<!--")) and b"<svg" in head)
+
+
+def rasterise_svg(content: bytes) -> bytes:
+    """PNG of an SVG at PLAN_PX wide. `unsafe=False`: no XML entities, and external references (images, CSS)
+    are never fetched (cairosvg's safe_fetch allows data: URLs only), so the drawing's own shapes only."""
+    import cairosvg
+
+    return cairosvg.svg2png(bytestring=content, unsafe=False, output_width=PLAN_PX, background_color="white")
+
+
+class CurlClient:
+    """`client.get` through the curl binary, for hosts that refuse Python's HTTP client (config/media.toml
+    `curl_hosts`; Furnished Finder answers 403 to httpx and 200 to curl from the same machine, 2026-11-25)."""
+
+    class Response:
+        def __init__(self, status_code: int, content: bytes):
+            self.status_code, self.content = status_code, content
+
+    def get(self, url: str, headers: dict[str, str] | None = None) -> "CurlClient.Response":
+        import subprocess
+        import tempfile
+
+        with tempfile.NamedTemporaryFile() as f:
+            cmd = ["curl", "-s", "-L", "--fail", "--max-time", "30", "-A", UA, "-o", f.name, "-w", "%{http_code}"]
+            for k, v in (headers or {}).items():
+                cmd += ["-H", f"{k}: {v}"]
+            r = subprocess.run(cmd + ["--", url], capture_output=True, timeout=60)
+            code = int(r.stdout.decode().strip() or 0)
+            if r.returncode not in (0, 22):  # 22: HTTP error (--fail), its status is in `code`
+                raise OSError(f"curl exit {r.returncode}")
+            return CurlClient.Response(code, Path(f.name).read_bytes() if code == 200 else b"")
+
+    def close(self) -> None:
+        pass
+
+
 def encode(content: bytes, kind: str) -> dict[str, Any]:
     """Decode, re-encode to a JPEG at most PHOTO_PX (drawings PLAN_PX) on the long side, never upscaled. Returns
     the JPEG bytes, their sha256, the pHash of the re-encoded image, and the original size. Raises on non-images."""
     import imagehash
     from PIL import Image, ImageOps
 
+    if is_svg(content):  # vector drawings (Prometheus): rasterised, then stored like any other image
+        content = rasterise_svg(content)
     im = Image.open(io.BytesIO(content))
     im.load()
     w, h = im.size
@@ -276,6 +317,8 @@ def decide(res: dict[str, Any], kind: str, stored: dict[str, tuple[str, str]],
     sha = res["sha256"]
     if media_path(sha, root).exists():
         return sha, 0
+    if kind == "plan":  # drawings: exact copies only (two plans of one building can hash close)
+        return None, None
     best: tuple[str | None, int | None] = (None, None)
     for fsha, (fph, fkind) in stored.items():
         d = same_picture(res["phash"], fph, kind) if fkind == kind else None
@@ -335,6 +378,8 @@ def fetch(conn: sqlite3.Connection, *, retry_failed: bool = False, limit: int | 
     hdrs = {"User-Agent": UA, "Accept": "image/*,*/*;q=0.8"}
     client = httpx.Client(headers=hdrs, timeout=30, follow_redirects=True)
     res_hosts = set(load_media().get("residential_hosts", []))
+    curl_hosts = set(load_media().get("curl_hosts", []))
+    curl = CurlClient()
     meter: dict[str, Any] = {"bytes": 0, "cap": float(load_media().get("residential_max_mb", 300)) * 1e6,
                              "lock": threading.Lock()}
     proxied, secret = None, None
@@ -346,7 +391,8 @@ def fetch(conn: sqlite3.Connection, *, retry_failed: bool = False, limit: int | 
     pool = ThreadPoolExecutor(WORKERS)
     try:
         futs = {pool.submit(_download, *((proxied, j, sems, sem_lock, given_up, meter) if host(j["url"]) in res_hosts
-                                         else (client, j, sems, sem_lock, given_up))): j for j in todo}
+                                         else (curl if host(j["url"]) in curl_hosts else client, j, sems, sem_lock,
+                                               given_up))): j for j in todo}
         for fut in as_completed(futs):
             j, res = futs[fut], fut.result()
             h = host(j["url"])

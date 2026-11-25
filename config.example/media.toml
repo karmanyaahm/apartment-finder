@@ -2,7 +2,9 @@
 # content-addressed under data/media/. The run stops before a write would take the store past this size.
 [media]
 max_gb = 5
-# Hosts that refuse direct downloads (HTTP 403) go through Apify's US residential proxy (password read from the
-# Apify API with APIFY_TOKEN). Billed by traffic (about $8 per GB), so a run stops using it after this many MB.
-residential_hosts = ["staticproperties.furnishedfinder.com"]
+# Hosts that answer 403 to Python's HTTP client but serve the curl binary (Furnished Finder, 2026-11-25).
+curl_hosts = ["staticproperties.furnishedfinder.com"]
+# Hosts that refuse this machine's IP go through Apify's US residential proxy (password read from the Apify API
+# with APIFY_TOKEN). Billed by traffic (about $8 per GB), so a run stops using it after this many MB.
+residential_hosts = []
 residential_max_mb = 300

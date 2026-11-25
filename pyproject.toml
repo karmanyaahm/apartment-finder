@@ -13,6 +13,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "pillow>=13.0.0",
     "imagehash>=4.3.2",
+    "cairosvg>=2.9.1",
 ]
 
 [project.optional-dependencies]

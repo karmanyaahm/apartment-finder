@@ -42,10 +42,11 @@
         pyproject = true;
         src = ./.;
         build-system = [ py.hatchling ];
-        dependencies = [ py.pydantic py.httpx py.fastapi py.uvicorn py.python-dotenv py.pillow py.imagehash apify-client ];
+        dependencies = [ py.pydantic py.httpx py.fastapi py.uvicorn py.python-dotenv py.pillow py.imagehash py.cairosvg apify-client ];
         # config/, data/ and .env are read from the directory you run in (override with APTF_ROOT).
         makeWrapperArgs = [ "--run" "export APTF_ROOT=\${APTF_ROOT:-$PWD}"
-                            "--prefix" "PATH" ":" "${pkgs.claude-code}/bin" ];  # claude for extract / discover-sites
+                            "--prefix" "PATH" ":" "${pkgs.claude-code}/bin"
+                            "--prefix" "PATH" ":" "${pkgs.curl}/bin" ];  # curl for media curl_hosts  # claude for extract / discover-sites
         doCheck = false; # tests run with `uv run pytest` in the repo
         meta.license = pkgs.lib.licenses.mit;
       };
