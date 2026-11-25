@@ -27,7 +27,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 from .. import settings
 from ..areas import in_walk_zone
-from ..config import CHECK_LABEL, CHECK_RETRY, check_outcome, last_checks, load_areas, load_sites
+from ..config import (CHECK_LABEL, CHECK_RETRY, PRECHECK_RECHECK_DAYS, PRECHECK_SKIP, check_outcome, last_checks,
+                      load_areas, load_sites)
 from ..store import finish_run, start_run
 
 FILE = "discovered_sites.toml"
@@ -254,13 +255,29 @@ def discover(conn, *, limit: int, batch: int, model: str, max_usd: float,
     return res
 
 
-def retryable() -> list[str]:
+def retryable(recheck: bool = False) -> list[str]:
     """Found sites whose latest check did not fetch the page (blocked, timed out, empty): fetched
-    again by `promote-sites`."""
+    again by `promote-sites`. `recheck`: also those the precheck stopped (dead, challenge) over
+    PRECHECK_RECHECK_DAYS ago (`--retry-failed` never takes them)."""
     rec = _records()
     last = last_checks(rec)
+
+    def due(c: dict[str, Any]) -> bool:
+        oc = check_outcome(c)
+        if oc in PRECHECK_SKIP:
+            return recheck and _age_days(c.get("at")) > PRECHECK_RECHECK_DAYS
+        return oc in CHECK_RETRY
+
     return [f["id"] for f in rec.get("found", []) if not is_aggregator(f["url"])
-            and f["id"] in last and check_outcome(last[f["id"]]) in CHECK_RETRY]
+            and f["id"] in last and due(last[f["id"]])]
+
+
+def _age_days(ts: str | None) -> float:
+    if not ts:
+        return float("inf")
+    t = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    t = t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - t).total_seconds() / 86400
 
 
 def promote(conn, *, limit: int, dry_run: bool = False, fetch: bool = True,
@@ -272,7 +289,7 @@ def promote(conn, *, limit: int, dry_run: bool = False, fetch: bool = True,
     fetched last time (blocked, timed out) are fetched again with them; `retry_failed`: only those."""
     from collections import Counter
 
-    retry = retryable()
+    retry = retryable(recheck=not retry_failed)
     if retry_failed:
         if dry_run or not retry or not fetch:
             return {"retry": retry}
@@ -381,8 +398,20 @@ def fetch_and_check(conn, ids: list[str], *, browser: bool = False, residential:
     the residential proxy; one page per site, for the check only."""
     from . import ADAPTERS, direct
     from .base import run_source
+    from .precheck import precheck_check, precheck_many
 
     direct.sites.cache_clear()
+    # the free precheck first: a dead domain or a Cloudflare challenge gets its check now and no Apify fetch
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    pre = precheck_many({i: direct.sites()[i]["url"] for i in ids if i in direct.sites()})
+    stopped = [precheck_check(i, r, now, None) for i, r in pre.items() if r["outcome"] in PRECHECK_SKIP]
+    if stopped:
+        append("check", stopped)
+    ids = [i for i in ids if i not in {c["id"] for c in stopped}]
+    pre_out = {c["id"]: c["reason"] + f": {c['error']}" for c in stopped}
+    if not ids:
+        direct.sites.cache_clear()
+        return {"run_id": None, "apify_usd": 0.0, "ok": [], "rejected": {}, "retry": {}, "precheck": pre_out}
     items, apify_runs, logs = [], [], []
     if browser or residential:
         run_id, cost, items, logs = _browser_fetch(conn, ids, residential)
@@ -401,7 +430,6 @@ def fetch_and_check(conn, ids: list[str], *, browser: bool = False, residential:
             items += blob.get("items") or []
             apify_runs += [blob["apify_run"]] if blob.get("apify_run") else []
     sites = direct.sites()
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     checks, seen = [], set()
     for it in items:
         s = direct._site_for(it)
@@ -437,7 +465,7 @@ def fetch_and_check(conn, ids: list[str], *, browser: bool = False, residential:
     direct.sites.cache_clear()
     return {"run_id": res.run_id, "apify_usd": res.cost_usd, "ok": [c["id"] for c in checks if c["ok"]],
             "rejected": {c["id"]: c["reason"] for c in checks if c["outcome"] == "rejected"},
-            "retry": {c["id"]: c["reason"] for c in checks if c["outcome"] in CHECK_RETRY}}
+            "retry": {c["id"]: c["reason"] for c in checks if c["outcome"] in CHECK_RETRY}, "precheck": pre_out}
 
 
 def unfetched(url: str, log: str) -> dict[str, Any]:

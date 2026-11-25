@@ -5,8 +5,8 @@
 # What each platform gives from the static page (tested 2026-11-24 on these Mountain View communities):
 #   avalon      : every available unit with price, sqft, plan, available date      -> full data
 #   jd_floorplans: floor plans (beds, baths, sqft); rent and availability load via JS -> plans only (blocker)
-#   prometheus  : plan drawing map, photo gallery; units and prices come from `aptf-intake prometheus` (availability JSON)
-#                 -> photos and drawings from the page; units, prices and dates from the JSON
+#   prometheus  : plan names (sqft/beds/baths from plan drawing names), photo gallery; prices load via JS
+#                 -> plans + photos only (blocker)
 # Of the aggregators only the old epctex Apartments.com actor returned a property-website URL (8 of its 10
 # items); memo23, the one in use, does too (`moreDetails.propertyWebsiteUri`, found 2026-11-24, stored as
 # extra.website). So sites are listed here by hand: the first four from the user's

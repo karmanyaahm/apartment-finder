@@ -279,6 +279,8 @@ OWN_SITE_REASONS = {  # reason -> label, in the order an item takes the first th
     "form": "a site is a contact, tour or lead form",
     "address_failed": "a site's page does not show the building's address",
     "no_plans": "own site read, but no floor plans or prices found",
+    "site_dead": "site dead (DNS)",
+    "challenge": "Cloudflare challenge",
     "all_failed": "every site failed to load (blocked, timed out, empty or not returned)",
     "not_checked": "website known, not checked yet",
 }
@@ -311,7 +313,7 @@ def own_site_urls(conn: sqlite3.Connection, place_key: str, *, sites: dict | Non
     """Every URL tried or known for a building's own site, each with its last outcome: `status` is form, rejected,
     no_plans, priced, failed or pending, `label` says what happened and when. Several URLs per place are normal:
     the hand list, sites found by search or named by listings, and any you added in Verify."""
-    from ..config import CHECK_RETRY, check_outcome, last_checks, load_sites
+    from ..config import CHECK_LABEL, CHECK_RETRY, PRECHECK_SKIP, check_outcome, last_checks, load_sites
     from ..intake.discover import _records, clean_url, is_aggregator, is_form
     from ..intake.render import TRANSIENT, describe, last_outcomes
 
@@ -342,6 +344,12 @@ def own_site_urls(conn: sqlite3.Connection, place_key: str, *, sites: dict | Non
             e.update(status="priced", label="priced offers")
         elif rd and rd["outcome"] in TRANSIENT:
             e.update(status="failed", label=f"render {describe(rd)}")
+        elif rd and rd["outcome"] in PRECHECK_SKIP:  # the precheck (DNS, one plain GET) stopped it before Apify
+            e.update(status=rd["outcome"], label=f"{describe(rd)}: {rd.get('error') or ''}".rstrip(": "))
+        elif not rd and check and check_outcome(check) in PRECHECK_SKIP:
+            e.update(status=check_outcome(check), label=f"{CHECK_LABEL[check_outcome(check)]} on "
+                                                        f"{str(check.get('at'))[5:10]}: {check.get('error') or ''}"
+                                                        .rstrip(": "))
         elif rd or sc:
             e.update(status="no_plans", label=(f"render {describe(rd)}".replace("plans found", "plans found, none priced")
                                                if rd else "")
@@ -419,7 +427,7 @@ def own_site_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             reason = "no_website"
         else:
             reason = next(k for k, s in (("form", "form"), ("address_failed", "rejected"), ("no_plans", "no_plans"),
-                                         ("all_failed", "failed"), ("not_checked", "pending")) if s in st)
+                                         ("site_dead", "dead"), ("challenge", "challenge"), ("all_failed", "failed"), ("not_checked", "pending")) if s in st)
         out.append({"kind": "own_site", "place_key": pk, "name": name, "address": r["address"],
                     "listings": r["n_listings"], "reason": reason, "reason_label": OWN_SITE_REASONS[reason],
                     "urls": urls})

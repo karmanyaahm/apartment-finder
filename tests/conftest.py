@@ -14,6 +14,19 @@ def example_config(monkeypatch):
     monkeypatch.setattr("aptfinder.identity.addresses.load_geocodes", lambda: {})
 
 
+def pytest_configure(config):
+    config.addinivalue_line("markers", "real_precheck: run intake.precheck.precheck itself (stubs passed in)")
+
+
+@pytest.fixture(autouse=True)
+def no_network_precheck(request, monkeypatch):
+    """The own-site precheck (DNS + one GET) never touches the network in tests: every site proceeds, unless a
+    test is marked real_precheck (it then passes its own getaddrinfo and httpx transport)."""
+    if "real_precheck" not in request.keywords:
+        monkeypatch.setattr("aptfinder.intake.precheck.precheck",
+                            lambda url, **kw: {"outcome": "proceed", "http_status": 200, "error": None})
+
+
 @pytest.fixture
 def conn(tmp_path):
     c = connect(tmp_path / "test.db")

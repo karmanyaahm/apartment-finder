@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .areas import in_walk_zone
-from .config import CHECK_LABEL, CHECK_RETRY, check_outcome, load_areas, load_points, load_sites
+from .config import CHECK_LABEL, CHECK_RETRY, PRECHECK_SKIP, check_outcome, load_areas, load_points, load_sites
 from .verify import is_named_building
 
 STALE_DAYS = 7
@@ -128,7 +128,7 @@ def website_status(conn: sqlite3.Connection, place_key: str | None = None) -> di
         if oc == "rejected":
             out[f["place_key"]] = {"state": "rejected", "url": f["url"],
                                    "detail": f"{c.get('reason')} ({f.get('found_by')})"}
-        elif oc in CHECK_RETRY:
+        elif oc in CHECK_RETRY or oc in PRECHECK_SKIP:
             out[f["place_key"]] = {"state": "blocked", "url": f["url"], "outcome": oc,
                                    "detail": f"{check_label(c)} ({f.get('found_by')})"}
     for r in conn.execute(
@@ -344,20 +344,16 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
         cmds.append(f"{INTAKE} run direct")
     if sc["stale"]:
         cmds.append(f"{INTAKE} run direct --reload")
-    # Prometheus sites are read from their availability JSON (`aptf-intake prometheus`), never rendered
-    rend = [r for r in site_rows if r["platform"] != "prometheus"]
-    if any((r["render"] or {}).get("retry") for r in rend):
+    if any((r["render"] or {}).get("retry") for r in site_rows):
         cmds.append(f"{INTAKE} render --retry-failed")
-    if any(not r["render"] or r["render"].get("stale") for r in rend):
+    if any(not r["render"] or r["render"].get("stale") for r in site_rows):
         cmds.append(f"{INTAKE} render")
-    if any(not r["render"] or r["render"].get("retry") or r["render"].get("stale") for r in site_rows
-           if r["platform"] == "prometheus"):
-        cmds.append(f"{INTAKE} prometheus")
     rc = Counter((r["render"] or {"outcome": "never"})["outcome"] for r in site_rows)
     stage("sites", "Own-site scrapes", _roll([r["state"] for r in site_rows]),
           f"{sc['done']} fresh, {sc['stale']} stale, {sc['todo']} never scraped "
           f"of {len(site_rows)} sites; rendered: "
-          + (", ".join(f"{n} {k}" for k, n in rc.most_common()) or "none"), cmds,
+          + (", ".join(f"{n} {k}" for k, n in rc.most_common()) or "none")
+          + f"; precheck stopped: {rc['dead']} site dead (DNS), {rc['challenge']} Cloudflare challenge", cmds,
           counts=dict(sc), render_counts=dict(rc), **_run_info(runs, "intake", "direct"))
 
     # 7-9. commute: trips under the current point ids only (renamed points leave old rows behind)

@@ -126,9 +126,13 @@ class Area(BaseModel):
 
 
 CHECK_RETRY = {"blocked", "timeout", "error", "not_fetched", "empty"}  # a discovered site's page not fetched yet
+# stopped by the free precheck (intake/precheck.py) before any Apify run: never retried by --retry-failed, checked
+# again once older than PRECHECK_RECHECK_DAYS (or with render --site)
+PRECHECK_SKIP = {"dead", "challenge"}
+PRECHECK_RECHECK_DAYS = 7
 CHECK_LABEL = {"ok": "address shown", "rejected": "page does not show the street address",
                "blocked": "blocked", "timeout": "timed out", "error": "fetch failed", "not_fetched": "page not fetched",
-               "empty": "page has no text"}
+               "empty": "page has no text", "dead": "site dead (DNS)", "challenge": "Cloudflare challenge"}
 
 
 def check_outcome(c: dict[str, Any]) -> str:

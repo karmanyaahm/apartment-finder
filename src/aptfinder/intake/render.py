@@ -11,7 +11,8 @@ community's own path. Avalon sites are skipped: their page data already gives ev
 
 Each site's outcome is recorded in the run's counts (`areas['<site>#render']`): `ok`, `no_plans`, or a transient
 failure (`blocked`, `timeout`, `empty`, `not_returned`, `error`, `not_read`) with the HTTP status and the
-scraper's message. A run over every site picks transient failures first, then sites never rendered, then those older than
+scraper's message; `dead` or `challenge` when the free precheck (`precheck.py`: DNS, one plain GET) stopped the site
+before Apify. A run over every site picks transient failures first, then sites never rendered, then those older than
 STALE_DAYS; `ok` and `no_plans` are done until then.
 
 Each site's rendered text goes to headless `claude -p --model haiku` (no tools) with a fixed schema of plans and
@@ -32,7 +33,7 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 from .. import identity, settings
-from ..config import load_sites
+from ..config import PRECHECK_SKIP, load_sites
 from ..store import append_observation, finish_run, start_run
 from ..store.models import ObservationData
 from .apify import browser_proxy, classify_failure, failed_requests, log_errors, run_actor, same_url
@@ -40,10 +41,10 @@ from ..plans import match_drawing
 from .direct import plan_drawings
 from .discover import SECRET_ENV, Blocker
 from .lease import _avail
+from .precheck import precheck_many
 
 ACTOR = "apify/playwright-scraper"
-SKIP_PLATFORMS = {"avalon",  # exact units from the page data already
-                  "prometheus"}  # read from Prometheus's availability JSON instead (intake/prometheus.py)
+SKIP_PLATFORMS = {"avalon"}  # exact units from the page data already
 
 MAX_UNIT_PAGES = 5  # per site: per-plan "view apartments" pages followed (about $0.003 a page)
 PAGES_PER_SITE = 2 + MAX_UNIT_PAGES  # start page, its floor-plans page, the plans' unit pages
@@ -236,7 +237,8 @@ MIN_TEXT = 200  # rendered text shorter than this is `empty`
 PAGE_BUDGET = {"start": 12000, "floorplans": 12000, "units": 6000}  # characters of each page sent to Haiku
 OUTCOME_LABEL = {"ok": "plans found", "no_plans": "rendered, no plans offered", "blocked": "blocked",
                  "timeout": "timed out", "empty": "rendered almost no text", "not_returned": "no page returned",
-                 "error": "failed", "not_read": "not read (Claude budget reached)"}
+                 "error": "failed", "not_read": "not read (Claude budget reached)",
+                 "dead": "site dead (DNS)", "challenge": "Cloudflare challenge"}  # the last two: precheck.py
 
 
 def describe(o: dict[str, Any]) -> str:
@@ -246,7 +248,8 @@ def describe(o: dict[str, Any]) -> str:
         s += f" (HTTP {o['http_status']})"
     if o.get("at"):
         s += f" on {o['at'][5:10]}"
-    return s + (", will retry" if o["outcome"] in TRANSIENT else "")
+    return s + (", will retry" if o["outcome"] in TRANSIENT else
+                ", rechecked after 7 days" if o["outcome"] in PRECHECK_SKIP else "")
 
 
 def last_outcomes(conn) -> dict[str, dict[str, Any]]:
@@ -350,10 +353,22 @@ def render(conn, *, sites: list[str] | None = None, model: str = "haiku",
                 "done": {sid: describe(last[sid]) for sid in cands if sid not in pick and sid in last},
                 "estimated_apify_usd": round(0.003 * PAGES_PER_SITE * len(pick), 2),
                 "estimated_claude_usd": round(0.006 * len(pick), 2)}
+    # the free precheck (DNS, one plain GET): a dead domain or a Cloudflare challenge is recorded, not sent to Apify
+    pre = precheck_many({sid: s["url"] for sid, s in pick.items()})
+    stopped = {sid: r for sid, r in pre.items() if r["outcome"] in PRECHECK_SKIP}
     areas = {f"{sid}#render": sid for sid in pick}
+    per_area = {f"{sid}#render": {"state": "failed", "items": 0, "outcome": r["outcome"],
+                                  "http_status": r.get("http_status"), "error": r["error"], "pages": 0}
+                for sid, r in stopped.items()}
+    report: dict[str, Any] = {sid: describe({**r, "at": None}) + f": {r['error']}" for sid, r in stopped.items()}
+    pick = {sid: s for sid, s in pick.items() if sid not in stopped}
     run = start_run(conn, "intake", "direct", {"areas": list(areas), "render": True, "scope": "partial",
                                                "actor": ACTOR, "model": model,
                                                "proxy": "residential" if residential else "datacenter"})
+    if not pick:
+        finish_run(conn, run, "ok", {"areas": per_area, "observations": 0}, est_cost=0.0)
+        return {"run_id": run, "apify_usd": 0.0, "claude_usd": 0.0, "observations": 0, "sites": report,
+                "outcomes": {k[: -len("#render")]: a for k, a in per_area.items()}}
     n_req = PAGES_PER_SITE * len(pick)
     try:
         res = run_actor(ACTOR, {"startUrls": [{"url": s["url"], "userData": {"site": sid}} for sid, s in pick.items()],
@@ -376,7 +391,7 @@ def render(conn, *, sites: list[str] | None = None, model: str = "haiku",
     for it in res.items:
         if not it.get("#error") and it.get("site") in pick:
             pages.setdefault(it["site"], []).append(it)
-    spent, per_area, n_obs, report = 0.0, {}, 0, {}
+    spent, n_obs = 0.0, 0
     try:
         for sid, s in pick.items():
             its = pages.get(sid, [])
