@@ -231,7 +231,7 @@ def stale_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     the price has a current check or a newer page says FOR_RENT. A page without a status flags nothing."""
     from ..intake.zillow_detail import RENTAL, latest_status
 
-    bad = {z: s for z, (s, _) in latest_status(conn).items() if s not in RENTAL}
+    bad = {z: (s, ev) for z, (s, ev) in latest_status(conn).items() if s not in RENTAL}
     if not bad:
         return []
     checked = current_checks(conn)
@@ -239,13 +239,13 @@ def stale_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     for r in conn.execute("SELECT source, source_id, obs_id, place_key, "
                           "CAST(json_extract(data, '$.extra.zpid') AS TEXT) AS zpid FROM listings "
                           "WHERE source = 'zillow' AND active = 1 AND kind IS NOT 'site_info' ORDER BY source_id"):
-        status = bad.get(r["zpid"])
-        if not status or "price" in checked.get((r["source"], r["source_id"]), {}):
+        if r["zpid"] not in bad or "price" in checked.get((r["source"], r["source_id"]), {}):
             continue
+        status, event = bad[r["zpid"]]
         out.append({"kind": "conflict", "stale": True, "unit_key": None, "place_key": r["place_key"],
                     "fields": ["price_month"], "pending_render": False, "home_status": status,
-                    "reason": f"Zillow's page now says {status.replace('_', ' ').lower()}, not for rent: "
-                              "still offered?",
+                    "reason": f"Zillow's page now says {status.replace('_', ' ').lower()}, not for rent"
+                              + (f" (latest: {event})" if event else "") + ": still offered?",
                     "listings": [{"source": r["source"], "source_id": r["source_id"], "obs_id": r["obs_id"]}]})
     return out
 

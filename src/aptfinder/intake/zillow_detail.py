@@ -103,6 +103,17 @@ def detail_lines(item: dict[str, Any]) -> list[tuple[str, Any]]:
     return out
 
 
+def last_event(item: dict[str, Any]) -> str | None:
+    """The page's newest price-history event, e.g. '2026-11-25 Listing removed $2,300': a FOR_SALE page can still
+    be listed for rent (104 Evandale Ave: listed for sale 11-11, for rent 11-23), an OTHER one is often removed."""
+    hist = [h for h in item.get("price_history") or [] if isinstance(h, dict) and h.get("date")]
+    if not hist:
+        return None
+    h = max(hist, key=lambda h: str(h["date"]))
+    price = f" ${h['price']:,.0f}" if isinstance(h.get("price"), (int, float)) else ""
+    return f"{h['date']} {h.get('event') or ''}{price}".strip()
+
+
 def active_zpids(conn: sqlite3.Connection) -> list[str]:
     """The zpids of every active Zillow listing (a building's bedroom rows share one)."""
     return [r[0] for r in conn.execute(
@@ -159,12 +170,15 @@ def fetch(conn: sqlite3.Connection, *, max_usd: float, batch: int = BATCH, limit
             for z, it in got.items():
                 if it.get("home_status"):
                     counts["home_status"][z] = it["home_status"]
+                if it.get("home_status") and it["home_status"] not in RENTAL:
+                    counts.setdefault("last_event", {})[z] = last_event(it)
             if run.status != "SUCCEEDED":
                 warnings.append(f"zpids {k + 1}-{k + len(chunk)}: actor run {run.status} ({run.console_url})")
             no_text = sum(1 for i in got.values() if not (i.get("description") or "").strip())
             if got and no_text > 0.5 * len(got):
                 warnings.append(f"zpids {k + 1}-{k + len(chunk)}: {no_text} of {len(got)} pages have no description")
-        stale = {z: s for z, s in counts["home_status"].items() if s not in RENTAL}
+        stale = {z: f"{s} ({counts['last_event'].get(z)})" for z, s in counts["home_status"].items()
+                 if s not in RENTAL}
         counts["not_for_rent"] = len(stale)
         counts["warnings"] = warnings
         status = "error" if counts["fetched"] == 0 else "ok"
@@ -177,11 +191,13 @@ def fetch(conn: sqlite3.Connection, *, max_usd: float, batch: int = BATCH, limit
             **{k: v for k, v in counts.items() if k != "home_status"}, "stale": stale}
 
 
-def latest_status(conn: sqlite3.Connection) -> dict[str, tuple[str, int]]:
-    """zpid -> (home_status, run id) from the newest successful detail run that saw it."""
-    out: dict[str, tuple[str, int]] = {}
-    for r in conn.execute("SELECT id, counts FROM runs WHERE component = 'intake' AND source = ? AND status = 'ok' "
+def latest_status(conn: sqlite3.Connection) -> dict[str, tuple[str, str | None]]:
+    """zpid -> (home_status, newest price-history event if not for rent) from the newest successful detail run
+    that saw it."""
+    out: dict[str, tuple[str, str | None]] = {}
+    for r in conn.execute("SELECT counts FROM runs WHERE component = 'intake' AND source = ? AND status = 'ok' "
                           "ORDER BY id", (SOURCE,)):
-        for z, s in (json.loads(r["counts"] or "{}").get("home_status") or {}).items():
-            out[z] = (s, r["id"])
+        c = json.loads(r["counts"] or "{}")
+        for z, s in (c.get("home_status") or {}).items():
+            out[z] = (s, (c.get("last_event") or {}).get(z))
     return out

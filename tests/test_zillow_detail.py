@@ -39,7 +39,9 @@ FOR_SALE = {  # 104 Evandale Ave: held as an active rental, the page now says fo
     "zillow_id": 124743044, "home_status": "FOR_SALE", "home_type": "TOWNHOUSE", "bedrooms": 3,
     "listing_price": 1798000,
     "description": "Sophisticated interiors, refined finishes, and effortless functionality define this townhome.",
-    "whats_special": [], "reso_facts": {"feesAndDues": [{"type": "HOA", "fee": "$270 monthly"}], "furnished": False}}
+    "whats_special": [], "reso_facts": {"feesAndDues": [{"type": "HOA", "fee": "$270 monthly"}], "furnished": False},
+    "price_history": [{"date": "2026-11-24", "event": "Price change", "price": 6800},
+                      {"date": "2026-11-11", "event": "Listed for sale", "price": 1798000}]}
 
 
 def _zillow(conn):
@@ -81,7 +83,7 @@ def test_one_page_per_zpid_raw_only_never_coverage_or_retiring(conn, fake):
     res = zd.fetch(conn, max_usd=1.0, batch=2)
     assert fake == [["122197342", "124743044"], ["466640639"]]  # the building's two rows share one page
     assert res["fetched"] == 3 and res["failed"] == 0 and res["cost_usd"] == 0.003
-    assert res["stale"] == {"124743044": "FOR_SALE"}
+    assert res["stale"] == {"124743044": "FOR_SALE (2026-11-24 Price change $6,800)"}
     assert conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0] == before  # no listing, no place
     run = conn.execute("SELECT * FROM runs WHERE source = 'zillow_detail'").fetchone()
     assert json.loads(run["params"])["scope"] == "targeted" and run["status"] == "ok"
@@ -139,7 +141,9 @@ def test_for_sale_page_is_a_verify_item_until_checked(conn, fake):
     zd.fetch(conn, max_usd=1.0)
     items = verify.stale_queue(conn)
     assert [i["listings"][0]["source_id"] for i in items] == ["124743044"]
-    assert items[0]["fields"] == ["price_month"] and "for sale" in items[0]["reason"]
+    assert items[0]["fields"] == ["price_month"]
+    assert items[0]["reason"] == ("Zillow's page now says for sale, not for rent (latest: 2026-11-24 Price change "
+                                  "$6,800): still offered?")
     assert items[0] in verify.all_conflicts(conn)
     append_check(conn, "user", "conflict", "price", "cannot_tell", observation_id=items[0]["listings"][0]["obs_id"],
                  stored_value=5200, note="sold")
