@@ -32,7 +32,7 @@ Screenshots are real data, shown with `aptf-web --redact`.
 
 ## In numbers (live instance, 2026-11-25)
 
-- 3,253 places and 11,369 listings (10,735 active), from 11 sources plus own-site renders.
+- 3,253 places and 11,369 listings (10,735 active), from 11 sources (buildings' own sites counted as one).
 - 85,666 observations in 747 runs.
 - 13,080 Google routes beside 234k free estimates.
 - 45k photos and floor plans stored (1.9 GB).
