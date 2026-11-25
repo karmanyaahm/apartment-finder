@@ -29,7 +29,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.redact and not redact:
         ap.error("--redact needs a [replace] table in config/redact.toml")
     # Bound to localhost: the app has write endpoints and no auth (Cloudflare Access before any tunnel).
-    app = create_app(db, redact)
+    app = create_app(db, redact, background=True)
     base = "/" + args.base_path.strip("/") if args.base_path.strip("/") else ""
     if base:  # only <base>/... is served; everything else is 404
         outer = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)

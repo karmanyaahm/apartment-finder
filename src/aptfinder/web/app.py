@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import re
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +48,8 @@ def _tv(t: dict[str, Any]) -> dict[str, Any]:
 
 
 SCRAPE_REFRESH_S = 120  # how stale the dashboard may be while an intake run is writing
+WATCH_EVERY_S = 3  # the background app checks the data version this often
+WATCH_RECENT_S = 600  # and rebuilds the results read within this long
 
 
 def _group_listings(conn) -> dict[str, list[dict[str, Any]]]:
@@ -309,13 +314,35 @@ def _parse_value(v: Any) -> Any:
         return s
 
 
-def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None = None) -> FastAPI:
+class _ThreadConn:
+    """One SQLite connection per thread, looked up on each use. Request threads and the recompute worker never
+    share a connection, so a long whole-database read in one never waits on, or makes wait, another (WAL: readers
+    and the one writer run side by side; a write waits only for another write, store.connect's timeout)."""
+
+    def __init__(self, path: str) -> None:
+        self._path, self._local = path, threading.local()
+
+    def _conn(self) -> Any:
+        c = getattr(self._local, "conn", None)
+        if c is None:
+            c = self._local.conn = connect(self._path)
+        return c
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn(), name)
+
+
+def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None = None,
+               background: bool = False) -> FastAPI:
     """`redact` (real -> shown) makes a read-only view for screenshots: every API response has the strings
-    swapped, longest first, and every write is refused."""
+    swapped, longest first, and every write is refused. `background` (the served dashboard, `aptf-web`): whole-
+    database results are rebuilt by one background worker and requests answer from the last snapshot meanwhile
+    (stale-while-revalidate, flagged `X-Updating`); without it (tests, scripts) a request waits for a fresh result."""
     db_path = str(db_path or settings.DB_PATH)
-    conn = connect(db_path)
+    conn: Any = _ThreadConn(db_path)
     init_db(conn)
-    lock = threading.RLock()  # re-entrant: cached() takes it inside endpoints that already hold it
+    # only for short check-then-write sequences and the job state: never held around a whole-database computation
+    lock = threading.RLock()
     app = FastAPI(title="apartment finder", openapi_url=None, docs_url=None, redoc_url=None)
 
     if redact is not None:
@@ -334,13 +361,35 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             headers = {k: v for k, v in resp.headers.items() if k.lower() != "content-length"}
             return Response(body, status_code=resp.status_code, headers=headers, media_type=resp.media_type)
 
+    @app.middleware("http")
+    async def snapshot_flag(request: Request, call_next):  # type: ignore[no-untyped-def]
+        """X-Updating: the whole-database results this answer read from an out-of-date snapshot (being rebuilt);
+        X-Snapshot-Age: seconds since the oldest of them was computed. The page fetches again a little later."""
+        flag: list = []
+        token = updating.set(flag)
+        try:
+            resp = await call_next(request)
+        finally:
+            updating.reset(token)
+        if flag:
+            resp.headers["X-Updating"] = ",".join(sorted({n for n, _ in flag}))
+            resp.headers["X-Snapshot-Age"] = str(round(time.monotonic() - min(t for _, t in flag)))
+        return resp
+
     # gzip JSON, the page and scripts (the place list is ~18 MB of JSON, ~1.7 MB gzipped). Added after the redact
     # middleware so it wraps it: redact still reads plain text. Photos are already compressed: left alone.
     app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5,
                        exclude_content_types=("text/event-stream", "image/jpeg", "image/png", "image/webp",
                                               "image/gif", "image/svg+xml", "application/pdf"))
 
+    # name -> (edits, scrapes, monotonic time computed, value, fn): the last snapshot of each whole-database result
     memo: dict[str, tuple[Any, ...]] = {}
+    memo_lock = threading.Lock()  # guards memo, pending and last_read only (never held while computing)
+    pending: dict[str, Future] = {}
+    last_read: dict[str, float] = {}
+    worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="aptf-recompute")
+    in_worker = threading.local()
+    updating: ContextVar[list | None] = ContextVar("updating", default=None)
 
     def data_version() -> tuple[tuple, tuple]:
         """(edits, scrapes): what the pages show changes with a new row in any log or an edited config file.
@@ -356,18 +405,70 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         cfg = tuple(f.stat().st_mtime_ns for f in sorted(settings.CONFIG_DIR.rglob("*")) if f.is_file())
         return tuple(row[:3]) + cfg, tuple(row[3:])
 
-    def cached(name: str, fn):
-        """fn() under the lock, reused while nothing changed. A user edit recomputes at once; new scraped rows
-        recompute at most every SCRAPE_REFRESH_S seconds, so a running intake (a write every few seconds) does not
-        make every request rebuild every whole-database result."""
-        with lock:
-            edits, scrapes = data_version()
+    def fresh(hit: tuple | None, version: tuple[tuple, tuple]) -> bool:
+        """A snapshot is current while no user edit came after it; new scraped rows make it out of date at most
+        every SCRAPE_REFRESH_S seconds, so a running intake (a write every few seconds) does not rebuild every
+        whole-database result after each write."""
+        return bool(hit) and hit[0] == version[0] and (hit[1] == version[1]
+                                                       or time.monotonic() - hit[2] < SCRAPE_REFRESH_S)
+
+    def compute(name: str, fn) -> Any:
+        """fn() over the data version read first, stored as the snapshot (unless already current)."""
+        version = data_version()
+        with memo_lock:
             hit = memo.get(name)
-            if hit and hit[0] == edits and (hit[1] == scrapes or time.monotonic() - hit[2] < SCRAPE_REFRESH_S):
-                return hit[3]
-            val = fn()
-            memo[name] = (edits, scrapes, time.monotonic(), val)
-            return val
+        if fresh(hit, version):
+            return hit[3]
+        val = fn()
+        with memo_lock:
+            memo[name] = (*version, time.monotonic(), val, fn)
+        return val
+
+    def run_in_worker(name: str, fn) -> Any:
+        in_worker.on = True
+        try:
+            return compute(name, fn)
+        finally:
+            with memo_lock:
+                pending.pop(name, None)
+
+    def schedule(name: str, fn) -> Future:
+        """Queue a rebuild of `name` on the one worker (once: a rebuild already queued is reused)."""
+        with memo_lock:
+            f = pending.get(name)
+            if f is None:
+                f = pending[name] = worker.submit(run_in_worker, name, fn)
+            return f
+
+    def cached(name: str, fn):
+        """A whole-database result, reused while nothing changed. In the served dashboard (`background`) a request
+        never computes one: an out-of-date snapshot is returned at once and rebuilt by the worker (the response says
+        so in `X-Updating` and `X-Snapshot-Age`); only before the first snapshot does a request wait for it. The
+        worker itself, and the app without `background`, compute in place."""
+        version = data_version()
+        worker_side = getattr(in_worker, "on", False)
+        with memo_lock:
+            hit = memo.get(name)
+            if not worker_side:  # what the pages read (a result read only inside another is rebuilt with it)
+                last_read[name] = time.monotonic()
+        if fresh(hit, version):
+            return hit[3]
+        if not background or worker_side:
+            return compute(name, fn)
+        if hit is None:
+            return schedule(name, fn).result()
+        schedule(name, fn)
+        flag = updating.get()
+        if flag is not None:
+            flag.append((name, hit[2]))
+        return hit[3]
+
+    def invalidate() -> None:
+        """A user action the next reads must show (a route, new KNN cells, a sampling run): every snapshot is out
+        of date and rebuilt (served meanwhile with X-Updating in the background app)."""
+        with memo_lock:
+            for k, v in list(memo.items()):
+                memo[k] = (None, None, *v[2:])
 
     def all_places() -> dict[str, dict[str, Any]]:
         """The places view by key, read once per data version (the view is computed over everything)."""
@@ -402,8 +503,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         return cached("media_files", lambda: url_files(conn))
 
     def q(sql: str, args: tuple = ()) -> list[dict[str, Any]]:
-        with lock:
-            return [dict(r) for r in conn.execute(sql, args).fetchall()]
+        return [dict(r) for r in conn.execute(sql, args).fetchall()]
 
     def latest_annotations(entity_type: str, key: str | None = None) -> dict[str, dict[str, dict[str, Any]]]:
         sql = "SELECT * FROM annotations WHERE entity_type = ?" + (" AND entity_key = ?" if key else "")
@@ -416,8 +516,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         return out
 
     def effective() -> Any:
-        with lock:
-            return goalstore.effective_goals(conn)
+        return goalstore.effective_goals(conn)
 
     # ------------------------------------------------------------------ read API
     @app.get("/api/meta")
@@ -443,10 +542,20 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 for k, v in load_points().items()}
 
     @app.get("/api/places")
-    def places() -> list[dict[str, Any]]:
+    def places(request: Request) -> Response:
         # the whole list is built once per data version: every input is (goal results, trips, the places and
-        # listings views, annotations, goal edits), so a reload or a goal switch reuses it
-        return cached("places_list", build_places)
+        # listings views, annotations, goal edits), so a reload or a goal switch reuses it; it is kept as JSON
+        # bytes, gzipped too, so a request only sends them (encoding 18 MB took most of a warm request)
+        body, gz = cached("places_body", encode_places)
+        if gz is not None and "gzip" in request.headers.get("accept-encoding", ""):
+            return Response(gz, media_type="application/json",
+                            headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"})
+        return Response(body, media_type="application/json")
+
+    def encode_places() -> tuple[bytes, bytes | None]:
+        body = json.dumps(cached("places_list", build_places), separators=(",", ":"), ensure_ascii=False).encode()
+        # the redacted view rewrites the plain text in its middleware: no pre-gzipped copy there
+        return body, (gzip.compress(body, 5) if redact is None else None)
 
     def build_places() -> list[dict[str, Any]]:
         res = results()
@@ -568,8 +677,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         anns = q("SELECT * FROM annotations WHERE entity_type = 'place' AND entity_key = ? ORDER BY id",
                  (place_key,))
         web = cached("website_status", lambda: pipeline.website_status(conn))
-        with lock:
-            pstatus = pipeline.place_status(conn, place_key, web=web, by_place=by_place)
+        pstatus = pipeline.place_status(conn, place_key, web=web, by_place=by_place)
         # an own-site plan row without baths: the same plan's baths on another source, else its drawing's reading
         from ..planread import readings as plan_readings
 
@@ -631,18 +739,16 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         apify_real = q("SELECT COALESCE(SUM(json_extract(counts, '$.apify_usd')), 0) AS t FROM runs")[0]["t"]
         errors = q("SELECT id, started_at, component, source, error FROM runs WHERE status = 'error' "
                    "ORDER BY id DESC LIMIT 5")
-        with lock:
-            acc = verify.accuracy(conn)
-            agree = cached("agreement", lambda: verify.agreement(conn))
-            conflicts = cached("all_conflicts", lambda: verify.all_conflicts(conn))
-            n_pending = sum(c["pending_render"] for c in conflicts)
-            n_sample = cached("n_sample", lambda: len(verify.sample_queue(conn)))
-            n_own = len(cached("own_site_queue", lambda: verify.own_site_queue(conn)))
-            n_dup = len(duplicates())
+        acc = verify.accuracy(conn)
+        agree = cached("agreement", lambda: verify.agreement(conn))
+        conflicts = cached("all_conflicts", lambda: verify.all_conflicts(conn))
+        n_pending = sum(c["pending_render"] for c in conflicts)
+        n_sample = cached("n_sample", lambda: len(verify.sample_queue(conn)))
+        n_own = len(cached("own_site_queue", lambda: verify.own_site_queue(conn)))
+        n_dup = len(duplicates())
         from ..trips import google_usage
 
-        with lock:
-            google = google_usage(conn)
+        google = google_usage(conn)
         return {
             "runs": runs, "spend": spend, "apify_real": apify_real, "apify": apify_credit(), "errors": errors,
             "google": google,
@@ -659,11 +765,14 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
     def pipeline_overview() -> dict[str, Any]:
         """Each pipeline stage's state from the logs: done / partial / todo / stale / blocked, and the commands
         that would run the rest (aptfinder.pipeline)."""
-        return {**cached("pipeline", lambda: pipeline.overview(
+        return {**pipeline_data(), "apify": apify_credit()}
+
+    def pipeline_data() -> dict[str, Any]:
+        return cached("pipeline", lambda: pipeline.overview(
             conn, places=list(all_places().values()), res=results(),
             conflicts=cached("all_conflicts", lambda: verify.all_conflicts(conn)),
             own_queue=cached("own_site_queue", lambda: verify.own_site_queue(conn)), dup_queue=duplicates(),
-            web=cached("website_status", lambda: pipeline.website_status(conn)))), "apify": apify_credit()}
+            web=cached("website_status", lambda: pipeline.website_status(conn))))
 
     @app.get("/api/areas")
     def areas_map() -> dict[str, Any]:
@@ -747,10 +856,9 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             raise HTTPException(400, "batch is for conflicts; use /api/verify/next for the rest")
         if zone not in ("", "walk"):
             raise HTTPException(400, "zone is '' or 'walk'")
-        with lock:
-            all_items = cached("all_conflicts", lambda: verify.all_conflicts(conn))
-            items, hidden = filtered_conflicts(goal, zone)
-            checked = verify.current_checks(conn)
+        all_items = cached("all_conflicts", lambda: verify.all_conflicts(conn))
+        items, hidden = filtered_conflicts(goal, zone)
+        checked = verify.current_checks(conn)
         n = max(1, min(n, 50))
         pending = sum(c["pending_render"] for c in items)
         page = [{"item": it, **_listing_detail(it)} for it in items[max(0, skip):max(0, skip) + n]]
@@ -766,8 +874,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
     def verify_own_sites(skip: int = 0, n: int = 20) -> dict[str, Any]:
         """Named buildings whose own site gave no usable offer, n at a time, each with its reason and every URL
         tried (verify.own_site_queue), plus the count per reason."""
-        with lock:
-            items = cached("own_site_queue", lambda: verify.own_site_queue(conn))
+        items = cached("own_site_queue", lambda: verify.own_site_queue(conn))
         from collections import Counter
 
         return {"total": len(items), "skip": skip, "n": n, "items": items[skip:skip + n],
@@ -783,8 +890,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         same_building = no."""
         from collections import Counter
 
-        with lock:
-            items = duplicates()
+        items = duplicates()
         allp = all_places()
         page = [{**e, "places": [{**p, "label": place_label(allp.get(p["place_key"]) or p) or p["place_key"]}
                                  for p in e["places"]]} for e in items[max(0, skip):max(0, skip) + n]]
@@ -795,8 +901,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
     def verify_next(seed: int = 0, skip: int = 0) -> dict[str, Any]:
         """The sample, one item at a time. Conflicts are paged by /api/verify/batch, possible duplicates and
         buildings whose own site gave nothing usable are lists of their own (/api/verify/duplicates, /own_sites)."""
-        with lock:
-            items = cached(f"sample_queue|{seed}", lambda: verify.sample_queue(conn, seed))
+        items = cached(f"sample_queue|{seed}", lambda: verify.sample_queue(conn, seed))
         if skip >= len(items):
             return {"done": True, "remaining": 0}
         item = items[skip]
@@ -897,8 +1002,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
     @app.get("/api/goals")
     def list_goals() -> dict[str, Any]:
         seed = load_goals().goals
-        with lock:
-            edits = goalstore.goal_edits(conn)
+        edits = goalstore.goal_edits(conn)
         refs = goal_refs()
         return {
             "goals": [{"id": g, "label": v.label, "rules": v.rules, "nice": v.nice,
@@ -1054,8 +1158,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         source = make_source(provider, max_calls=60)
         commute = build_commute(db_path, source)
         try:
-            with lock:
-                n = compute_for_place(conn, commute, rows[0], on_demand=True)
+            n = compute_for_place(conn, commute, rows[0], on_demand=True)
         except SpendCapReached as e:
             raise HTTPException(429, str(e))
         except RuntimeError as e:
@@ -1064,7 +1167,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             # the user's own routing shows at once: trips count as scraped rows, which the cache may reuse for
             # SCRAPE_REFRESH_S, so the drawer refreshed with the old estimates
             with lock:
-                memo.clear()
+                invalidate()
         return {"new_trips": n, "provider": provider, "api_calls": getattr(source, "calls", 0)}
 
     # ------------------------------------------------------------------ the Pipeline panel's background job
@@ -1150,7 +1253,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 raise HTTPException(400, f"no such cell {p} x {m}")
         with lock:
             append_annotation(conn, AUTHOR, *CELLS_KEY, comment=json.dumps(sorted(set(map(tuple, body.cells)))))
-            memo.clear()
+            invalidate()
         return {"cells": sorted(set(map(tuple, body.cells)))}
 
     def cell_accuracy(pairs: list[tuple[str, str]], keys: list[str]) -> dict[str, Any]:
@@ -1158,12 +1261,11 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         the KNN accuracy by leave-one-out over every place with its own Google route (scope-free, cached per cell)."""
         from .. import sampling
 
-        with lock:
-            trips = all_trips()
-            loc = located()
-            return {"|".join(p): {**sampling.cell_shown(trips, p, keys),
-                                  "loo": cached(f"knn_loo|{'|'.join(p)}", lambda p=p: sampling.cell_loo(trips, p, loc))}
-                    for p in pairs}
+        trips = all_trips()
+        loc = located()
+        return {"|".join(p): {**sampling.cell_shown(trips, p, keys),
+                              "loo": cached(f"knn_loo|{'|'.join(p)}", lambda p=p: sampling.cell_loo(trips, p, loc))}
+                for p in pairs}
 
     @app.post("/api/knn/accuracy")
     def knn_accuracy(body: SampleIn) -> dict[str, Any]:
@@ -1248,22 +1350,21 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         keys = _compute_places(body)
         if not keys:
             raise HTTPException(400, "no located places in that scope")
-        with lock:
-            trips = all_trips()
-            if body.method == "random":
-                plan = sampling.random_plan(trips, pairs, keys, body.pct, body.seed)
-                label = f"random {body.pct:g}%"
-            elif body.method == "cover":
-                plan = sampling.cover_plan(trips, pairs, keys, located(), body.radius_m)
-                label = f"cover within {body.radius_m:g} m"
-            elif body.method == "refine":
-                plan, notes = sampling.refine_plan(trips, pairs, keys, goalstore.effective_goals(conn), candidates())
-                label = "refine"
-            else:
-                raise HTTPException(400, "method must be cover, random or refine")
-            summ = sampling.summary(conn, db_path, plan, keys, trips, located())
-            hinge = sampling.hinge_counts(hinges(), keys, pairs, plan)
-            use = google_usage(conn)
+        trips = all_trips()
+        if body.method == "random":
+            plan = sampling.random_plan(trips, pairs, keys, body.pct, body.seed)
+            label = f"random {body.pct:g}%"
+        elif body.method == "cover":
+            plan = sampling.cover_plan(trips, pairs, keys, located(), body.radius_m)
+            label = f"cover within {body.radius_m:g} m"
+        elif body.method == "refine":
+            plan, notes = sampling.refine_plan(trips, pairs, keys, goalstore.effective_goals(conn), candidates())
+            label = "refine"
+        else:
+            raise HTTPException(400, "method must be cover, random or refine")
+        summ = sampling.summary(conn, db_path, plan, keys, trips, located())
+        hinge = sampling.hinge_counts(hinges(), keys, pairs, plan)
+        use = google_usage(conn)
         left = use["matrix_cap"] - use["matrix_elements"]
         if body.method == "refine":
             for p, n in notes.items():
@@ -1283,8 +1384,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             raise HTTPException(400, "GOOGLE_MAPS_API_KEY is not set")
         if body.confirm_elements < 1:
             raise HTTPException(400, "nothing to route")
-        with lock:
-            u = google_usage(conn)
+        u = google_usage(conn)
         left = u["matrix_cap"] - u["matrix_elements"]
         if body.confirm_elements > TYPED_CONFIRM_OVER and left < 5000 and body.confirm_left != left:
             raise HTTPException(400, f"more than {TYPED_CONFIRM_OVER} Route Matrix elements: type the elements left "
@@ -1315,7 +1415,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             finally:
                 wconn.close()
             with lock:
-                memo.clear()
+                invalidate()
                 job.pop("note", None)
                 job.update(final, finished=time.time())
 
@@ -1354,5 +1454,34 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         # served from the root so the service worker's scope covers the whole app
         return FileResponse(STATIC / "sw.js", media_type="application/javascript",
                             headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"})
+
+    if background:
+        # first snapshots at start (the list, the header counts, the Pipeline panel), one queued task each, the list
+        # first, so the first page load waits only for what it reads; then a watcher rebuilds, as soon as the data
+        # changes, every result a page read in the last WATCH_RECENT_S seconds, so an edit shows up unasked
+        for name, fn in (("places_body", encode_places),
+                         ("all_conflicts", lambda: verify.all_conflicts(conn)),
+                         ("agreement", lambda: verify.agreement(conn)),
+                         ("n_sample", lambda: len(verify.sample_queue(conn))),
+                         ("own_site_queue", lambda: verify.own_site_queue(conn)),
+                         ("duplicate_queue", lambda: verify.duplicate_queue(conn, list(all_places().values()))),
+                         ("pipeline", lambda: pipeline_data())):
+            schedule(name, fn)
+
+        def watch() -> None:
+            while True:
+                time.sleep(WATCH_EVERY_S)
+                try:
+                    version = data_version()
+                    now = time.monotonic()
+                    with memo_lock:
+                        todo = [(k, v[4]) for k, v in memo.items()
+                                if now - last_read.get(k, 0) < WATCH_RECENT_S and not fresh(v, version)]
+                    for name, fn in todo:
+                        schedule(name, fn)
+                except Exception:  # noqa: BLE001  (a locked or busy database: try again next round)
+                    pass
+
+        threading.Thread(target=watch, daemon=True, name="aptf-watch").start()
 
     return app

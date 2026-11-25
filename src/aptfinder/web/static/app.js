@@ -39,7 +39,31 @@ async function api(path, opts = {}, attempt = 0) {
     if (typeof detail !== "string") detail = JSON.stringify(detail);
     throw new Error(`${name}: HTTP ${r.status}${r.statusText ? " " + r.statusText : ""}${detail ? ": " + detail : ""}`);
   }
+  if (!opts.method) {
+    if (r.headers.get("X-Updating")) noteUpdating(r.headers.get("X-Snapshot-Age"));
+    else if (name === "api/places") noteUpdating(null);
+  }
   return r.json();
+}
+// The server answers from its last computed results while it rebuilds them after a change (X-Updating): say so in
+// the header and fetch the list (and an open drawer) again a few seconds later, until it answers fresh.
+let updatingTimer = null;
+function noteUpdating(age) {
+  let b = $("#updating");
+  if (!b) {
+    b = document.createElement("span");
+    b.id = "updating";
+    b.className = "muted small";
+    $("#status-strip")?.before(b);
+  }
+  b.textContent = age == null ? "" : "updating…";
+  b.title = age == null ? "" : `showing results computed ${age} s ago while the server recomputes them`;
+  if (age == null || updatingTimer) return;
+  updatingTimer = setTimeout(() => {
+    updatingTimer = null;
+    loadPlaces().catch(() => {});
+    if (S.selected && !$("#drawer").classList.contains("hidden")) openPlace(S.selected).catch(() => {});
+  }, 5000);
 }
 const post = (path, body) => api(path, { method: "POST", body: JSON.stringify(body || {}) });
 
