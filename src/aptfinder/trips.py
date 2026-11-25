@@ -172,22 +172,6 @@ def build_commute(cache_db: str, source) -> Commute:
     return Commute(cache_db, source, stations, load_caltrain(), k_stations=K_STATIONS)
 
 
-# A trip counts only while its place is where it was routed from: a trip row records its origin (o_lat, o_lon), and
-# once the place's position moves more than STALE_M from it (a merge, a source added or dropped, a pin rule) the row
-# is stale: readers skip it (estimate or KNN until re-routed) and compute_for_place appends a fresh one. 30 m is about
-# half a minute's walk, well above the 4-decimal (11 m) rounding of the leg cache and the jitter of averaging pins.
-# A row without an origin (routed before 2026-11-25) is stale unless scripts/adopt_trip_origins.py found its origin.
-STALE_M = 30.0
-
-
-def is_current(row, position: tuple[float, float] | None) -> bool:
-    """Whether a trip row (with o_lat, o_lon) was routed from within STALE_M of `position`, its place's position now."""
-    o_lat, o_lon = row["o_lat"], row["o_lon"]
-    if o_lat is None or o_lon is None or not position or position[0] is None:
-        return False
-    return haversine_m((o_lat, o_lon), position) <= STALE_M
-
-
 def latest_trip(conn: sqlite3.Connection, place_key: str, point_id: str, mode: str, provider: str):
     return conn.execute(
         "SELECT * FROM trips WHERE place_key=? AND point_id=? AND mode=? AND provider=? "
@@ -208,12 +192,8 @@ def missing_estimates(conn: sqlite3.Connection) -> list[str]:
     located = {r[0]: (r[1], r[2]) for r in conn.execute("SELECT place_key, lat, lon FROM places WHERE lat IS NOT NULL")}
     routable = [pk for pk in located if pk.split("~", 1)[0] == pk or pk.split("~", 1)[0] not in located]
     have: dict[str, set[tuple[str, str]]] = {}
-    # only estimates routed from where the place is now (is_current): a moved place is estimated again
-    for r in conn.execute("SELECT place_key, point_id, mode, o_lat, o_lon FROM (SELECT t.*, ROW_NUMBER() OVER ("
-                          "PARTITION BY place_key, point_id, mode ORDER BY id DESC) rn FROM trips t "
-                          "WHERE provider = 'estimate') WHERE rn = 1"):
-        if is_current(r, located.get(r["place_key"])):
-            have.setdefault(r["place_key"], set()).add((r["point_id"], r["mode"]))
+    for pk, pt, mode in conn.execute("SELECT DISTINCT place_key, point_id, mode FROM trips WHERE provider = 'estimate'"):
+        have.setdefault(pk, set()).add((pt, mode))
     points, point_sets = load_points(), load_point_sets()
     sets = [(points.get(name, []), cfg) for name, cfg in point_sets.items()]
     out = []
@@ -272,12 +252,12 @@ def compute_for_place(conn: sqlite3.Connection, commute: Commute, place: sqlite3
                     continue
                 t = commute.trip(origin, (p.lat, p.lon), mode)
                 prev = latest_trip(conn, place["place_key"], p.id, mode, t.provider)
-                if prev is not None and prev["minutes"] == t.minutes and is_current(prev, origin):
+                if prev is not None and prev["minutes"] == t.minutes:
                     continue
                 pending.append((p.id, mode, t))
     for point_id, mode, t in pending:
         append_trip(conn, place["place_key"], point_id, mode, t.minutes, t.distance_m, t.legs, t.depart,
-                    t.provider, commit=False, origin=origin)
+                    t.provider, commit=False)
     conn.commit()
     return len(pending)
 
@@ -349,8 +329,7 @@ def planned_legs(db_path: str, place_keys: list[str], only: tuple[str, str],
     mem.row_factory = sqlite3.Row
     mem.execute("CREATE TABLE places (place_key TEXT, lat REAL, lon REAL)")
     mem.execute("CREATE TABLE trips (id INTEGER PRIMARY KEY, computed_at TEXT, place_key TEXT, point_id TEXT, "
-                "mode TEXT, minutes REAL, distance_m REAL, legs TEXT, depart_assumption TEXT, provider TEXT, o_lat REAL, "
-                "o_lon REAL)")
+                "mode TEXT, minutes REAL, distance_m REAL, legs TEXT, depart_assumption TEXT, provider TEXT)")
     want = set(place_keys)
     rows = ([(pk, *ll) for pk, ll in located.items()] if located is not None
             else real.execute("SELECT place_key, lat, lon FROM places WHERE lat IS NOT NULL"))
@@ -484,83 +463,6 @@ def sample(conn: sqlite3.Connection, args) -> dict[str, Any]:
     return {**out, "run": route_plan(conn, args.db, plan, label, args.max_elements, args.max_calls)}
 
 
-def _latest_rows(conn: sqlite3.Connection, provider: str) -> list[sqlite3.Row]:
-    return conn.execute("SELECT * FROM (SELECT t.*, ROW_NUMBER() OVER (PARTITION BY place_key, point_id, mode, provider "
-                        "ORDER BY id DESC) rn FROM trips t WHERE provider = ?) WHERE rn = 1", (provider,)).fetchall()
-
-
-def adopt_origins(conn: sqlite3.Connection, dry_run: bool = False) -> dict[str, Any]:
-    """One-time step for Google trips routed before trips kept their origin (2026-11-25). A row's origin is read back
-    from the leg cache: the Google leg of its first leg's mode and minutes (and distance, and for a single-mode trip
-    its destination point) whose origin is nearest the place's position now. Found: the row is appended again with
-    that origin and its own computed_at (then is_current judges it like any new row). Not found: left as it is,
-    which reads as stale (estimate or KNN until `reroute-stale`). Estimates are not adopted: they are free, so
-    `estimate_missing` simply recomputes them."""
-    from .commute.geo import round_ll
-    from .commute.sources import BASIC_MODES
-
-    located = {r[0]: (r[1], r[2]) for r in conn.execute("SELECT place_key, lat, lon FROM places WHERE lat IS NOT NULL")}
-    pts = {p.id: p for ps in load_points().values() for p in ps}
-    out = {"legacy": 0, "adopted": 0, "adopted_current": 0, "no_origin_found": 0, "place_gone": 0, "examples": []}
-    todo = []
-    for r in _latest_rows(conn, "google"):
-        if r["o_lat"] is not None:
-            continue
-        out["legacy"] += 1
-        here = located.get(r["place_key"])
-        if here is None:
-            out["place_gone"] += 1
-            continue
-        legs = json.loads(r["legs"] or "[]")
-        q = "SELECT o_lat, o_lon FROM commute_legs WHERE provider = 'google' AND mode = ?"
-        args: list[Any] = []
-        if legs:
-            q += " AND found = 1 AND minutes = ? AND distance_m IS ?"
-            args = [legs[0]["mode"], legs[0]["minutes"], legs[0]["distance_m"]]
-        elif r["mode"] in BASIC_MODES:  # Google found no route
-            q += " AND found = 0"
-            args = [r["mode"]]
-        if args and r["mode"] in BASIC_MODES:
-            p = pts.get(r["point_id"])
-            if p is None:
-                args = []
-            else:
-                q += " AND d_lat = ? AND d_lon = ?"
-                args += list(round_ll((p.lat, p.lon)))
-        cands = conn.execute(q, args).fetchall() if args else []
-        if not cands:
-            out["no_origin_found"] += 1
-            continue
-        o = min(((c[0], c[1]) for c in cands), key=lambda c: haversine_m(c, here))
-        todo.append((r, o))
-        out["adopted"] += 1
-        cur = haversine_m(o, here) <= STALE_M
-        out["adopted_current"] += cur
-        if not cur and len(out["examples"]) < 10:
-            out["examples"].append({"place_key": r["place_key"], "point": r["point_id"], "mode": r["mode"],
-                                    "minutes": r["minutes"], "routed_from_m": round(haversine_m(o, here))})
-    if not dry_run:
-        for r, o in todo:
-            append_trip(conn, r["place_key"], r["point_id"], r["mode"], r["minutes"], r["distance_m"],
-                        json.loads(r["legs"] or "[]"), r["depart_assumption"], r["provider"], commit=False,
-                        origin=o, computed_at=r["computed_at"])
-        conn.commit()
-    return out
-
-
-def stale_plan(conn: sqlite3.Connection) -> dict[tuple[str, str], list[str]]:
-    """(point, mode) -> places whose latest Google trip for it is stale (is_current false: routed from an old position
-    or with no origin known): what `reroute-stale` routes again, so a place that moved never keeps an old pin's time."""
-    located = {r[0]: (r[1], r[2]) for r in conn.execute("SELECT place_key, lat, lon FROM places WHERE lat IS NOT NULL")}
-    current = {p.id for ps in load_points().values() for p in ps}
-    plan: dict[tuple[str, str], list[str]] = {}
-    for r in _latest_rows(conn, "google"):
-        pk = r["place_key"]
-        if pk in located and r["point_id"] in current and not is_current(r, located[pk]):
-            plan.setdefault((r["point_id"], r["mode"]), []).append(pk)
-    return {k: sorted(v) for k, v in sorted(plan.items())}
-
-
 def _ll(text: str) -> tuple[float, float]:
     a, b = text.split(",")
     return (float(a), float(b))
@@ -601,13 +503,6 @@ def main(argv: list[str] | None = None) -> None:
                          "sampling.REFINE_MAX_SPREAD_MIN (2 min), instead of the cover")
     sm.add_argument("--dry-run", action="store_true", help="count the uncached matrix elements per pair; no calls")
     sm.add_argument("--max-elements", type=int, default=1000, help="cap on Route Matrix elements this run")
-    ad = sub.add_parser("adopt-origins", help="one-time: give Google trips routed before 2026-11-25 their origin, "
-                                             "read back from the leg cache (trips.adopt_origins)")
-    ad.add_argument("--dry-run", action="store_true")
-    rs = sub.add_parser("reroute-stale", help="route again with Google the (point, mode) trips of places whose Google "
-                                              "trip was routed from another position (a merge or a moved pin)")
-    rs.add_argument("--dry-run", action="store_true", help="count the uncached matrix elements per pair; no calls")
-    rs.add_argument("--max-elements", type=int, default=1000, help="cap on Route Matrix elements this run")
     args = ap.parse_args(argv)
 
     if args.cmd == "usage":
@@ -622,20 +517,6 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.cmd == "sample":
         print(json.dumps(sample(conn, args), indent=1))
-        return
-    if args.cmd == "adopt-origins":
-        print(json.dumps(adopt_origins(conn, args.dry_run), indent=1))
-        return
-    if args.cmd == "reroute-stale":
-        plan = stale_plan(conn)
-        loc = {r[0]: (r[1], r[2]) for r in conn.execute("SELECT place_key, lat, lon FROM places WHERE lat IS NOT NULL")}
-        out: dict[str, Any] = {"pairs": {"|".join(k): len(v) for k, v in plan.items()},
-                               "places": len({pk for v in plan.values() for pk in v}),
-                               "uncached_elements": sum(len(planned_legs(args.db, v, k, loc)) for k, v in plan.items()),
-                               "google_usage_now": google_usage(conn)}
-        if not args.dry_run:
-            out["run"] = route_plan(conn, args.db, plan, "stale", args.max_elements, args.max_calls)
-        print(json.dumps(out, indent=1))
         return
     if args.cmd == "compute" and args.candidates:
         from .areas import in_walk_zone

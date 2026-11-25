@@ -45,13 +45,6 @@ def init_db(conn: sqlite3.Connection) -> None:
     version = int(hashlib.sha256(script.encode()).hexdigest()[:7], 16)  # fits a 32-bit signed int
     if conn.execute("PRAGMA user_version").fetchone()[0] == version:
         return
-    # columns added to an existing log table (CREATE TABLE IF NOT EXISTS leaves an old table as it was);
-    # adding a nullable column changes no row, so the append-only triggers are untouched
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(trips)")}
-    if cols and "o_lat" not in cols:  # 2026-11-25: the origin each trip was routed from
-        conn.execute("ALTER TABLE trips ADD COLUMN o_lat REAL")
-        conn.execute("ALTER TABLE trips ADD COLUMN o_lon REAL")
-        conn.commit()
     conn.executescript(f"BEGIN IMMEDIATE;\n{script}\nPRAGMA user_version = {version};\nCOMMIT;")
 
 
@@ -138,16 +131,11 @@ def append_link(conn: sqlite3.Connection, author: str, source: str, source_id: s
 
 def append_trip(conn: sqlite3.Connection, place_key: str, point_id: str, mode: str,
                 minutes: float | None, distance_m: float | None, legs: list[dict[str, Any]],
-                depart_assumption: str | None, provider: str, commit: bool = True,
-                origin: tuple[float, float] | None = None, computed_at: str | None = None) -> int:
-    """`origin`: the (lat, lon) the trip was routed from; a trip without one, or from more than
-    `trips.STALE_M` away from its place's position now, is stale (`trips.is_current`)."""
-    o_lat, o_lon = origin if origin else (None, None)
+                depart_assumption: str | None, provider: str, commit: bool = True) -> int:
     cur = conn.execute(
         "INSERT INTO trips (computed_at, place_key, point_id, mode, minutes, distance_m, legs, "
-        "depart_assumption, provider, o_lat, o_lon) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (computed_at or now_iso(), place_key, point_id, mode, minutes, distance_m, _j(legs), depart_assumption,
-         provider, o_lat, o_lon),
+        "depart_assumption, provider) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (now_iso(), place_key, point_id, mode, minutes, distance_m, _j(legs), depart_assumption, provider),
     )
     if commit:
         conn.commit()

@@ -36,11 +36,10 @@ class _Trips(defaultdict):
 
 def best_trips(conn: sqlite3.Connection, located: dict[str, tuple[float, float]] | None = None
                ) -> dict[str, dict[tuple[str, str], dict[str, Any]]]:
-    """place_key -> (point_id, mode) -> latest trip from the most trusted provider with a time, among trips routed from
-    the place's present position (trips.is_current): the place's own Google trip, else a KNN range from nearby places' Google trips (filter.knn), else the straight-line estimate, else (no
+    """place_key -> (point_id, mode) -> latest trip from the most trusted provider with a time: the place's own Google
+    trip, else a KNN range from nearby places' Google trips (filter.knn), else the straight-line estimate, else (no
     estimate: transit) the middle of the nearest Google times at any distance (knn.far_estimate). `located`: place_key
     -> (lat, lon) of the located places, already read (the places view is computed over everything)."""
-    from ..trips import is_current
     from .knn import add_knn, cells
 
     out: dict[str, dict[tuple[str, str], dict[str, Any]]] = _Trips(dict)
@@ -48,12 +47,7 @@ def best_trips(conn: sqlite3.Connection, located: dict[str, tuple[float, float]]
         SELECT * FROM (SELECT t.*, ROW_NUMBER() OVER (
             PARTITION BY place_key, point_id, mode, provider ORDER BY id DESC) rn FROM trips t) WHERE rn = 1
     """).fetchall()
-    if located is None:
-        located = {pk: (la, lo) for pk, la, lo in
-                   conn.execute("SELECT place_key, lat, lon FROM places WHERE lat IS NOT NULL")}
     for r in rows:
-        if not is_current(r, located.get(r["place_key"])):
-            continue  # routed from an old position (or before origins were kept): estimate or KNN until re-routed
         key = (r["point_id"], r["mode"])
         cur = out[r["place_key"]].get(key)
         # a trip with a time beats one without (Google found no route: the estimate, or KNN, decides instead)
@@ -62,6 +56,9 @@ def best_trips(conn: sqlite3.Connection, located: dict[str, tuple[float, float]]
             out[r["place_key"]][key] = dict(r)
     sel = cells(conn)
     if sel:
+        if located is None:
+            located = {pk: (la, lo) for pk, la, lo in
+                       conn.execute("SELECT place_key, lat, lon FROM places WHERE lat IS NOT NULL")}
         add_knn(out, located, sel)
     return out
 

@@ -273,8 +273,7 @@ def test_estimates_only_for_places_without_any(conn, tmp_path, monkeypatch):
     for name, cfg in trips.load_point_sets().items():
         for p in trips.nearest_points((37.4, -122.1), trips.load_points().get(name, []), cfg.k):
             for m in cfg.modes:
-                trips.append_trip(conn, "p_a", p.id, m, 10.0, 3000, [], "08:30", "estimate",
-                                  origin=(37.4, -122.1))
+                trips.append_trip(conn, "p_a", p.id, m, 10.0, 3000, [], "08:30", "estimate")
     assert trips.estimate_missing(conn, str(tmp_path / "x.db"))["places_done"] == 1
     assert seen == [["p_b"]]
 

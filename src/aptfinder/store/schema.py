@@ -6,7 +6,6 @@ tables and triggers are created only if missing.
 
 from __future__ import annotations
 
-from .keys import APPROX_PIN_SOURCES
 from .models import CHECKABLE_FIELDS
 
 LOG_TABLES = ["runs", "observations", "links", "trips", "checks", "annotations", "api_calls", "media"]
@@ -65,9 +64,7 @@ CREATE TABLE IF NOT EXISTS trips (
     distance_m        REAL,
     legs              TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(legs)),
     depart_assumption TEXT,
-    provider          TEXT NOT NULL,
-    o_lat             REAL,
-    o_lon             REAL
+    provider          TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS trips_place ON trips(place_key, point_id, mode);
 
@@ -185,7 +182,6 @@ def _views() -> str:
     )
     checked = ",\n        ".join(f"{_overridden(f)} AS {f}" for f in CHECKABLE_FIELDS if f != "price")
     plain = ",\n        ".join(f"{_field_expr(f)} AS {f}" for f in PLAIN_DATA_FIELDS)
-    approx = ", ".join(f"'{s}'" for s in APPROX_PIN_SOURCES)
     return f"""
 CREATE VIEW latest_obs AS
 SELECT * FROM (
@@ -373,10 +369,7 @@ WITH l AS MATERIALIZED (
 )
 SELECT place_key, MAX(p_address) AS address, MAX(p_city) AS city, MAX(p_name) AS property_name,
        MAX(p_operator) AS operator,
-       -- position: a Craigslist pin is an account or area point, not the building; it counts only when no other
-       -- source places the building (store.keys.APPROX_PIN_SOURCES; a Craigslist-only place keeps its pin)
-       COALESCE(AVG(CASE WHEN source NOT IN ({approx}) THEN lat END), AVG(lat)) AS lat,
-       COALESCE(AVG(CASE WHEN source NOT IN ({approx}) AND lat IS NOT NULL THEN lon END), AVG(lon)) AS lon,
+       AVG(lat) AS lat, AVG(lon) AS lon,
        SUM(kind IS NOT 'site_info') AS n_listings, SUM(active AND kind IS NOT 'site_info') AS n_active, COUNT(DISTINCT unit_key) AS n_units,
        group_concat(DISTINCT source) AS sources,
        MIN(price_month) AS min_price_month, MIN(price_per_bed) AS min_price_per_bed,
