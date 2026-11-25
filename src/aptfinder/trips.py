@@ -421,7 +421,7 @@ def sample(conn: sqlite3.Connection, args) -> dict[str, Any]:
     keys = sorted(cands)
     trips = best_trips(conn)
     if args.refine:
-        plan = sampling.refine_plan(trips, pairs, keys, effective_goals(conn), cands, args.frac)
+        plan, notes = sampling.refine_plan(trips, pairs, keys, effective_goals(conn), cands)
         label = "refine"
     elif args.pct:
         plan = sampling.random_plan(trips, pairs, keys, args.pct, args.seed)
@@ -430,6 +430,9 @@ def sample(conn: sqlite3.Connection, args) -> dict[str, Any]:
         plan = sampling.cover_plan(trips, pairs, keys, sampling.located(conn), args.radius_m)
         label = f"cover within {args.radius_m:g} m"
     out = {"plan": label, **sampling.summary(conn, args.db, plan, keys, trips), "google_usage_now": google_usage(conn)}
+    if args.refine:
+        for p, n in notes.items():
+            out["pairs"]["|".join(p)].update(n)
     if args.dry_run:
         return out
     return {**out, "run": route_plan(conn, args.db, plan, label, args.max_elements, args.max_calls)}
@@ -471,8 +474,8 @@ def main(argv: list[str] | None = None) -> None:
     sm.add_argument("--pct", type=float, help="a random sample of this many percent of the candidates")
     sm.add_argument("--seed", type=int)
     sm.add_argument("--refine", action="store_true",
-                    help="route needs_check places and the widest --frac of KNN ranges instead of the cover")
-    sm.add_argument("--frac", type=float, default=0.1)
+                    help="route candidates whose KNN range straddles a goal's limit or is wider than "
+                         "sampling.REFINE_MAX_SPREAD_MIN (2 min), instead of the cover")
     sm.add_argument("--dry-run", action="store_true", help="count the uncached matrix elements per pair; no calls")
     sm.add_argument("--max-elements", type=int, default=1000, help="cap on Route Matrix elements this run")
     args = ap.parse_args(argv)

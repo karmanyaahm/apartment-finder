@@ -109,13 +109,20 @@ def add_knn(trips: dict[str, dict[tuple[str, str], dict[str, Any]]], located: di
 
 def loo_errors(trips: dict[str, dict[tuple[str, str], dict[str, Any]]], located: dict[str, tuple[float, float]],
                keys: list[tuple[str, str]]) -> list[float]:
+    """The errors of `loo_samples`."""
+    return [e for e, _ in loo_samples(trips, located, keys)]
+
+
+def loo_samples(trips: dict[str, dict[tuple[str, str], dict[str, Any]]], located: dict[str, tuple[float, float]],
+                keys: list[tuple[str, str]]) -> list[tuple[float, float]]:
     """Leave-one-out over the places with their own Google trip for any of `keys` ((point, mode); a set cell passes
     every point of the set, pooled): each is predicted from its other Google-routed places within RADIUS_M (up to
     K), exactly as `add_knn` would, and scored against the range padded by rules.KNN_PAD_MIN: 0 inside it, else the
-    minutes outside it. Places with no routed neighbour within RADIUS_M are not scored."""
+    minutes outside it. Places with no routed neighbour within RADIUS_M are not scored. Each sample is (error, width
+    of the unpadded range): sampling.commute_status reads a narrow range's error from narrow ranges only."""
     from .rules import KNN_PAD_MIN
 
-    errs: list[float] = []
+    errs: list[tuple[float, float]] = []
     for key in keys:
         rows = [(pk, *located[pk], ts[key]["minutes"]) for pk, ts in list(trips.items())
                 if pk in located and key in ts and ts[key]["provider"] == "google" and ts[key]["minutes"] is not None]
@@ -126,7 +133,7 @@ def loo_errors(trips: dict[str, dict[tuple[str, str], dict[str, Any]]], located:
                 continue
             t = knn_trip(near, *key)
             lo, hi = t["min"] - KNN_PAD_MIN, t["max"] + KNN_PAD_MIN
-            errs.append(0.0 if lo <= true <= hi else min(abs(true - lo), abs(true - hi)))
+            errs.append((0.0 if lo <= true <= hi else min(abs(true - lo), abs(true - hi)), t["max"] - t["min"]))
     return errs
 
 

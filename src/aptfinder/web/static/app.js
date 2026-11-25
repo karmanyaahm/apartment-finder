@@ -1336,6 +1336,7 @@ async function openPipeline() {
 function computeBlock() {
   const n = filtered().length;
   return `<div class="compute small" id="compute">
+    <div id="k-status" class="scroll-x muted">checking what still needs a sample…</div>
     <div id="k-grid" class="scroll-x">loading cells…</div>
     <p class="muted">A checked cell gets KNN times: a place without its own Google route reads the routes of up to 3 places
       within <span id="k-radius">400</span> m (shown as a range, <b class="src-knn">violet</b>); with none that close it keeps the straight-line estimate.</p>
@@ -1343,7 +1344,7 @@ function computeBlock() {
     <div>Sample: <label><input type="radio" name="s-method" value="cover" checked> cover: every place within
       <select id="s-radius"><option>100</option><option>250</option><option selected>400</option></select> m of a routed place</label>
       <label><input type="radio" name="s-method" value="random"> random <input id="s-pct" type="number" value="10" min="1" max="100" class="num-count">%</label>
-      <label><input type="radio" name="s-method" value="refine"> refine: places too close to call, and the widest 10% of ranges</label></div>
+      <label><input type="radio" name="s-method" value="refine"> refine: candidates whose range straddles a goal's limit or is over 2 min wide</label></div>
     <div>Of: <label><input type="radio" name="s-scope" value="list" checked> current search results (${n})</label>
       <label><input type="radio" name="s-scope" value="zone"> every place in a walk zone</label>
       <label><input type="radio" name="s-scope" value="candidates"> search candidates (in a walk zone, can still pass a goal)</label></div>
@@ -1354,6 +1355,46 @@ function computeBlock() {
     <div id="c-out" class="muted"></div>
     <div id="c-job" class="muted"></div>
     <details id="c-log-box"><summary>Recent computations (each Google call and matrix element is also logged)</summary><div id="c-log">…</div></details></div>`;
+}
+// "Do I still need to sample?" (/api/knn/status): per ticked cell, for the current search results and for every place
+// in a walk zone, the worst-10% / worst-1% expected error, the places whose goal status waits on that commute, and a
+// verdict: done, the cheapest sample that would change something, or settled (no sample picks a place)
+const cellLabel = (k) => { const [p, md] = cellParts(k); return `${p.replace(/^commute_targets:/, "").replace(/^set:/, "nearest ")} × ${MODE_LABEL[md] || md}`; };
+function verdictHtml(v) {
+  if (!v) return "";
+  if (v.state === "done") return '<span class="chip pass">done</span>';
+  if (v.state === "run") return `<span class="chip needs_check">run ${esc(v.method)}: ${v.places} place${v.places === 1 ? "" : "s"}, ${v.elements} element${v.elements === 1 ? "" : "s"}</span>`;
+  return `<span class="muted" title="${esc(v.why || "")}">${esc(v.state)}</span>`;
+}
+function statusHtml(d) {
+  const SCOPES = [["list", "current search results"], ["zone", "all places (walk zones)"]];
+  const err = (c) => (c.p90 == null ? "error unknown" : `p90 ${mins(c.p90)} · p99 ${mins(c.p99)} min`);
+  const cell = (c) => `<td>${err(c)} · ${c.undecided} undecided<br>${verdictHtml(c.verdict)}</td>`;
+  const keys = Object.keys(d.zone.cells);
+  const goals = (x) => Object.entries(x.by_goal).map(([g, n]) => `${esc(g)} ${n}`).join(" · ") || "none";
+  const sampleable = new Set(KNN_META?.modes || []);
+  const untickedNote = (x) => Object.entries(x.unticked).map(([k, n]) => {
+    const md = cellParts(k)[1];
+    return `${n} wait on ${esc(cellLabel(k))}${sampleable.has(md) ? " (tick it to sample it)" : " (not a grid column: no sample can route it; check by hand or change the goal's option)"}`;
+  }).join("; ");
+  const total = (x) => `<td><b>${err(x)} · ${x.undecided} undecided</b><br>${x.done ? '<span class="chip pass">done</span>'
+    : x.undecided && !Object.values(x.cells).some((c) => c.verdict.state === "run") ? '<span class="muted">settled for the ticked cells</span>'
+    : '<span class="chip needs_check">not done</span>'}${x.undecided ? `<br><span class="small">by goal: ${goals(x)}${Object.keys(x.unticked).length ? `; ${untickedNote(x)}` : ""}</span>` : ""}</td>`;
+  return `<table><tr><th>ticked cell</th>${SCOPES.map(([, l]) => `<th>${l}</th>`).join("")}</tr>
+    ${keys.map((k) => `<tr><td>${esc(cellLabel(k))}</td>${SCOPES.map(([s]) => cell(d[s].cells[k] || {})).join("")}</tr>`).join("")}
+    <tr><td><b>all cells</b></td>${SCOPES.map(([s]) => total(d[s])).join("")}</tr></table>
+    <p class="small">p90 / p99: the error a place's shown time may have, worst 10% / worst 1% of the scope's places (own Google
+    route 0; KNN range: leave-one-out error of ranges as wide; estimate only: measured estimate vs Google). Undecided: places
+    whose goal status waits only on this commute. Done = 0 undecided and p99 ≤ ${d.done_p99} min.</p>`;
+}
+async function loadStatus() {
+  const box = $("#k-status");
+  if (!box) return;
+  box.textContent = "checking what still needs a sample…";
+  try {
+    const d = await post("api/knn/status", { place_keys: filtered().map((p) => p.place_key) });
+    box.innerHTML = Object.keys(d.zone.cells).length ? statusHtml(d) : "Tick a cell below to see whether it still needs a sample.";
+  } catch (e) { box.textContent = "Status failed to load: " + e.message; }
 }
 // Per checked cell over the chosen scope: how places get their time, and KNN accuracy by leave-one-out (/api/knn/accuracy)
 function accuracyHtml(cells, scope, pad = 0.5, R = KNN_META?.radius_m ?? 400) {
@@ -1422,8 +1463,18 @@ function knnHelpHtml(d = KNN_META) {
       The best first step.</li>
     <li><b>random X%</b>: X% of <i>all</i> places in the scope, one draw shared by every cell. A pick already routed for a
       cell is dropped for that cell and costs nothing. Leaves gaps in sparse areas.</li>
-    <li><b>refine</b>, after a first sample: places whose time is too close to a goal's limit to call (a range straddling
-      it), plus the widest 10% of ranges.</li></ul>
+    <li><b>refine</b>, after a first sample: only places that can still pass a goal apart from commute rules, and only
+      for cells that goal has a rule on: those whose KNN range straddles the goal's limit, or is more than 2 min wide.
+      A fixed bar, so it runs out: a routed place is never picked again. Places with no routed neighbour (estimate only)
+      are cover's job; the dry run counts them.</li></ul>
+  <p><b>Do I still need to sample?</b> The table at the top, per ticked cell, for the current search results and for every
+    place in a walk zone: <i>p90 / p99</i> = the error a shown time may have for the worst 10% / worst 1% of places
+    (own Google route: 0; KNN range: the leave-one-out error of ranges about as wide, up to or over 2 min; estimate only:
+    the measured estimate-vs-Google error), whole minutes. <i>Undecided</i> = places whose goal status waits only on
+    this commute (every other rule passes). <b>done</b> (green) = 0 undecided and p99 ≤ 2 min. Otherwise it names the cheaper
+    of cover (${R} m) and refine that would pick something, with its elements; <i>settled</i> = no sample picks a
+    place (what is left is KNN's error at places that cannot pass a goal). The total row lists places waiting on a
+    commute no ticked cell covers (tick it; transit cannot be sampled). The dry run shows undecided now → after.</p>
   <p><b>Of</b>: the current search results; every place in a walk zone; or search candidates (in a walk zone and can
     still pass a goal), usually the right one.</p>
   <p><b>Reading the dry run.</b> The first line's "N not yet routed, over all cells" adds up each cell's picks that
@@ -1475,7 +1526,7 @@ async function drawKnnGrid() {
     }).join("")}</tr>`).join("")}</table><p class="muted small">${esc(bill)}</p>`;
   $$("#k-grid input[data-cell]").forEach((cb) => cb.addEventListener("change", async () => {
     const cells = $$("#k-grid input[data-cell]:checked").map((x) => cellParts(x.dataset.cell));
-    try { await post("api/knn/cells", { cells }); toast(`${cells.length} cell${cells.length === 1 ? "" : "s"} saved`); loadAccuracy(); await loadPlaces(); }
+    try { await post("api/knn/cells", { cells }); toast(`${cells.length} cell${cells.length === 1 ? "" : "s"} saved`); loadAccuracy(); loadStatus(); await loadPlaces(); }
     catch (e) { toast("Saving cells failed: " + e.message, 6000); cb.checked = !cb.checked; }
   }));
 }
@@ -1496,7 +1547,7 @@ function wireCompute() {
   };
   ["#c-n", "#c-left"].forEach((id) => $(id).addEventListener("input", lock));
   $("#k-help").addEventListener("click", openKnnHelp);
-  drawKnnGrid().then(loadAccuracy);
+  drawKnnGrid().then(() => { loadAccuracy(); loadStatus(); });
   $$("input[name=s-scope]").forEach((el) => el.addEventListener("change", loadAccuracy));
   loadComputeLog();
   ["#s-radius", "#s-pct", ...$$("input[name=s-method]"), ...$$("input[name=s-scope]")].forEach((el) =>
@@ -1514,6 +1565,8 @@ function wireCompute() {
       const head = spec.method === "random" ? `${spec.pct}% of ${d.scope} places = ${Math.round(d.scope * spec.pct / 100)} places (${places} not yet routed, over all cells)`
         : spec.method === "cover" ? `cover within ${spec.radius_m} m of ${d.scope} places: ${places} picks`
         : `refine over ${d.scope} places: ${places} places`;
+      const far = spec.method === "refine" ? Object.values(d.pairs).reduce((a, v) => a + (v.no_neighbour || 0), 0) : 0;
+      const h = d.hinge, hk = (k) => h.by_pair[k] || 0, hka = (k) => h.after.by_pair[k] || 0;
       const rows = Object.entries(d.pairs).map(([k, v]) => {
         const [p, m] = cellParts(k);
         // places x routes per place = the nominal elements; fewer are billed when legs are cached or shared
@@ -1521,11 +1574,15 @@ function wireCompute() {
         const el = v.elements === nominal ? `${v.elements}` : `${v.elements} <span class="muted">(${nominal - v.elements > 0
           ? `${nominal - v.elements} cached or shared` : `${v.elements - nominal} shared legs not cached yet`})</span>`;
         return `<tr><td>${esc(p.replace(/^commute_targets:/, "").replace(/^set:/, "nearest "))} × ${esc(MODE_LABEL[m] || m)}</td>
-          <td>${v.places} × ${c.upTo ? "up to " : ""}${c.n} = ${nominal}</td><td>${el}</td><td>${v.covered_before} → ${v.covered_after} of ${d.scope}</td></tr>`;
+          <td>${v.places} × ${c.upTo ? "up to " : ""}${c.n} = ${nominal}</td><td>${el}</td><td>${v.covered_before} → ${v.covered_after} of ${d.scope}</td>
+          <td>${hk(k)} → ${hka(k)}</td></tr>`;
       }).join("");
       out.innerHTML = `${esc(head)}, <b>${d.elements}</b> Route Matrix elements (${esc(d.modes.join(", ") || "none")})
         · this month ${u.matrix_elements}/${u.matrix_cap} elements used
-        <div class="scroll-x"><table><tr><th>cell</th><th>places × routes per place</th><th>elements (uncached)</th><th>with a routed place within ${d.radius_m} m</th></tr>${rows}</table></div>
+        <div class="scroll-x"><table><tr><th>cell</th><th>places × routes per place</th><th>elements (uncached)</th><th>with a routed place within ${d.radius_m} m</th>
+          <th title="places whose goal status waits only on this commute; after: if each routed place's time settles it (an upper bound)">undecided: now → after</th></tr>${rows}</table></div>
+        <div>Undecided on any commute: ${h.total} → ${h.after.total}${Object.keys(h.by_goal).length ? ` (${Object.entries(h.by_goal).map(([g, n]) => `${esc(g)} ${n} → ${h.after.by_goal[g] || 0}`).join(", ")})` : ""}</div>
+        ${far ? `<div class="reason needs_check">${far} candidate place-cells have no routed neighbour within ${d.radius_m} m (estimate only): refine skips them, use cover.</div>` : ""}
         ${d.accuracy ? `<div class="scroll-x">${accuracyHtml(d.accuracy, d.scope)}</div>` : ""}
         ${d.skipped.length ? `<span class="reason needs_check">Skipped: ${esc(d.skipped.join("; "))}</span>` : ""}
         ${d.elements > d.left ? `<br><span class="reason fail">Over the monthly matrix cap (${d.left} left): the run stops at the cap.</span>` : ""}`;

@@ -179,6 +179,12 @@ def test_knn_cells_and_sampling_endpoints(tmp_path, monkeypatch):
     assert set(acc["loo"]) == {"n", "median", "p95", "inside_pct"}
     a2 = c.post("/api/knn/accuracy", json={"scope": "list", "place_keys": keys}).json()
     assert a2["cells"][f"{META}|drive"] == acc and a2["pad_min"] == 0.5
+    ref = c.post("/api/sample/dry_run", json={"method": "refine", "scope": "zone"}).json()
+    assert set(ref["pairs"][f"{META}|drive"]) >= {"straddle", "wide", "no_neighbour"}
+    assert set(ref["hinge"]) == {"total", "by_goal", "by_pair", "after"}
+    st = c.post("/api/knn/status", json={"place_keys": keys}).json()
+    assert st["list"]["scope"] == len(keys) and f"{META}|drive" in st["zone"]["cells"]
+    assert st["list"]["cells"][f"{META}|drive"]["verdict"]["state"] in ("done", "run", "settled", "unknown")
     cover = c.post("/api/sample/dry_run", json={"method": "cover", "radius_m": 400, "scope": "list",
                                                 "place_keys": keys}).json()
     assert cover["pairs"][f"{META}|drive"]["covered_after"] == len(keys)
@@ -274,3 +280,64 @@ def test_restart_closes_the_dashboards_open_commute_runs_only(tmp_path):
     assert rows == {mine: "error", cli: "running"}
     assert conn.execute("SELECT error FROM runs WHERE id = ?", (mine,)).fetchone()[0] == INTERRUPTED
     assert TestClient(create_app(db)).get("/api/compute/status").json() == {"state": "idle"}  # closed once
+
+
+def _cfg(rules):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(goals={"lease": SimpleNamespace(rules=rules, nice=[])})
+
+
+def test_refine_picks_wide_or_straddling_ranges_of_candidates_only_and_runs_out():
+    from aptfinder.sampling import REFINE_MAX_SPREAD_MIN, refine_plan
+
+    pair = (META, "drive")
+    cfg = _cfg([{"type": "commute_any", "target": META, "options": [{"mode": "drive", "max": 30}]}])
+    # a (20) and c (25) routed; b, x between them read a 20-25 range (5 min wide); d is 5 km away (estimate only)
+    loc = {"a": (37.400, -122.10), "b": (37.401, -122.10), "c": (37.402, -122.10), "x": (37.4012, -122.10),
+           "d": (37.45, -122.10)}
+
+    def trips_with(routed):
+        t = _trips([(pk, pair, _g(m)) for pk, m in routed.items()]
+                   + [("d", pair, {"provider": "estimate", "minutes": 31.0})])
+        add_knn(t, loc, [pair])
+        return t
+
+    t = trips_with({"a": 20.0, "c": 25.0})
+    assert t["b"][pair]["max"] - t["b"][pair]["min"] > REFINE_MAX_SPREAD_MIN
+    goals_of = {"b": {"lease"}, "d": {"lease"}, "x": set()}  # x fails the goal on price: never routed
+    plan, notes = refine_plan(t, [pair], sorted(loc), cfg, goals_of)
+    assert plan[pair] == ["b"] and notes[pair] == {"straddle": 0, "wide": 1, "no_neighbour": 1}
+    # after routing b, nothing a candidate reads is wide any more: refine converges
+    t2 = trips_with({"a": 20.0, "c": 25.0, "b": 22.0})
+    assert refine_plan(t2, [pair], sorted(loc), cfg, goals_of)[0][pair] == []
+    # a narrow range straddling the limit is picked whatever its width
+    t3 = trips_with({"a": 29.5, "c": 30.0})
+    assert refine_plan(t3, [pair], sorted(loc), cfg, goals_of)[1][pair]["straddle"] == 1
+
+
+def test_hinges_count_places_waiting_only_on_a_commute_and_the_plan_settles_them():
+    from aptfinder.sampling import commute_status, hinge_counts, hinges
+
+    pair = (META, "drive")
+    cfg = _cfg([{"type": "commute_any", "target": META, "options": [{"mode": "drive", "max": 30}]}])
+    loc = {"a": (37.400, -122.10), "b": (37.401, -122.10), "x": (37.4012, -122.10), "c": (37.402, -122.10)}
+    t = _trips([("a", pair, _g(29.5)), ("c", pair, _g(30.0))])
+    add_knn(t, loc, [pair])
+    commute = ("needs_check", "too close", "commute_any")
+    res = {"listings": {"lease": {
+        ("s", "1"): {"place_key": "b", "decides": True, "status": "needs_check",
+                     "reasons": [("pass", "price", "max"), commute]},
+        ("s", "2"): {"place_key": "x", "decides": True, "status": "needs_check",  # price unknown too: not only commute
+                     "reasons": [("needs_check", "price unknown", "max"), commute]},
+        ("s", "3"): {"place_key": "a~op", "decides": True, "status": "pass", "reasons": [("pass", "", "max")]}}}}
+    h = hinges(res, t, cfg, loc)
+    assert h == {"b": {"lease": {pair}}}
+    hc = hinge_counts(h, sorted(loc), [pair], {pair: ["b"]})
+    assert (hc["total"], hc["by_goal"], hc["by_pair"]) == (1, {"lease": 1}, {f"{META}|drive": 1})
+    assert hc["after"]["total"] == 0
+    st = commute_status(t, [pair], sorted(loc), h, lambda p: [(0.0, 0.5)], lambda p: [3.0], lambda m, p: (1, 1))
+    row = st["cells"][f"{META}|drive"]
+    assert row["undecided"] == 1 and row["verdict"]["state"] == "run" and (row["p90"], row["p99"]) == (0.0, 0.0)
+    st = commute_status(t, [pair], sorted(loc), {}, lambda p: [(0.0, 0.5)], lambda p: [3.0], lambda m, p: (0, 0))
+    assert st["cells"][f"{META}|drive"]["verdict"]["state"] == "done" and st["done"]
