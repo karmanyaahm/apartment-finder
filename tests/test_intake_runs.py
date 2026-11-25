@@ -365,3 +365,46 @@ def test_settle_rereads_each_apify_run_at_close(monkeypatch):
     recs = [{"run": "a,b", "usd": 0.0341}, {"run": "c", "usd": 0.01}]
     assert apify.settle(recs) == pytest.approx(0.152)  # c unreadable: keeps its at-end value
     assert recs[0]["usd"] == pytest.approx(0.142)
+
+
+def test_reparse_changed_only_appends_only_changed_active_rows_of_this_file(conn, tmp_path, monkeypatch):
+    """A parser that now keeps a new field: only the rows it changes get a row; unchanged, retired and other files'
+    listings keep their latest row and their active state (no supersede, no resurrection)."""
+    import json as _json
+
+    from aptfinder.intake.base import reparse
+    from aptfinder.store import append_observation, finish_run, start_run
+
+    raw = tmp_path / "run1.json"
+    raw.write_text(_json.dumps({"actor": "a/b", "items": [{"id": i} for i in ("same", "new-field", "gone", "absent")]}))
+    other = tmp_path / "run2.json"
+    r1 = start_run(conn, "intake", "fake")
+    d = {"lat": 37.4, "lon": -122.1, "beds": 2}
+    for sid in ("same", "new-field", "gone"):
+        append_observation(conn, r1, "fake", sid, d, price=3000.0, price_basis="month", raw_path=str(raw))
+    append_observation(conn, r1, "fake", "only-in-db", d, raw_path=str(raw))  # the file no longer gives it
+    finish_run(conn, r1, "ok", {})
+    gone = conn.execute("SELECT id FROM observations WHERE source_id = 'gone'").fetchone()[0]
+    conn.execute("INSERT INTO checks (ts, author, queue, field, verdict, observation_id, stored_value, true_value) "
+                 "VALUES ('2099-01-01', 'user', 'adhoc', 'active', 'wrong', ?, '\"offered\"', '\"gone\"')", (gone,))
+    conn.commit()
+    r2 = start_run(conn, "intake", "fake", {"scope": "targeted"})  # a newer file holds 'same' now: not this file's to touch
+    append_observation(conn, r2, "fake", "same", d, price=3000.0, price_basis="month", raw_path=str(other))
+    finish_run(conn, r2, "ok", {})
+
+    def parse(item, cfg):
+        extra = {"complex_home_count": 5} if item["id"] in ("new-field", "gone") else None
+        return Parsed(item["id"], None, ObservationData(**d, extra=extra), price=3000.0, price_basis="month")
+
+    import aptfinder.intake.base as b
+    monkeypatch.setattr(b, "load_sources", lambda: {"spend": {}})
+    adapter = Adapter(name="fake", build_input=lambda cfg, areas: {}, parse=parse)
+    before = dict(conn.execute("SELECT source_id, active FROM listings").fetchall())
+    res = reparse(conn, adapter, str(raw), changed_only=True)
+    assert (res["observations"], res["other_file"], res["inactive"], res["not_held"]) == (1, 1, 1, 1)
+    after = dict(conn.execute("SELECT source_id, active FROM listings").fetchall())
+    assert after == before == {"same": 1, "new-field": 1, "gone": 0, "only-in-db": 1}
+    assert conn.execute("SELECT json_extract(data, '$.extra.complex_home_count') FROM listings "
+                        "WHERE source_id = 'new-field'").fetchone()[0] == 5
+    # an unchanged parse appends nothing the second time
+    assert reparse(conn, adapter, str(raw), changed_only=True)["unchanged"] == 1

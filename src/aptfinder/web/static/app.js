@@ -395,7 +395,8 @@ function ruleTemplates() {
     ["parking included", { type: "equals", field: "parking_included", value: true }],
     ["parking spots at least", { type: "min", field: "parking_spots", value: 1 }],
     ["parking cost at most ($/month)", { type: "max", field: "parking_usd_month", value: 100 }],
-    ["apartment building (≥ N units)", { type: "min", field: "building_units", value: 5 }],
+    ["apartment building", { type: "equals", field: "is_apartment_building", value: true }],
+    ["units in building at least", { type: "min", field: "building_units", value: 5 }],
     ["available for dates", { type: "dates_cover", start: new Date().toISOString().slice(0, 10), end: new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10) }],
     ["field known", { type: "known", field: "sqft" }],
     ["net commute (the commute rules counted in it)", { type: "net_commute", agg: $("#agg").value || "total", max: 90 }],
@@ -405,7 +406,7 @@ const opt = (v, label, sel) => `<option value="${esc(v)}"${String(v) === String(
 const FIELD_LABEL = { price: "price", price_month: "price / month", price_per_bed: "price / bed", price_per_person: "price / person", beds: "beds", baths: "baths",
   sqft: "sqft", term: "term", furnished: "furnished", private_bath: "private bath", kind: "kind", restriction: "who may rent",
   parking_included: "parking included", parking_spots: "parking spots", parking_usd_month: "parking $/month",
-  building_units: "units in building" };
+  building_units: "units in building", is_apartment_building: "apartment building" };
 const fieldName = (f) => FIELD_LABEL[f] || f.replace(/_/g, " ");
 // one rule row's inputs; each input names the path it sets in data-p ("value", "options.0.max", ...); `part` is
 // "rules" (must-haves) or "nice"
@@ -840,9 +841,9 @@ function parkingFact(pk, fails = []) {
 
 // How many units the building has (filter.place_building_units): "🏢 167 units", "🏢 ≥ 7 units" (a floor: the units
 // and plans one source lists), "🏠 single-family", "🏢 apartment building, units ?"; evidence and source on hover;
-// red / amber when the selected goal's building_units rule fails or needs a check on it
+// red / amber when the selected goal's building_units or is_apartment_building rule fails or needs a check on it
 function buildingFact(b, fails = []) {
-  const mk = markFor(fails, (x) => x.f === "building_units");
+  const mk = markFor(fails, (x) => x.f === "building_units" || x.f === "is_apartment_building");
   if (!b) return mk ? `<span${mk}>🏢 units ?</span>` : "";
   const text = b.house ? `🏠 ${b.type}` : b.value == null ? `🏢 ${b.type}, units ?`
     : `🏢 ${b.floor ? "≥ " : ""}${num(b.value)} unit${b.value === 1 ? "" : "s"}`;

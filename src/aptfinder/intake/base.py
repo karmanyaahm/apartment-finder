@@ -13,6 +13,7 @@ from typing import Any, Callable
 from .. import identity, settings
 from ..config import Area, load_areas
 from ..store import COMMIT_EVERY, append_observation, finish_run, start_run
+from ..store.keys import content_hash
 from ..store.models import ObservationData
 from .apify import ActorRun, account_remaining_usd, run_actor, run_record, settle
 
@@ -360,14 +361,19 @@ def done(cov: dict, source: str, area_id: str) -> bool:
 
 
 def reparse(conn: sqlite3.Connection, adapter: Adapter, raw_file: str, covers: str | None = None,
-            rebuild_identity: bool = True) -> dict[str, Any]:
+            rebuild_identity: bool = True, changed_only: bool = False) -> dict[str, Any]:
     """Parse a saved raw file again as a new (targeted) run. Costs nothing; appends observations.
 
     `covers` ('complete' or 'partial') credits the file's areas in the coverage ledger: for a scrape made outside
     this database (a trial on a copy) whose areas were never recorded here. Without it a reparse is never coverage
     (the original run already is). `covers='auto'` (adapters with `area_failures`) recomputes each area's state from
     the file: partial if an item says so, else complete (empty when no item reached it), e.g. to correct a run
-    whose areas were all marked partial by one failed page."""
+    whose areas were all marked partial by one failed page.
+
+    `changed_only`: append a row only for a listing that is active, whose latest observation came from this raw file,
+    and whose parse now differs from its newest intake observation (a parser that keeps a new field). Nothing else
+    moves: the run (`params.changed_only`) supersedes none of the file's listings it skips (view `listings_base`),
+    never adds a listing, and an inactive one stays retired (a new row's run id would bring it back)."""
     if covers == "auto" and not adapter.area_failures:
         raise ValueError(f"--covers auto needs an adapter that reports failed areas; {adapter.name} does not")
     from pathlib import Path
@@ -384,8 +390,21 @@ def reparse(conn: sqlite3.Connection, adapter: Adapter, raw_file: str, covers: s
         if not area_ids:
             raise ValueError(f"{raw_file} names no {adapter.area_kind} area of config/areas.toml: {sorted(named)}")
         params["areas"] = area_ids
+    current: dict[str, tuple[int, str]] = {}  # source_id -> (active, raw_path of the latest observation)
+    last_hash: dict[str, str] = {}  # source_id -> content hash of the newest intake observation
+    if changed_only:
+        if covers:
+            raise ValueError("--changed-only never credits coverage; drop --covers")
+        params["changed_only"] = True
+        current = {r[0]: (r[1], r[2] or "") for r in conn.execute(
+            "SELECT source_id, active, raw_path FROM listings_base WHERE source = ?", (adapter.name,))}
+        for sid, h in conn.execute("SELECT o.source_id, o.content_hash FROM observations o JOIN runs r ON r.id = o.run_id "
+                                   "WHERE o.source = ? AND r.component = 'intake' ORDER BY o.id", (adapter.name,)):
+            last_hash[sid] = h
     run_id = start_run(conn, "intake", adapter.name, params)
     counts = {"items": len(blob["items"]), "observations": 0, "unparsed": 0, "skipped": 0}
+    if changed_only:
+        counts.update(unchanged=0, inactive=0, other_file=0, not_held=0)
     seen: set[str] = set()
     gids = blob.get("areas") or []
     try:
@@ -404,6 +423,16 @@ def reparse(conn: sqlite3.Connection, adapter: Adapter, raw_file: str, covers: s
                 seen.add(q.source_id)
                 if aid:
                     q.data.extra = {**(q.data.extra or {}), "area": aid}
+                if changed_only:
+                    cur = current.get(q.source_id)
+                    why = ("not_held" if cur is None else "inactive" if not cur[0]
+                           else "other_file" if not cur[1].endswith(raw_file) else
+                           "unchanged" if content_hash(q.data.model_dump(exclude_none=True), q.price, q.price_basis,
+                                                       q.query_checkin, q.query_checkout) == last_hash.get(q.source_id)
+                           else None)
+                    if why:
+                        counts[why] += 1
+                        continue
                 append_observation(conn, run_id, adapter.name, q.source_id, q.data, url=q.url, price=q.price,
                                    price_basis=q.price_basis, query_checkin=q.query_checkin,
                                    query_checkout=q.query_checkout, raw_path=raw_file, commit=False)

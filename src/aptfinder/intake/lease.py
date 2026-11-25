@@ -121,6 +121,9 @@ def zillow_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] | No
     extra = {"zpid": zpid, "group_type": p.get("groupType"), "days_on_zillow": p.get("daysOnZillow"),
              "rent_zestimate": item.get("rentZestimate"), "special_offer": item.get("specialOffer"),
              **({"required_monthly_fees": fees} if (fees := zillow_fees(p)) else {}),
+             # an apartmentComplex card groups this many homes matching the search: the homes listed, a lower bound
+             # on the complex's units, never its total (filter.building); only when given, so other rows hash as before
+             **({"complex_home_count": n} if isinstance(n := p.get("matchingHomeCount"), int) and n > 0 else {}),
              # the whole gallery (up to 24), not just the cover photo
              "images": ([u for u in ((p.get("media") or {}).get("allPropertyPhotos") or {}).get("highResolution") or []
                          if u][:24]

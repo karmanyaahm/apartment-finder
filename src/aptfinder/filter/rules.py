@@ -344,6 +344,8 @@ def combine(statuses: list[str]) -> str:
 # evaluate time; under a goal without people it is needs_check
 NUMERIC_FIELDS = ["price", "price_month", "price_per_bed", "price_per_person", "beds", "baths", "sqft",
                   "parking_spots", "parking_usd_month", "building_units"]
+# is_apartment_building: filter.building (True: 5+ units or an apartment-building type with no house type; False:
+# a house type; else unknown), the same for every listing there
 EQUALS_FIELDS: dict[str, list[Any]] = {"term": ["short", "long"], "furnished": [True, False],
                                        "private_bath": [True, False],
                                        "kind": ["apartment", "house", "townhome", "entire_place", "room"],
@@ -351,9 +353,10 @@ EQUALS_FIELDS: dict[str, list[Any]] = {"term": ["short", "long"], "furnished": [
                                        "restriction": ["none", "income", "senior", "veterans", "student", "employer",
                                                        "other"],
                                        # a space comes with the rent at no extra charge; false: none, street only, paid
-                                       "parking_included": [True, False]}
+                                       "parking_included": [True, False],
+                                       "is_apartment_building": [True, False]}
 KNOWN_FIELDS = [*NUMERIC_FIELDS, "furnished", "private_bath", "term", "kind", "available_from", "address",
-                "property_name", "restriction", "parking_included"]
+                "property_name", "restriction", "parking_included", "is_apartment_building"]
 # type -> (label, required keys, optional keys): what the editor offers and validate_rule checks
 RULE_TYPES: dict[str, tuple[str, list[str], list[str]]] = {
     "max": ("field at most", ["field", "value"], ["strict"]),

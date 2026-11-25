@@ -162,6 +162,8 @@ def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None, trips:
         r["building_units"] = b["value"] if b else None
         r["building_units_floor"] = bool(b and b["floor"])
         r["building_units_evidence"] = building_note(b)
+        r["is_apartment_building"] = b["apartment_building"] if b else None  # filter.building, 5+ units or the type
+        r["is_apartment_building_evidence"] = b["apartment_evidence"] if b else None
         if r["place_key"] in pooled:
             own_am = json.loads(r["amenities"]) if isinstance(r.get("amenities"), str) else (r.get("amenities") or [])
             r["amenities"] = sorted(pooled[r["place_key"]] | set(own_am))

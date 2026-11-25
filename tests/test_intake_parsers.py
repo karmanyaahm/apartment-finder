@@ -126,6 +126,9 @@ def test_zillow_building_splits_by_bedrooms():
     assert [p.source_id for p in out] == ["466646297:studio", "466646297:3bd"]
     assert out[1].data.beds == 3 and out[1].data.baths is None and out[1].price == 7922
     assert out[1].data.address == "111 Lena Way, Mountain View, CA 94040"  # placeholder unit dropped
+    assert "complex_home_count" not in out[1].data.extra  # only when the card gives one (rows hash as before)
+    item["rawData"]["property"]["matchingHomeCount"] = 10
+    assert all(p.data.extra["complex_home_count"] == 10 for p in ADAPTERS["zillow"].parse(item, {}))
 
 
 def test_apartments_units_plans_and_single_rentals():

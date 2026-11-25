@@ -70,3 +70,51 @@ def test_a_floor_never_fails_a_min_rule():
     assert evaluate(_rule("max", 2), floor, Ctx())[0] == FAIL
     assert evaluate(_rule("max", 4), floor, Ctx())[0] == CHECK
     assert evaluate(_rule("min", 5), {"building_units": None}, Ctx())[0] == CHECK
+
+
+def test_zillow_complex_home_count_is_a_floor():
+    # an apartmentComplex card groups 22 matching homes: at least 22 units, more than its 3 bedroom rows say
+    rows = [row("zillow", floor_plan=f"{n}bd", group_type="apartmentComplex", complex_home_count=22) for n in range(3)]
+    b = place_building_units(rows)
+    assert (b["value"], b["floor"], b["source"], b["evidence"]) == (22, True, "zillow",
+                                                                     "Zillow: 22 homes listed in the complex")
+    # the most of a place's cards, never their sum; more plans listed elsewhere win
+    rows = [row("zillow", group_type="apartmentComplex", complex_home_count=n) for n in (2, 3)]
+    assert place_building_units(rows)["value"] == 3
+    rows += [row("apartments_com", floor_plan=f"p{i}") for i in range(4)]
+    assert place_building_units(rows)["source"] == "apartments_com"
+    # a townhome on a card of 6 homes: at least 6 units, not a house
+    b = place_building_units([row("zillow", kind="townhome", group_type="apartmentComplex", complex_home_count=6)])
+    assert (b["value"], b["floor"], b["house"]) == (6, True, False)
+
+
+def test_is_apartment_building():
+    def ab(*rows):
+        return place_building_units(list(rows))["apartment_building"]
+
+    assert ab(row("rentcafe", kind="site_info", units_total=167)) is True  # 5+ units
+    assert ab(*[row("apartments_com", kind="apartment", unit=str(i), property_type="Condo") for i in range(5)]) is True
+    assert ab(row("zillow", group_type="apartmentComplex")) is True  # building-level type, no house evidence
+    assert ab(row("google_places", kind="site_info", primary_type="apartment_building")) is True
+    assert ab(row("zumper", property_type=4)) is True
+    assert ab(row("direct", kind="site_info")) is True  # the building's own site
+    assert ab(row("zillow", kind="house")) is False
+    assert ab(row("zillow", kind="townhome")) is False
+    assert ab(row("craigslist", housing_type="duplex")) is False
+    # unknown: a house type against apartment evidence; a floor of 2 to 4 on a townhome card; unit-level types;
+    # a stated small count
+    assert ab(row("zillow", kind="townhome", group_type="apartmentComplex")) is None
+    assert ab(row("zillow", kind="townhome", group_type="apartmentComplex", complex_home_count=3)) is None
+    assert ab(row("craigslist", housing_type="apartment")) is None
+    assert ab(row("craigslist", description="only two units in the building")) is None
+    assert "apartmentComplex" in place_building_units([row("zillow", group_type="apartmentComplex")])["apartment_evidence"]
+
+
+def test_is_apartment_building_rule():
+    rule = {"type": "equals", "field": "is_apartment_building", "value": True}
+    assert evaluate(rule, {"is_apartment_building": True}, Ctx())[0] == PASS
+    assert evaluate(rule, {"is_apartment_building": 1}, Ctx())[0] == PASS  # SQLite's JSON true
+    st, why = evaluate(rule, {"is_apartment_building": False, "is_apartment_building_evidence": "kind house (zillow)"},
+                       Ctx())
+    assert st == FAIL and "kind house (zillow)" in why
+    assert evaluate(rule, {"is_apartment_building": None}, Ctx())[0] == CHECK

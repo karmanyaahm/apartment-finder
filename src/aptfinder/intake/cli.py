@@ -3,7 +3,7 @@
   aptf-intake coverage                         # what's done and what's left, per source and area
   aptf-intake run zillow                       # every not-yet-covered area of the source's kind, one batched run
   aptf-intake run zillow --area 94301 --area 94025 [--reload]
-  aptf-intake reparse <source> <raw file> [--covers complete|partial|auto]   # re-ingest saved output (free)
+  aptf-intake reparse <source> <raw file> [--covers complete|partial|auto] [--changed-only]   # re-ingest saved output (free)
   aptf-intake discover-sites [--limit 5] [--dry-run]   # find websites of buildings in a station walk zone
   aptf-intake promote-sites [--limit 100] [--retry-failed] [--dry-run]
   aptf-intake render [--site ID] [--retry-failed] [--dry-run]   # every site in the list by default
@@ -92,6 +92,9 @@ def main(argv: list[str] | None = None) -> None:
     rp.add_argument("--covers", choices=["complete", "partial", "auto"],
                     help="credit the file's areas in the coverage ledger (a trial scraped on another copy); auto: "
                          "each area's state from the file (portfolio: only a city with a failed page is partial)")
+    rp.add_argument("--changed-only", action="store_true",
+                    help="append only active listings whose latest row came from this file and whose parse changed "
+                         "(a parser that keeps a new field); retires, supersedes and resurrects nothing")
     rp.add_argument("--no-followup", action="store_true", help="do not rebuild identity or estimate commutes afterwards")
     ds = sub.add_parser("discover-sites", help="find community websites with a local headless Claude (web search "
                                                "only), then fetch and address-check them through Apify")
@@ -203,7 +206,8 @@ def main(argv: list[str] | None = None) -> None:
         print(json.dumps({**c, "room": room, "guard": "refuses" if room is None or room < 0.02 else "allows"}))
         return
     if args.cmd == "reparse":
-        res = reparse(conn, ADAPTERS[args.source], args.raw_file, args.covers, rebuild_identity=False)
+        res = reparse(conn, ADAPTERS[args.source], args.raw_file, args.covers, rebuild_identity=False,
+                      changed_only=args.changed_only)
         print(json.dumps(res, indent=1))
         from .extract import after_intake  # the new rows hide earlier readings: apply cached ones (free)
 

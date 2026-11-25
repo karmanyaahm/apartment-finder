@@ -301,6 +301,7 @@ SELECT lo.source, lo.source_id, lo.url, lo.id AS obs_id, lo.run_id, lo.observed_
                 SELECT 1 FROM runs r
                 WHERE r.source = lo.source AND r.id > lo.run_id AND r.status = 'ok'
                   AND json_extract(r.params, '$.reparse_of') IS NOT NULL
+                  AND json_extract(r.params, '$.changed_only') IS NULL  -- appends only what changed: skips are kept
                   AND lo.raw_path LIKE '%' || json_extract(r.params, '$.reparse_of')) THEN 0
             ELSE 1 END AS active,
        cl.place_key, cl.unit_key,

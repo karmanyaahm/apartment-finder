@@ -7,10 +7,17 @@ Precedence (first that knows wins):
 2. a house type: Zillow / Apartments.com single family, Craigslist house / townhouse / duplex, Furnished Finder House,
    Airbnb '... home' -> 1 (duplex 2), unless the floor below says more; unknown when another row says apartment
    building (a Zillow townhome inside an apartmentComplex card);
-3. the floor: the most distinct units or floor plans one source lists at the place (a plan has at least one unit).
-   It is a lower bound (`floor`): a `min` rule passes when it already reaches the limit, else needs_check, never fail.
+3. the floor: the most distinct units or floor plans one source lists at the place (a plan has at least one unit),
+   or the most homes a Zillow apartmentComplex card groups (`extra.complex_home_count`, the homes matching the
+   search, never the complex's total). It is a lower bound (`floor`): a `min` rule passes when it already reaches the
+   limit, else needs_check, never fail.
 A type that only says 'apartment building' (Google Places, Zillow apartmentComplex, Zumper building, Apartments.com,
 RentCafe or an own site) gives no number: the value stays unknown and the card names the type.
+
+`apartment_building` (the goal field `is_apartment_building`): True when the value or floor reaches 5 units, or a
+building-level type says apartment building and no listing there gives a house type; False when a house type decided
+the value (single-family, townhome, duplex); else None (unknown). Unit-level types (a Craigslist, Airbnb or Furnished
+Finder 'apartment') and a stated 2 to 4 units decide nothing.
 """
 
 from __future__ import annotations
@@ -77,6 +84,7 @@ def place_building_units(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     listings (any status, site_info included) with `data` parsed."""
     rows = sorted(rows, key=lambda x: _rank(x["source"]))
     stated, house, apt = None, None, None
+    zcount = 0  # the most homes a Zillow apartmentComplex card at the place groups
     plans: dict[str, set[str]] = {}
     for x in rows:
         src, d = x["source"], x.get("data") or {}
@@ -101,6 +109,8 @@ def place_building_units(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
                            else "apartment"}
             elif src in BUILDING_SOURCES and not (src == "apartments_com" and extra.get("property_type")):
                 apt = {"source": src, "evidence": f"listed as a community on {src}", "type": "apartment building"}
+        if src == "zillow" and isinstance(extra.get("complex_home_count"), int):
+            zcount = max(zcount, extra["complex_home_count"])
         kind = x.get("kind")
         label = (x.get("unit") or "", x.get("floor_plan") or "")
         if kind not in ("site_info", "room") and any(label):
@@ -108,6 +118,28 @@ def place_building_units(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     floor = max(((len(v), s) for s, v in plans.items()), default=(0, None), key=lambda t: (t[0], -_rank(t[1])))
     floor_d = {"value": floor[0], "floor": True, "source": floor[1],
                "evidence": f"{floor[0]} units or floor plans listed"} if floor[0] >= 2 else None
+    if zcount >= 2 and zcount > floor[0]:
+        floor_d = {"value": zcount, "floor": True, "source": "zillow",
+                   "evidence": f"Zillow: {zcount} homes listed in the complex"}
+    b = _units(stated, house, apt, floor_d)
+    if b is not None:
+        b["apartment_building"], b["apartment_evidence"] = _apartment_building(b, house, apt)
+    return b
+
+
+def _apartment_building(b: dict[str, Any], house: dict | None, apt: dict | None) -> tuple[bool | None, str]:
+    """(True: 5+ units, stated or a floor, or a building-level apartment type with no house type at the place;
+    False: a house type decided the value; None otherwise (rule 5: unknown never rejects), its evidence and source)."""
+    if b["value"] is not None and b["value"] >= 5:
+        return True, building_note(b)
+    if b["house"]:
+        return False, building_note(b)
+    if apt and apt["type"] == "apartment building" and not house:
+        return True, f"{apt['evidence']} ({apt['source']})"
+    return None, building_note(b)
+
+
+def _units(stated, house, apt, floor_d) -> dict[str, Any] | None:
     if stated:
         return {**stated, "floor": False, "house": False, "type": "stated"}
     if house and apt and not (floor_d and floor_d["value"] > house["value"]):
@@ -137,9 +169,11 @@ def building_units_by_place(conn) -> dict[str, dict[str, Any]]:
                                     json_extract(data, '$.extra.property_type') AS property_type,
                                     json_extract(data, '$.extra.housing_type') AS housing_type,
                                     json_extract(data, '$.extra.group_type') AS group_type,
-                                    json_extract(data, '$.extra.primary_type') AS primary_type
+                                    json_extract(data, '$.extra.primary_type') AS primary_type,
+                                    json_extract(data, '$.extra.complex_home_count') AS complex_home_count
                              FROM listings WHERE place_key IS NOT NULL"""):
-        extra = {k: r[k] for k in ("units_total", "property_type", "housing_type", "group_type", "primary_type")
+        extra = {k: r[k] for k in ("units_total", "property_type", "housing_type", "group_type", "primary_type",
+                                              "complex_home_count")
                  if r[k] is not None}
         rows.setdefault(r["place_key"], []).append(
             {"source": r["source"], "kind": r["kind"], "unit": r["unit"], "floor_plan": r["floor_plan"],
@@ -151,3 +185,4 @@ def building_note(b: dict[str, Any] | None) -> str | None:
     """'"a 44-unit community" (craigslist)', 'RentCafe: 402 units (rentcafe)': the evidence and its source, for
     reasons and hovers."""
     return f"{b['evidence']} ({b['source']})" if b else None
+
