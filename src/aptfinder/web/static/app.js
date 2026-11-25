@@ -1395,7 +1395,7 @@ function knnHelpHtml(d = KNN_META) {
     still pass a goal), usually the right one.</p>
   <p><b>Reading the dry run.</b> The first line's "N not yet routed, over all cells" adds up each cell's picks that
     cell has no Google route for yet (a place counts once per cell). Per cell: <i>places</i> = picks minus those already
-    routed for that cell, shown × routes per place = the most it can cost; <i>elements</i> = Route Matrix elements still to pay for, one per
+    routed for that cell, shown × routes per place (bike+train adds its ${ks} shared station legs per destination once, on top); <i>elements</i> = Route Matrix elements still to pay for, one per
     place × destination (a target ×1; ${sets || "point sets ×k nearest"}; bike+train ×up to ${ks + 1}: bike to the ${ks}
     nearest stations + bike the whole way). Fewer elements than places × routes means some legs are cached or shared.
     "With a routed place within ${R} m: before → after" is how many places in the scope get a KNN time.</p>
