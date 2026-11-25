@@ -124,6 +124,9 @@ details > summary { cursor: pointer; margin: 14px 0 6px; font-size: 14px; text-t
 
 .raw-row.hidden { display: none; }
 .raw-row pre.raw { max-height: 320px; overflow: auto; margin: 4px 0; }
+/* a raw block scrolls both ways inside itself: width 0 keeps its long lines out of the table cell's width,
+   min-width 100% then fills the cell (a table cell otherwise grows to its widest line) */
+.raw-row pre.raw { width: 0; min-width: 100%; }
 td.nowrap { white-space: nowrap; }
 .related { margin: 6px 0; padding: 6px 8px; border: 1px dashed var(--line); border-radius: 6px; }
 .tip-photo { display: block; width: 240px; height: 150px; object-fit: cover; border-radius: 4px; margin-bottom: 4px; }
