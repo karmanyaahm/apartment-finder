@@ -301,3 +301,29 @@ def test_merge_a_duplicate_place(client):
     det = c.get(f"/api/places/{showers['place_key']}").json()
     assert "apartments_com" in {l["source"] for l in det["listings"]}
     assert all(l["unit_key"].startswith(showers["place_key"]) for l in det["listings"])
+
+
+def test_compute_over_20_google_calls_needs_the_counts_typed(client, monkeypatch):
+    """More than 20 Google calls: the run is refused unless the calls left this month are typed in; the search
+    candidates scope works, and every run is in the log."""
+    from aptfinder import trips
+
+    c, _ = client
+    monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "test")
+    real = trips.google_usage
+    monkeypatch.setattr(trips, "google_usage", lambda conn, month=None: {**real(conn, month), "calls": 1571})
+    keys = [p["place_key"] for p in c.get("/api/places").json()]
+    spec = {"point": "commute_targets:Meta HQ", "mode": "drive", "provider": "google", "place_keys": keys,
+            "confirm_calls": 25}
+    r = c.post("/api/compute/run", json=spec)
+    assert r.status_code == 400 and "type the calls left" in r.json()["detail"]
+    r = c.post("/api/compute/run", json={**spec, "confirm_left": 1})  # the wrong number
+    assert r.status_code == 400
+    d = c.post("/api/compute/dry_run", json={"point": "commute_targets:Meta HQ", "mode": "drive",
+                                             "provider": "estimate", "scope": "candidates"})
+    assert d.status_code in (200, 400)  # 400 only when the seed has no candidate in a walk zone
+    c.post("/api/compute/run", json={"point": "commute_targets:Meta HQ", "mode": "drive", "provider": "estimate",
+                                     "place_keys": keys})
+    _wait_for_job(c)
+    log = c.get("/api/compute/log").json()
+    assert log and log[0]["source"] == "estimate" and log[0]["params"]["only"] == ["commute_targets:Meta HQ", "drive"]

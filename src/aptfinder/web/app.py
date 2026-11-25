@@ -212,9 +212,16 @@ class ComputeIn(BaseModel):
     point: str  # a point id (`commute_targets:Meta HQ`) or `set:<name>`
     mode: str
     provider: str = "estimate"
-    scope: str = "list"  # "list": place_keys (the places the list shows); "zone": every place in a walk zone
+    # "list": place_keys (the places the list shows); "zone": every place in a walk zone; "candidates": places in a
+    # walk zone that can still pass some goal apart from commute (filter.routing_candidates)
+    scope: str = "list"
     place_keys: list[str] | None = None
     confirm_calls: int | None = None  # Google: the dry run's call count, used as this run's cap
+    # Google, more than TYPED_CONFIRM_OVER calls: the calls left this month, typed by hand from the dry run
+    confirm_left: int | None = None
+
+
+TYPED_CONFIRM_OVER = 20  # a Google run above this many calls needs the counts typed in
 
 
 class MergeIn(BaseModel):
@@ -728,6 +735,12 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         located = {r["place_key"]: (r["lat"], r["lon"]) for r in all_places().values() if r["lat"] is not None}
         if body.scope == "zone":
             keys = [pk for pk, (la, lo) in located.items() if in_walk_zone(la, lo)]
+        elif body.scope == "candidates":
+            from ..filter import routing_candidates
+
+            res = cached("evaluate_all", lambda: evaluate_all(conn))
+            cands = routing_candidates(conn, res=res)
+            keys = [pk for pk in cands if pk in located and in_walk_zone(*located[pk])]
         else:
             keys = body.place_keys or []
         # a stay place (`<building>~<operator>`) reads its building's trips: route the building when it is a place
@@ -780,6 +793,15 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 raise HTTPException(400, "a Google run needs the dry run's call count (confirm_calls)")
             if not settings.secret("GOOGLE_MAPS_API_KEY"):
                 raise HTTPException(400, "GOOGLE_MAPS_API_KEY is not set")
+            if body.confirm_calls > TYPED_CONFIRM_OVER:
+                from ..trips import google_usage
+
+                with lock:
+                    u = google_usage(conn)
+                left = u["cap"] - u["calls"]
+                if left < 5000 and body.confirm_left != left:
+                    raise HTTPException(400, f"more than {TYPED_CONFIRM_OVER} Google calls: type the calls left this "
+                                             f"month ({left}) to confirm")
         with lock:
             if job["state"] == "running":
                 raise HTTPException(409, "a computation is already running")
@@ -821,6 +843,17 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
     @app.get("/api/compute/status")
     def compute_status() -> dict[str, Any]:
         return dict(job)
+
+    @app.get("/api/compute/log")
+    def compute_log(n: int = 15) -> list[dict[str, Any]]:
+        """The latest commute computations (dashboard or CLI): when, what, how many places, Google calls, outcome.
+        Every single Google call is in `api_calls` as well."""
+        rows = q("SELECT id, started_at, finished_at, source, params, counts, est_cost, status, error FROM runs "
+                 "WHERE component = 'commute' ORDER BY id DESC LIMIT ?", (max(1, min(n, 100)),))
+        for r in rows:
+            r["params"] = json.loads(r["params"] or "{}")
+            r["counts"] = json.loads(r["counts"] or "{}")
+        return rows
 
     # ------------------------------------------------------------------ static
     settings.MEDIA_DIR.mkdir(parents=True, exist_ok=True)

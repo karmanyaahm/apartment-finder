@@ -883,8 +883,13 @@ function computeBlock() {
     <select id="c-provider"><option value="estimate">estimate (free)</option><option value="google">Google (paid)</option></select>
     <label><input type="radio" name="c-scope" value="list" checked> the ${n} places the list shows</label>
     <label><input type="radio" name="c-scope" value="zone"> every place in a walk zone</label>
-    <button id="c-dry">Dry run</button> <button id="c-run" class="accent hidden">Run</button>
-    <div id="c-out" class="muted"></div></div>`;
+    <label><input type="radio" name="c-scope" value="candidates"> search candidates (in a walk zone, can still pass a goal)</label>
+    <button id="c-dry">Dry run</button>
+    <span id="c-confirm" class="hidden">to run, type the Google calls <input id="c-n" type="number" style="width:5em">
+      and the calls left this month <input id="c-left" type="number" style="width:5em"></span>
+    <button id="c-run" class="accent hidden">Run</button>
+    <div id="c-out" class="muted"></div>
+    <details id="c-log-box"><summary>Recent computations (each Google call is also logged)</summary><div id="c-log">…</div></details></div>`;
 }
 function computeSpec() {
   const scope = $("input[name=c-scope]:checked").value;
@@ -894,7 +899,13 @@ function computeSpec() {
 function wireCompute() {
   let dry = null;
   const out = $("#c-out");
-  const reset = () => { dry = null; $("#c-run").classList.add("hidden"); };
+  const reset = () => { dry = null; $("#c-run").classList.add("hidden"); $("#c-confirm").classList.add("hidden"); };
+  // a Google run of more than 20 calls unlocks only when both numbers are typed exactly
+  const typedOk = () => !dry?.typed || (+$("#c-n").value === dry.calls && +$("#c-left").value === dry.left);
+  ["#c-n", "#c-left"].forEach((id) => $(id).addEventListener("input", () => {
+    $("#c-run").disabled = !typedOk();
+  }));
+  loadComputeLog();
   ["#c-point", "#c-mode", "#c-provider", ...$$("input[name=c-scope]")].forEach((el) =>
     (typeof el === "string" ? $(el) : el).addEventListener("input", () => { reset(); out.textContent = ""; }));
   $("#c-dry").addEventListener("click", async () => {
@@ -911,9 +922,14 @@ function wireCompute() {
            ${d.over_caps.length ? `<br><span class="reason fail">Would pass ${esc(d.over_caps.join("; "))}: the run stops at the cap.</span>` : ""}
            ${d.note ? `<br><span class="reason fail">${esc(d.note)}</span>` : ""}`;
       if (d.provider === "estimate" || d.would_call > 0) {
-        dry = { spec, calls: d.would_call };
+        const left = u ? u.cap - u.calls : null;
+        dry = { spec, calls: d.would_call, left, typed: d.provider === "google" && d.would_call > 20 && left < 5000 };
         $("#c-run").textContent = d.provider === "google" ? `Run: up to ${d.would_call} Google calls` : "Run";
         $("#c-run").classList.remove("hidden");
+        $("#c-n").value = ""; $("#c-left").value = "";
+        $("#c-confirm").classList.toggle("hidden", !dry.typed);
+        $("#c-run").disabled = !typedOk();
+        if (dry.typed) out.innerHTML += `<br>More than 20 calls: type <b>${d.would_call}</b> and <b>${left}</b> below to unlock Run.`;
       } else out.innerHTML += "<br>Nothing to route: every pair is cached.";
     } catch (e) { out.textContent = "Dry run failed: " + e.message; }
   });
@@ -921,7 +937,9 @@ function wireCompute() {
     if (!dry) return;
     $("#c-run").classList.add("hidden");
     try {
-      await post("api/compute/run", { ...dry.spec, confirm_calls: dry.spec.provider === "google" ? dry.calls : null });
+      if (!typedOk()) { $("#c-run").classList.remove("hidden"); return; }
+      await post("api/compute/run", { ...dry.spec, confirm_calls: dry.spec.provider === "google" ? dry.calls : null,
+        confirm_left: dry.typed ? +$("#c-left").value : null });
       dry = null;
       pollCompute(out);
     } catch (e) { out.textContent = "Not started: " + e.message; }
@@ -941,6 +959,19 @@ async function pollCompute(out) {
     ? `Done ${esc(what)}: ${r.places_done}/${r.places} places, ${r.new_trips} new trips${r.api_calls ? `, ${r.api_calls} Google calls` : ""}.`
     : `<span class="reason fail">Stopped ${esc(what)}: ${esc(r.error || "unknown error")}${r.new_trips ? ` (${r.new_trips} new trips kept)` : ""}</span>`;
   await loadPlaces().catch(() => {});
+  loadComputeLog();
+}
+async function loadComputeLog() {
+  const box = $("#c-log");
+  if (!box) return;
+  const rows = await api("api/compute/log").catch(() => []);
+  box.innerHTML = rows.length ? `<div class="scroll-x"><table><tr><th>run</th><th>started</th><th>what</th><th>provider</th>
+      <th>places</th><th>new trips</th><th>Google calls</th><th>status</th></tr>
+    ${rows.map((r) => `<tr><td>${r.id}</td><td class="nowrap">${esc((r.started_at || "").slice(0, 16).replace("T", " "))}</td>
+      <td>${esc(r.params.only ? r.params.only.join(" · ") : r.params.from || "full table")}</td><td>${esc(r.source || "")}</td>
+      <td>${r.params.places ?? r.counts.places ?? ""}</td><td>${r.counts.new_trips ?? ""}</td><td>${r.counts.api_calls ?? ""}</td>
+      <td>${esc(r.status)}${r.error ? `: ${esc(r.error.slice(0, 80))}` : ""}</td></tr>`).join("")}</table></div>`
+    : '<span class="muted">none yet</span>';
 }
 
 /* ---------------------------------------------------------------- search areas map (Pipeline panel) */
