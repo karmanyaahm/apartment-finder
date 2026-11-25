@@ -1018,14 +1018,81 @@ async function refreshAfterWrite(pk) {
 }
 
 /* ---------------------------------------------------------------- verify mode */
+// Verify keeps its screen. An answer changes only its own item, at once (the request runs behind it; a failure puts
+// the item back with the error next to it); nothing in the background redraws the screen; closing it (x, Escape, a
+// place link) only hides it, so the Verify button shows the same screen at the same scroll again. A screen is fetched
+// only by Next / Previous / Refresh / a filter / a jump to another list, and the old one stays (dimmed) until it is in.
+const V = { seq: 0, inflight: new Set(), scroll: 0, shown: false, dirty: false };
+const vTrack = (p) => { V.inflight.add(p); p.catch(() => {}).finally(() => V.inflight.delete(p)); return p; };
+const vSettle = () => Promise.allSettled([...V.inflight]);
+async function vLoad(path) {
+  const body = $("#verify-body"), my = ++V.seq;
+  $(".v-loaderr", body)?.remove();
+  if (body.children.length) body.classList.add("loading"); else body.innerHTML = '<p class="muted v-loading">Loading…</p>';
+  try {
+    await vSettle();  // answers still in flight change what the next screen holds
+    const d = await api(path);
+    return my === V.seq ? d : null;  // a newer request owns the screen
+  } catch (e) {
+    if (my === V.seq) { $(".v-loading", body)?.remove(); body.insertAdjacentHTML("afterbegin", `<p class="reason fail v-loaderr">Not loaded: ${esc(e.message)}</p>`); }
+    return null;
+  } finally { if (my === V.seq) body.classList.remove("loading"); }
+}
+// a move to another screen (asked for): wait for answers in flight, fetch it, start at its top, update the header counts
+async function vPage(go) { await vSettle(); await go(); $("#verify").scrollTop = 0; loadStatus().catch(() => {}); }
 async function openVerify() {
-  $("#verify").classList.remove("hidden");
+  const ov = $("#verify");
+  ov.classList.remove("hidden");
+  if (V.shown) { ov.scrollTop = V.scroll; return; }  // the screen as it was left
+  V.shown = true;
   S.verifyMode = "conflict"; S.conflictSkip = 0; S.verifySkip = 0;
   await renderVerify();
 }
+function closeVerify() {
+  const ov = $("#verify");
+  if (ov.classList.contains("hidden")) return;
+  V.scroll = ov.scrollTop;
+  ov.classList.add("hidden");
+  if (V.dirty) { V.dirty = false; loadPlaces().catch(() => {}); loadStatus().catch(() => {}); }  // the list and map pick up the answers
+}
+// an inline error right after an item's buttons ("" clears it)
+function vErr(after, msg) {
+  let el = after.nextElementSibling;
+  if (!el?.classList.contains("v-err")) {
+    if (!msg) return;
+    el = document.createElement("span"); el.className = "reason fail small v-err"; after.after(el);
+  }
+  if (msg) el.textContent = " " + msg; else el.remove();
+}
+// keyboard focus to the next item still open (its first unanswered value), else the Next / Continue button; never scrolls
+function vFocusNext(from) {
+  const all = $$("#verify-body .vconf"), i = all.indexOf(from);
+  const open = (b) => !b.classList.contains("done") && !b.classList.contains("answered") && !b.classList.contains("gone");
+  const next = [...all.slice(i + 1), ...all.slice(0, Math.max(i, 0))].find(open);
+  const vb = next && $$(".vbtns:not(.opt)", next).find((v) => !$("button.on", v));
+  const target = next ? (vb ? $("button", vb) : $("button:not([disabled])", next)) : $("#v-more, #d-more, #o-more") || $("#v-rest, #d-rest, #o-rest");
+  target?.focus({ preventScroll: true });
+}
+// a conflict block is checked once each value it needs has a verdict: dimmed, and focus moves on
+function vMark(block) {
+  if (!block) return;
+  const was = block.classList.contains("done"), now = $$(".vbtns:not(.opt)", block).every((v) => $("button.on", v));
+  block.classList.toggle("done", now);
+  if (now && !was) vFocusNext(block);
+}
+// a whole item answered in place: it folds to a one-line stub at once, the request runs behind it, a failure unfolds
+// it with the error; `stays`: the answer does not take it off its queue (paging counts it as still there)
+function vAnswer(box, stub, req, { stays = false, then } = {}) {
+  vErr(box, "");
+  const s = document.createElement("div"); s.className = "v-stub small"; s.innerHTML = stub; box.prepend(s);
+  box.classList.add("answered"); box.classList.toggle("stays", stays); V.dirty = true;
+  vFocusNext(box);
+  vTrack(req()).then((r) => then?.(r, s), (e) => { s.remove(); box.classList.remove("answered", "stays"); vErr(box, "Not saved: " + e.message); });
+}
+const vLeft = (body) => $$(".vconf.answered:not(.stays)", body).length;
 
 const CONFLICT_PAGE = 10;
-const gotoPlace = (pk) => { $("#verify").classList.add("hidden"); openPlace(pk); };
+const gotoPlace = (pk) => { closeVerify(); openPlace(pk); };
 
 /* a too-cheap item's third answer: the rent is real because the place limits who may rent (annotation place /
    restriction, read by the goals' `restriction` rule); the item leaves the queue */
@@ -1065,9 +1132,9 @@ function conflictFilter() {
 
 async function renderConflicts() {
   const body = $("#verify-body");
-  body.innerHTML = '<p class="muted">Loading…</p>';
   const cf = conflictFilter();
-  const d = await api(`api/verify/batch?kind=conflict&skip=${S.conflictSkip}&n=${CONFLICT_PAGE}&goal=${encodeURIComponent(cf.goal)}&zone=${cf.zone}`);
+  const d = await vLoad(`api/verify/batch?kind=conflict&skip=${S.conflictSkip}&n=${CONFLICT_PAGE}&goal=${encodeURIComponent(cf.goal)}&zone=${cf.zone}`);
+  if (!d) return;
   if (!d.items.length && S.conflictSkip > 0 && d.total > 0) { S.conflictSkip = Math.max(0, d.total - CONFLICT_PAGE); return renderConflicts(); }
   const filtered = cf.goal || cf.zone;
   if (!d.items.length && !filtered) { S.verifyMode = "dup"; S.dupSkip = 0; return renderVerify(); }
@@ -1112,13 +1179,14 @@ async function renderConflicts() {
   }));
   $("#v-goal").addEventListener("change", (ev) => { lsSet("aptf.conflictGoal", ev.target.value); S.conflictSkip = 0; renderConflicts(); });
   $("#v-zone").addEventListener("change", (ev) => { lsSet("aptf.conflictZone", ev.target.checked ? "walk" : ""); S.conflictSkip = 0; renderConflicts(); });
-  $("#v-prev").addEventListener("click", () => { S.conflictSkip = Math.max(0, S.conflictSkip - CONFLICT_PAGE); renderConflicts(); loadStatus(); });
-  $("#v-more")?.addEventListener("click", () => {
+  $("#v-prev").addEventListener("click", () => vPage(() => { S.conflictSkip = Math.max(0, S.conflictSkip - CONFLICT_PAGE); return renderConflicts(); }));
+  $("#v-more")?.addEventListener("click", () => vPage(() => {
     // a conflict whose every value got a verdict has left the queue, so the next page starts that much earlier
+    // (counted after the answers in flight settle: a failed one is unpressed again)
     const done = $$(".vconf", body).filter((b) => b.classList.contains("gone") || $$(".vbtns:not(.opt)", b).every((v) => $("button.on", v))).length;
-    S.conflictSkip += d.items.length - done; renderConflicts(); loadStatus();
-  });
-  const toDups = (ev) => { ev?.preventDefault(); S.verifyMode = "dup"; S.dupSkip = 0; renderVerify(); loadStatus(); };
+    S.conflictSkip += d.items.length - done; return renderConflicts();
+  }));
+  const toDups = (ev) => { ev?.preventDefault(); vPage(() => { S.verifyMode = "dup"; S.dupSkip = 0; return renderVerify(); }); };
   $("#v-rest").addEventListener("click", toDups);
   $("#v-dups").addEventListener("click", toDups);
 }
@@ -1128,8 +1196,8 @@ async function renderVerify() {
   if (S.verifyMode === "own") return renderOwnSites();
   if (S.verifyMode === "dup") return renderDuplicates();
   const body = $("#verify-body");
-  body.innerHTML = '<p class="muted">Loading…</p>';
-  const d = await api(`api/verify/next?seed=${S.verifySeed}&skip=${S.verifySkip}&conflicts=false`);
+  const d = await vLoad(`api/verify/next?seed=${S.verifySeed}&skip=${S.verifySkip}&conflicts=false`);
+  if (!d) return;
   if (d.done) { body.innerHTML = "<h2>Queue empty</h2><p>Nothing left to check. 🎉</p>"; return; }
   const it = d.item;
   const head = `<p class="muted small">${d.remaining} items in queue (an even sample across sources) · item ${S.verifySkip + 1} · <a href="#" id="v-back">back to the conflicts</a></p>`;
@@ -1159,16 +1227,16 @@ async function renderVerify() {
   }
   $$(".vbtns", body).forEach(wireVbtns);
   $("#v-back").addEventListener("click", backToConflicts);
-  $("#v-skip").addEventListener("click", () => { S.verifySkip++; renderVerify(); });
-  $("#v-next").addEventListener("click", () => { renderVerify(); loadStatus(); });
+  $("#v-skip").addEventListener("click", () => vPage(() => { S.verifySkip++; return renderVerify(); }));
+  $("#v-next").addEventListener("click", () => vPage(renderVerify));
 }
 
 /* pairs of places that are probably one building: merge either way (into the bigger by default) or say they differ */
 const DUP_PAGE = 20;
 async function renderDuplicates() {
   const body = $("#verify-body");
-  body.innerHTML = '<p class="muted">Loading…</p>';
-  const d = await api(`api/verify/duplicates?skip=${S.dupSkip}&n=${DUP_PAGE}`);
+  const d = await vLoad(`api/verify/duplicates?skip=${S.dupSkip}&n=${DUP_PAGE}`);
+  if (!d) return;
   if (!d.items.length && S.dupSkip > 0 && d.total > 0) { S.dupSkip = Math.max(0, d.total - DUP_PAGE); return renderDuplicates(); }
   const counts = Object.entries(d.by_reason).map(([k, n]) => `${n} ${esc(d.labels[k])}`).join(" · ");
   // the two places are A and B (names are often identical, so the buttons name the letter)
@@ -1195,27 +1263,28 @@ async function renderDuplicates() {
     <p style="margin-top:14px"><button id="d-prev" ${S.dupSkip ? "" : "disabled"}>Previous ${DUP_PAGE}</button>
       ${more ? `<button id="d-more" class="accent">Next ${DUP_PAGE}</button>` : ""}
       <button id="d-rest" class="${more ? "" : "accent"}">${more ? "Skip to" : "Continue:"} buildings whose own site gave nothing usable, then the sample</button></p>`;
-  const done = async (msg) => { toast(msg); await renderDuplicates(); loadStatus(); loadPlaces(); };
+  // answered in place (the list is not fetched again): the pair folds to a stub; after a merge, the other pairs on
+  // this page with the merged-away place fold too (that place is gone; Refresh shows what is left)
   $$(".vconf", body).forEach((box) => {
-    $$(".dup-merge", box).forEach((b) => b.addEventListener("click", async () => {
-      $$("button", box).forEach((x) => { x.disabled = true; });
-      try {
-        const r = await post(`api/places/${encodeURIComponent(b.dataset.from)}/merge`, { into: b.dataset.into });
-        await done(`Merged ${r.merged} listing(s)`);
-      } catch (err) { toast("Merge failed: " + err.message, 6000); $$("button", box).forEach((x) => { x.disabled = false; }); }
+    $$(".dup-merge", box).forEach((b) => b.addEventListener("click", () => {
+      const from = b.dataset.from;
+      vAnswer(box, `${esc(b.textContent)}: merging…`, () => post(`api/places/${encodeURIComponent(from)}/merge`, { into: b.dataset.into }), {
+        then: (r, s) => {
+          s.textContent = `${b.textContent}: merged ${r.merged} listing(s)`;
+          $$(".vconf", body).filter((x) => x !== box && !x.classList.contains("answered") && $$("[data-goto]", x).some((a) => a.dataset.goto === from))
+            .forEach((x) => vAnswer(x, "One of these two places was just merged into another; Refresh shows this pair again if it still applies", () => Promise.resolve()));
+        },
+      });
     }));
-    $(".dup-no", box).addEventListener("click", async () => {
-      try {
-        await post("api/annotations", { entity_type: "place_pair", entity_key: box.dataset.pair, attribute: "same_building", comment: "no" });
-        await done("Recorded: not the same building");
-      } catch (err) { toast("Not saved: " + err.message, 5000); }
-    });
+    $(".dup-no", box).addEventListener("click", () => vAnswer(box, "Recorded: not the same building",
+      () => post("api/annotations", { entity_type: "place_pair", entity_key: box.dataset.pair, attribute: "same_building", comment: "no" })));
   });
   $$("[data-goto]", body).forEach((a) => a.addEventListener("click", (ev) => { ev.preventDefault(); gotoPlace(a.dataset.goto); }));
   $("#v-back").addEventListener("click", backToConflicts);
-  $("#d-prev").addEventListener("click", () => { S.dupSkip = Math.max(0, S.dupSkip - DUP_PAGE); renderDuplicates(); });
-  $("#d-more")?.addEventListener("click", () => { S.dupSkip += DUP_PAGE; renderDuplicates(); });
-  $("#d-rest").addEventListener("click", () => { S.verifyMode = "own"; S.ownSkip = 0; renderVerify(); loadStatus(); });
+  $("#d-prev").addEventListener("click", () => vPage(() => { S.dupSkip = Math.max(0, S.dupSkip - DUP_PAGE); return renderDuplicates(); }));
+  // answered pairs have left the queue, so the next page starts that much earlier
+  $("#d-more")?.addEventListener("click", () => vPage(() => { S.dupSkip += d.items.length - vLeft(body); return renderDuplicates(); }));
+  $("#d-rest").addEventListener("click", () => vPage(() => { S.verifyMode = "own"; S.ownSkip = 0; return renderVerify(); }));
 }
 
 /* buildings whose own site gave no usable offer: one list, a reason and every URL tried; add a URL or dismiss */
@@ -1223,8 +1292,8 @@ const OWN_PAGE = 20;
 const URL_STATUS = { form: "fail", rejected: "fail", failed: "fail", dead: "fail", no_plans: "needs_check", pending: "", priced: "pass" };
 async function renderOwnSites() {
   const body = $("#verify-body");
-  body.innerHTML = '<p class="muted">Loading…</p>';
-  const d = await api(`api/verify/own_sites?skip=${S.ownSkip}&n=${OWN_PAGE}`);
+  const d = await vLoad(`api/verify/own_sites?skip=${S.ownSkip}&n=${OWN_PAGE}`);
+  if (!d) return;
   if (!d.items.length && S.ownSkip > 0 && d.total > 0) { S.ownSkip = Math.max(0, d.total - OWN_PAGE); return renderOwnSites(); }
   const counts = Object.entries(d.by_reason).map(([k, n]) => `${n} ${esc(d.labels[k])}`).join(" · ");
   const block = (it) => `<div class="vconf" data-pk="${esc(it.place_key)}">
@@ -1246,28 +1315,26 @@ async function renderOwnSites() {
     <p style="margin-top:14px"><button id="o-prev" ${S.ownSkip ? "" : "disabled"}>Previous ${OWN_PAGE}</button>
       ${more ? `<button id="o-more" class="accent">Next ${OWN_PAGE}</button>` : ""}
       <button id="o-rest" class="${more ? "" : "accent"}">${more ? "Skip to" : "Continue:"} the sample</button></p>`;
-  const note = async (pk, attribute, comment, msg) => {
-    try { await post("api/annotations", { entity_key: pk, attribute, comment }); toast(msg); renderOwnSites(); loadStatus(); }
-    catch (e) { toast("Not saved: " + e.message, 5000); }
-  };
+  // answered in place: the building folds to a stub (an added URL keeps it on the list until a site gives offers)
+  const note = (box, attribute, comment, msg, stays = false) =>
+    vAnswer(box, esc(msg), () => post("api/annotations", { entity_key: box.dataset.pk, attribute, comment }), { stays });
   $$(".vconf", body).forEach((box) => {
-    const pk = box.dataset.pk;
-    $(".own-add", box).addEventListener("click", () => {
+    $(".own-add", box).addEventListener("click", (ev) => {
       const u = $(".own-url", box).value.trim();
-      if (!/^https?:\/\//i.test(u)) { toast("Type a URL starting with http"); return; }
-      note(pk, "website", u, "URL added: pending check (promote-sites fetches it)");
+      if (!/^https?:\/\//i.test(u)) { vErr(ev.target, "Type a URL starting with http"); return; }
+      note(box, "website", u, `URL added: ${u} (pending check: promote-sites fetches it)`, true);
     });
-    $(".own-dismiss", box).addEventListener("click", () => note(pk, "own_site", "dismissed: no plans online", "Dismissed"));
-    $(".own-none", box)?.addEventListener("click", () => note(pk, "website", "none", "Marked: no website"));
+    $(".own-dismiss", box).addEventListener("click", () => note(box, "own_site", "dismissed: no plans online", "Dismissed: no plans online"));
+    $(".own-none", box)?.addEventListener("click", () => note(box, "website", "none", "Marked: no website"));
   });
   $$("[data-goto]", body).forEach((a) => a.addEventListener("click", (ev) => { ev.preventDefault(); gotoPlace(a.dataset.goto); }));
   $("#v-back").addEventListener("click", backToConflicts);
-  $("#o-prev").addEventListener("click", () => { S.ownSkip = Math.max(0, S.ownSkip - OWN_PAGE); renderOwnSites(); });
-  $("#o-more")?.addEventListener("click", () => { S.ownSkip += OWN_PAGE; renderOwnSites(); });
-  $("#o-rest").addEventListener("click", () => { S.verifyMode = "rest"; S.verifySkip = 0; renderVerify(); });
+  $("#o-prev").addEventListener("click", () => vPage(() => { S.ownSkip = Math.max(0, S.ownSkip - OWN_PAGE); return renderOwnSites(); }));
+  $("#o-more")?.addEventListener("click", () => vPage(() => { S.ownSkip += d.items.length - vLeft(body); return renderOwnSites(); }));
+  $("#o-rest").addEventListener("click", () => vPage(() => { S.verifyMode = "rest"; S.verifySkip = 0; return renderVerify(); }));
 }
 
-function backToConflicts(e) { e.preventDefault(); S.verifyMode = "conflict"; S.conflictSkip = 0; renderVerify(); }
+function backToConflicts(e) { e.preventDefault(); vPage(() => { S.verifyMode = "conflict"; S.conflictSkip = 0; return renderVerify(); }); }
 
 function vbtns(ctx, verdict, optional) {
   // verdict: one already given (a current check), shown as pressed; optional: not needed to settle the item
@@ -1281,21 +1348,29 @@ function vbtns(ctx, verdict, optional) {
 
 function wireVbtns(box) {
   const ctx = JSON.parse(box.dataset.ctx);
-  const input = $("input", box), save = $("[data-save]", box);
-  const send = async (verdict, true_value) => {
-    try {
-      await post("api/checks", { ...ctx, verdict, true_value });
-      $$("button[data-v]", box).forEach((b) => b.classList.toggle("on", b.dataset.v === verdict));
-      input.classList.add("hidden"); save.classList.add("hidden");
-      toast(`Recorded ${verdict.replace("_", " ")} for ${ctx.field}`);
-    } catch (e) { toast("Not saved: " + e.message, 5000); }
+  const input = $("input", box), save = $("[data-save]", box), btns = $$("button[data-v]", box);
+  const block = box.closest(".vconf");
+  let seq = 0;
+  const mark = (v) => { btns.forEach((b) => b.classList.toggle("on", b.dataset.v === v)); vMark(block); };
+  // in place: pressed at once, saved behind it; a failed save un-presses it and says why next to the buttons
+  const send = (verdict, true_value) => {
+    const before = btns.find((b) => b.classList.contains("on"))?.dataset.v, my = ++seq;
+    input.classList.add("hidden"); save.classList.add("hidden"); vErr(box, "");
+    V.dirty = true; mark(verdict);
+    vTrack(post("api/checks", { ...ctx, verdict, true_value })).catch((e) => {
+      if (my !== seq) return;  // a newer answer to this value owns it
+      mark(before); vErr(box, "Not saved: " + e.message);
+    });
   };
-  $$("button[data-v]", box).forEach((b) => b.addEventListener("click", () => {
+  btns.forEach((b) => b.addEventListener("click", () => {
     if (b.dataset.v === "wrong") { input.classList.remove("hidden"); save.classList.remove("hidden"); input.focus(); }
     else send(b.dataset.v);
   }));
   save.addEventListener("click", () => send("wrong", input.value));
-  input.addEventListener("keydown", (e) => { if (e.key === "Enter") send("wrong", input.value); });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") send("wrong", input.value);
+    if (e.key === "Escape") { e.stopPropagation(); input.classList.add("hidden"); save.classList.add("hidden"); }  // not the whole panel
+  });
 }
 
 /* ---------------------------------------------------------------- pipeline status */
@@ -1818,8 +1893,10 @@ function apifyCredit(a) {
 /* ---------------------------------------------------------------- boot */
 async function loadPlaces() {
   S.places = await api("api/places");
+  const sc = $("#cards").scrollTop;  // a reload (after a compute run, or closing Verify) keeps the list where it was
   if (S.draft && draftDirty()) previewDraft(); // a draft keeps showing over the fresh saved results
   renderList();
+  $("#cards").scrollTop = sc;
 }
 
 async function boot() {
@@ -1838,13 +1915,14 @@ async function boot() {
     node.addEventListener("input", () => { saveView(); renderList(); });
   });
   $$("[data-close]").forEach((b) => b.addEventListener("click", () => {
+    if (b.dataset.close === "verify") { closeVerify(); return; }  // hidden, kept as it is for the next open
     $("#" + b.dataset.close).classList.add("hidden");
-    if (b.dataset.close === "verify") { S.verifySkip = 0; loadPlaces(); }
   }));
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { ["#drawer", "#verify", "#pipeline"].forEach((id) => $(id).classList.add("hidden")); }
+    if (e.key === "Escape") { ["#drawer", "#pipeline"].forEach((id) => $(id).classList.add("hidden")); closeVerify(); }
   });
   $("#verify-btn").addEventListener("click", openVerify);
+  $("#verify-refresh").addEventListener("click", () => renderVerify());  // this screen again, same scroll
   $("#pipeline-btn").addEventListener("click", openPipeline);
   S.points = await api("api/points");
   buildPointLayers();

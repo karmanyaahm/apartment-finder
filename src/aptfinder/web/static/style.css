@@ -115,6 +115,13 @@ svg.chart text { fill: var(--muted); font-size: 10px; }
 .vbtns input { width: 7em; font-size: 12px; }
 .vconf { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 8px 0; }
 .vconf.pending { border-style: dashed; }
+/* Verify answers in place: a checked conflict dims, an answered pair or building folds to its one-line stub */
+#verify-refresh { position: absolute; top: 8px; right: 44px; }
+#verify-body.loading { opacity: .5; pointer-events: none; }
+.vconf.done { opacity: .55; }
+.vconf.done .vconf-head::after { content: "✓ checked"; color: var(--pass); font-weight: normal; font-size: 12px; }
+.vconf.answered { opacity: .7; padding: 4px 10px; }
+.vconf.answered > :not(.v-stub) { display: none; }
 .vconf-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 4px; font-weight: 600; }
 .vconf-head .chip, .vconf-head .muted { font-weight: normal; }
 .chip.pending { background: transparent; border: 1px dashed var(--check); }
