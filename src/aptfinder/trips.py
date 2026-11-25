@@ -178,6 +178,33 @@ def latest_trip(conn: sqlite3.Connection, place_key: str, point_id: str, mode: s
         "ORDER BY id DESC LIMIT 1", (place_key, point_id, mode, provider)).fetchone()
 
 
+def nearest_points(origin: tuple[float, float], pts: list[Point], k: int) -> list[Point]:
+    """A set's points a place is routed to: the k nearest by straight line (k = 0: all of them)."""
+    shortlist = sorted(pts, key=lambda p: haversine_m(origin, (p.lat, p.lon)))
+    return shortlist[:k] if k > 0 else shortlist
+
+
+def missing_estimates(conn: sqlite3.Connection) -> list[str]:
+    """Routable located places (a stay place as its building, as compute_all) lacking a straight-line estimate row
+    for some (point, mode) the current config asks of them: for each set, its k nearest points by each of its
+    `modes`. A point added to a set (a new Google bus stop) is then nearest to places that already had estimates to
+    the old points; they are listed again, so the stop shows up without anyone recomputing by hand."""
+    located = {r[0]: (r[1], r[2]) for r in conn.execute("SELECT place_key, lat, lon FROM places WHERE lat IS NOT NULL")}
+    routable = [pk for pk in located if pk.split("~", 1)[0] == pk or pk.split("~", 1)[0] not in located]
+    have: dict[str, set[tuple[str, str]]] = {}
+    for pk, pt, mode in conn.execute("SELECT DISTINCT place_key, point_id, mode FROM trips WHERE provider = 'estimate'"):
+        have.setdefault(pk, set()).add((pt, mode))
+    points, point_sets = load_points(), load_point_sets()
+    sets = [(points.get(name, []), cfg) for name, cfg in point_sets.items()]
+    out = []
+    for pk in sorted(routable):
+        mine = have.get(pk, set())
+        if any((p.id, m) not in mine for pts, cfg in sets if pts
+               for p in nearest_points(located[pk], pts, cfg.k) for m in cfg.modes):
+            out.append(pk)
+    return out
+
+
 def compute_for_place(conn: sqlite3.Connection, commute: Commute, place: sqlite3.Row | dict,
                       on_demand: bool = False, sets: list[str] | None = None,
                       only: tuple[str, str] | None = None, points: dict | None = None,
@@ -213,10 +240,7 @@ def compute_for_place(conn: sqlite3.Connection, commute: Commute, place: sqlite3
             modes = [mode_only]
         if not pts or (paid and not cfg.paid):
             continue
-        shortlist = sorted(pts, key=lambda p: haversine_m(origin, (p.lat, p.lon)))
-        if cfg.k > 0:
-            shortlist = shortlist[: cfg.k]
-        for p in shortlist:
+        for p in nearest_points(origin, pts, cfg.k):
             km = haversine_m(origin, (p.lat, p.lon)) / 1000
             if paid and not on_demand and cfg.prefilter_km is not None and km > cfg.prefilter_km:
                 continue
@@ -265,17 +289,12 @@ def compute_all(conn: sqlite3.Connection, commute: Commute, place_keys: list[str
 
 
 def estimate_missing(conn: sqlite3.Connection, db_path: str) -> dict[str, Any]:
-    """Free straight-line trips for the places that have none yet under the current point ids (the Pipeline
-    panel's rule, stay places routed as their building), logged as a `commute`/`estimate` run. Places that
-    already have estimates are not routed again (`compute_all` would walk every place)."""
+    """Free straight-line trips for the places missing one their current nearest points need (`missing_estimates`,
+    the Pipeline panel's rule), logged as a `commute`/`estimate` run. Complete places are not routed again
+    (`compute_all` would walk every place)."""
     from .store import finish_run, start_run
 
-    located = {r[0] for r in conn.execute("SELECT place_key FROM places WHERE lat IS NOT NULL")}
-    routable = {pk for pk in located if pk.split("~", 1)[0] == pk or pk.split("~", 1)[0] not in located}
-    current = {p.id for pts in load_points().values() for p in pts}
-    have = {pk for pk, pt in conn.execute("SELECT DISTINCT place_key, point_id FROM trips WHERE provider = 'estimate'")
-            if pt in current}
-    todo = sorted(routable - have)
+    todo = missing_estimates(conn)
     if not todo:
         return {"places": 0, "places_done": 0, "new_trips": 0, "error": None}
     run = start_run(conn, "commute", "estimate", {"places": len(todo), "after": "intake"})

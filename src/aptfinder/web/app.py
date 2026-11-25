@@ -1675,9 +1675,33 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                          ("place_rows", place_rows)):
             schedule(name, fn)
 
+        def points_signature() -> tuple:
+            """The point files' mtimes (point_sets.toml and config/points/): what decides each place's nearest points."""
+            files = [settings.CONFIG_DIR / "point_sets.toml", *sorted((settings.CONFIG_DIR / "points").glob("*"))]
+            return tuple((f.name, f.stat().st_mtime_ns) for f in files if f.is_file())
+
+        seen_points: list = [None]
+
+        def fill_estimates() -> None:
+            """At start and whenever a point file changes: straight-line estimates for the places whose current
+            nearest points lack one (trips.estimate_missing; a stop added to a set), so the list shows the new
+            nearest point without anyone recomputing by hand. Free; logged as a commute/estimate run when any."""
+            sig = points_signature()
+            if sig == seen_points[0]:
+                return
+            from ..trips import estimate_missing
+
+            if estimate_missing(conn, db_path)["new_trips"]:
+                invalidate()
+            seen_points[0] = sig
+
         def watch() -> None:
             while True:
                 time.sleep(WATCH_EVERY_S)
+                try:
+                    fill_estimates()
+                except Exception:  # noqa: BLE001  (a locked or busy database: try again next round)
+                    pass
                 try:
                     raw = raw_version()
                     now = time.monotonic()

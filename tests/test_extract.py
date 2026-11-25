@@ -269,8 +269,11 @@ def test_estimates_only_for_places_without_any(conn, tmp_path, monkeypatch):
     conn.executemany("INSERT INTO places VALUES (?, ?, ?)",
                      [("p_a", 37.4, -122.1), ("p_b", 37.5, -122.2), ("p_b~blueground", 37.5, -122.2),
                       ("p_c", None, None)])
-    point = next(p.id for pts in trips.load_points().values() for p in pts)
-    trips.append_trip(conn, "p_a", point, "bike", 10.0, 3000, [], "08:30", "estimate")
+    # p_a already has an estimate to every point its sets ask of it (each set's k nearest, by each mode)
+    for name, cfg in trips.load_point_sets().items():
+        for p in trips.nearest_points((37.4, -122.1), trips.load_points().get(name, []), cfg.k):
+            for m in cfg.modes:
+                trips.append_trip(conn, "p_a", p.id, m, 10.0, 3000, [], "08:30", "estimate")
     assert trips.estimate_missing(conn, str(tmp_path / "x.db"))["places_done"] == 1
     assert seen == [["p_b"]]
 
@@ -337,3 +340,40 @@ def test_a_sonnet_reading_survives_a_rescrape_while_text_is_unchanged(conn, tmp_
     _listings(conn, "furnishedfinder", [("190174_1", row)])  # the old text again: the Haiku reading is newer now
     res = ex.extract(conn, "furnishedfinder", ask_fn=stub)
     assert res["kept_stronger"] == 0 and current() == (None, "haiku")
+
+
+def _bus_config(tmp_path, stops):
+    """A config dir (config.example) whose only point set is google_bus_stops (walk, k = 1) with `stops`."""
+    import shutil
+
+    cfg = tmp_path / "cfg"
+    shutil.copytree(__import__('aptfinder').settings.ROOT / "config.example", cfg)
+    (cfg / "point_sets.toml").write_text('[google_bus_stops]\nlabel = "Google bus"\nmodes = ["walk"]\nk = 1\n')
+    _write_stops(cfg, stops)
+    return cfg
+
+
+def _write_stops(cfg, stops):
+    lines = ["set,name,lat,lon"] + [f"google_bus_stops,{n},{la},{lo}" for n, la, lo in stops]
+    (cfg / "points" / "google_bus_stops.csv").write_text("\n".join(lines) + "\n")
+
+
+def test_a_stop_added_to_a_set_gets_estimates_and_becomes_the_nearest(conn, tmp_path, monkeypatch):
+    from aptfinder import trips
+    from aptfinder.filter import best_trips, nearest_by_set
+
+    cfg = _bus_config(tmp_path, [("Old", 37.410, -122.10), ("Far", 37.45, -122.10)])
+    monkeypatch.setattr("aptfinder.settings.CONFIG_DIR", cfg)
+    conn.execute("DROP VIEW places")
+    conn.execute("CREATE TEMP TABLE places (place_key TEXT, lat REAL, lon REAL)")
+    conn.execute("INSERT INTO places VALUES ('p_a', 37.400, -122.10)")
+    db = str(tmp_path / "test.db")
+    assert trips.missing_estimates(conn) == ["p_a"]
+    assert trips.estimate_missing(conn, db)["new_trips"] == 1
+    assert trips.missing_estimates(conn) == []  # complete: a second pass routes nothing
+    assert trips.estimate_missing(conn, db)["places"] == 0
+    _write_stops(cfg, [("Old", 37.410, -122.10), ("Far", 37.45, -122.10), ("New", 37.4005, -122.10)])
+    assert trips.missing_estimates(conn) == ["p_a"]
+    assert trips.estimate_missing(conn, db)["new_trips"] == 1
+    near = nearest_by_set(best_trips(conn)["p_a"])[("google_bus_stops", "walk")]
+    assert near["point_id"] == "google_bus_stops:New" and near["provider"] == "estimate"

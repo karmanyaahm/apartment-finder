@@ -431,3 +431,17 @@ def test_goal_cover_plan_covers_per_pair_only_the_candidates_of_a_goal_with_a_ru
     plan = goal_cover_plan(_trips([]), [(pa, "transit"), (META, "drive")], sorted(loc), loc, cfg,
                            {"stay": {"lease"}, "flat": {"other"}})
     assert plan == {(pa, "transit"): ["stay"], (META, "drive"): []}  # no goal has a Meta drive rule
+
+
+def test_routed_set_pair_needs_a_google_trip_to_the_current_nearest_point():
+    # a stop added to a set: p0's Google walk goes to the old stop, its estimate to the new (nearer) one is faster,
+    # so p0 is routed again (to its current nearest); p1 has only its Google trip and stays routed
+    from aptfinder.sampling import cover_plan, routed
+
+    pair = ("set:google_bus_stops", "walk")
+    old, new = ("google_bus_stops:Palo Alto Caltrain", "walk"), ("google_bus_stops:Menlo Park CalTrain", "walk")
+    trips = _trips([("p0", old, _g(26.0)), ("p0", new, {"provider": "estimate", "minutes": 3.0}),
+                    ("p1", old, _g(5.0))])
+    assert routed(trips, pair) == {"p1"}
+    loc = {"p0": (37.4533, -122.1821), "p1": (37.4433, -122.1650)}  # 1.9 km apart
+    assert cover_plan(trips, [pair], sorted(loc), loc, 400)[pair] == ["p0"]

@@ -388,10 +388,14 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None, *, places: l
     # compute_all skips a stay place (`<building>~<operator>`) whose building is a place: it reads the building's
     located = {p["place_key"] for p in places if p["lat"] is not None}
     routable = {pk for pk in located if pk.split("~", 1)[0] == pk or pk.split("~", 1)[0] not in located}
-    est = sum(1 for pk in routable if "estimate" in provs.get(pk, ()))
+    # complete: an estimate to every current nearest point (a stop added to a set makes its neighbours incomplete)
+    from .trips import missing_estimates
+
+    est = len(routable - set(missing_estimates(conn)))
     stage("estimates", "Commute estimates (free)",
           "done" if est == len(routable) else "todo" if not est else "partial",
-          f"{est} of {len(routable)} places have straight-line estimates (added after each intake run)",
+          f"{est} of {len(routable)} places have straight-line estimates to their current nearest points "
+          "(added after each intake run and when a point file changes)",
           [] if est == len(routable) else [f"{COMMUTE} compute"], **_run_info(runs, "commute", "estimate"))
 
     pts = load_points()

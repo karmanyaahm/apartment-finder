@@ -52,12 +52,16 @@ def candidate_goals(conn: sqlite3.Connection, res: dict | None = None,
 
 
 def routed(trips: dict, pair: Pair) -> set[str]:
-    """Places with a Google trip for the pair (for a set: to any point of it by that mode)."""
+    """Places whose time for the pair is their own Google trip. For a set: the fastest of its points (what the list
+    shows, nearest_by_set) is a Google trip; a Google trip to a stop that is no longer the nearest (a nearer stop
+    added since, with an estimate or KNN time below it) does not count, so sampling routes the place again, to its
+    current nearest points."""
     point, mode = pair
+    if point.startswith("set:"):
+        return {pk for pk in trips if (v := _value(trips, pk, pair)) and v["provider"] == "google"
+                and v.get("minutes") is not None}
     return {pk for pk, ts in trips.items()
-            if any(t["provider"] == "google" and t["minutes"] is not None and k[1] == mode
-                   and (k[0].startswith(point[4:] + ":") if point.startswith("set:") else k[0] == point)
-                   for k, t in ts.items())}
+            if (t := ts.get((point, mode))) and t["provider"] == "google" and t["minutes"] is not None}
 
 
 def coverage(keys: list[str], loc: dict[str, tuple[float, float]], routed_keys: set[str]) -> int:

@@ -400,3 +400,28 @@ def test_a_place_with_nothing_for_rent_is_no_listings_in_list_and_preview(client
     prev = c.post("/api/goals/preview", json={k: goal[k] for k in ("label", "rules", "nice", "people")}).json()
     assert prev["places"][p["place_key"]]["status"] == "no_listings"
     assert set(prev["places"]) == {x["place_key"] for x in places}
+
+
+def test_a_stop_added_to_a_point_file_shows_as_the_nearest(tmp_path, monkeypatch):
+    # editing a point file is a config edit: the cached results are out of date at once, and the place's new
+    # nearest stop shows once its estimate is in (trips.estimate_missing, which the served app runs on the change)
+    import shutil
+
+    from aptfinder import settings, trips
+
+    cfg = tmp_path / "cfg"
+    shutil.copytree(settings.ROOT / "config.example", cfg)
+    monkeypatch.setattr(settings, "CONFIG_DIR", cfg)
+    db = tmp_path / "seed.db"
+    seed_db(db, with_trips=True)
+    conn = connect(db)
+    pk, lat, lon = conn.execute("SELECT place_key, lat, lon FROM places WHERE lat IS NOT NULL").fetchone()
+    stops = cfg / "points" / "google_bus_stops.csv"
+    stops.write_text(f"set,name,lat,lon\ngoogle_bus_stops,Old,{lat + 0.01},{lon}\n")
+    trips.estimate_missing(conn, str(db))
+    c = TestClient(create_app(db))
+    near = lambda: c.get(f"/api/places/{pk}").json()["nearest"]["google_bus_stops|walk"][0]["point"]  # noqa: E731
+    assert near() == "Old"
+    stops.write_text(stops.read_text() + f"google_bus_stops,New,{lat + 0.001},{lon}\n")
+    assert trips.missing_estimates(conn) and trips.estimate_missing(conn, str(db))["new_trips"]
+    assert near() == "New"
