@@ -104,7 +104,8 @@ function placeStatus(p, goal = S.goal) {
 const COLORS = () => {
   const cs = getComputedStyle(document.documentElement);
   return { pass: cs.getPropertyValue("--pass").trim(), needs_check: cs.getPropertyValue("--check").trim(),
-    no_listings: cs.getPropertyValue("--none").trim(), fail: cs.getPropertyValue("--fail").trim() };
+    no_listings: cs.getPropertyValue("--none").trim(), fail: cs.getPropertyValue("--fail").trim(),
+    cut: cs.getPropertyValue("--cut").trim(), added: cs.getPropertyValue("--added").trim() };
 };
 
 /* ---------------------------------------------------------------- map */
@@ -125,7 +126,7 @@ function initMap() {
   legend.onAdd = () => {
     const d = L.DomUtil.create("div", "legend");
     const c = COLORS();
-    d.innerHTML = `<i style="background:${c.pass}"></i>pass<br><i style="background:${c.needs_check}"></i>needs check<br><i style="background:${c.no_listings};opacity:.6"></i>no listings<br><i style="background:${c.fail};opacity:.5"></i>fail`;
+    d.innerHTML = `<i style="background:${c.pass}"></i>pass<br><i style="background:${c.needs_check}"></i>needs check<br><i style="background:${c.no_listings};opacity:.6"></i>no listings<br><i style="background:${c.fail};opacity:.5"></i>fail<br><i style="background:${c.cut}"></i>cut by the draft<br><i style="background:${c.added}"></i>added by the draft`;
     return d;
   };
   legend.addTo(map);
@@ -201,12 +202,13 @@ function drawMarkers(list) {
   for (const p of list) {
     if (p.lat == null) continue;
     const st = placeStatus(p);
-    const dim = st === "fail" || st === "no_listings";  // muted: nothing to rent here (yet)
+    const kind = S.diff?.kinds[p.place_key];  // cut / added by the unsaved draft
+    const dim = (st === "fail" || st === "no_listings") && !kind;  // muted: nothing to rent here (yet)
     const m = L.circleMarker([p.lat, p.lon], {
-      radius: dim ? 6 : 9, color: "#fff", weight: 2, fillColor: c[st],
-      fillOpacity: st === "fail" ? 0.45 : st === "no_listings" ? 0.6 : 0.95, opacity: dim ? 0.5 : 1,
+      radius: dim ? 6 : 9, color: "#fff", weight: kind ? 3 : 2, fillColor: kind ? c[kind] : c[st],
+      fillOpacity: kind ? 0.95 : st === "fail" ? 0.45 : st === "no_listings" ? 0.6 : 0.95, opacity: dim ? 0.5 : 1,
     }).bindTooltip(() => (p.photo ? `<img class="tip-photo" src="${esc(p.photo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : "")
-      + `${esc(p.label)}<br>${esc(STATUS_LABEL[st])}`);
+      + `${esc(p.label)}<br>${esc(STATUS_LABEL[st])}${kind === "cut" ? " · cut by the draft" : kind === "added" ? " · added by the draft" : ""}`);
     m.baseStyle = { radius: m.options.radius, weight: m.options.weight, color: m.options.color,
       opacity: m.options.opacity, fillOpacity: m.options.fillOpacity };
     m.on("click", () => openPlace(p.place_key));
@@ -589,11 +591,12 @@ function wireRule(row) {
     changed(false);
   }));
 }
-// a draft change: preview it in the list (debounced), re-render the panel when its shape changed
+// a draft change: preview it in the list (debounced), re-render the panel when its shape changed; a draft back to
+// the saved goal drops the preview and the cut / added marks at once
 function draftChanged(rerender = true) {
   if (rerender) renderGoalEditor(); else refreshEditorState();
   clearTimeout(draftChanged._t);
-  draftChanged._t = setTimeout(previewDraft, 400);
+  if (!draftDirty()) previewDraft(); else draftChanged._t = setTimeout(previewDraft, 400);
 }
 function refreshEditorState() {
   const dirty = draftDirty();
@@ -604,6 +607,7 @@ function refreshEditorState() {
   const sum = $("#g-details summary .small");
   if (S.draft && $("#g-details summary b")) $("#g-details summary b").textContent = S.draft.label;
   if (sum && S.draft) sum.textContent = `${S.draft.rules.length} must, ${S.draft.nice.length} nice${dirty ? " · unsaved draft" : ""}`;
+  renderDiffLine();
 }
 // every place's result for the draft replaces its saved result for that goal (p.saved keeps the server's)
 // S.preview keeps the last answer (with the draft it judged) so a reload of the list (loadPlaces: the 5 s re-poll
@@ -611,8 +615,8 @@ function refreshEditorState() {
 async function previewDraft(quiet = false) {
   const g = S.draft;
   if (!g) return;
+  const seq = (previewDraft.seq = (previewDraft.seq || 0) + 1); // a preview still on its way is dropped
   if (!draftDirty()) { applyGoalResults(g.id, null); S.previewMsg = ""; refreshEditorState(); renderList(); return; }
-  const seq = (previewDraft.seq = (previewDraft.seq || 0) + 1);
   if (!quiet) { S.previewMsg = "previewing the draft…"; refreshEditorState(); }
   const end = busy("goal");
   try {
@@ -629,6 +633,7 @@ async function previewDraft(quiet = false) {
   refreshEditorState();
   renderList();
 }
+// a draft's results also set what it cuts and adds (S.diff, goalDiff); none drops both
 function applyGoalResults(gid, places) {
   for (const p of S.places) {
     p.saved = p.saved || p.goals;
@@ -636,12 +641,15 @@ function applyGoalResults(gid, places) {
     p.goals = { ...p.saved };
     if (places[p.place_key]) p.goals[gid] = places[p.place_key]; else delete p.goals[gid];
   }
+  S.diff = places && S.draft?.id === gid ? goalDiff(S.draft) : null;
+  if (!S.diff || !S.diff[S.only]) S.only = null;
 }
 function selectGoal(id) {
   if (S.draft && draftDirty() && S.draft.id !== id && !confirm(`Drop the unsaved changes to "${S.draft.label}"?`)) return false;
   S.goal = id;
   S.draft = id === "all" ? null : clone(savedGoal(id) || { id, label: id, rules: [], nice: [] });
   S.previewMsg = "";
+  S.diff = null; S.only = null;
   if (S.places.length) applyGoalResults(null, null);
   renderGoalSwitch();
   if (goalTerm(S.goal) === "short") $("#sort").value = "price"; // a stay: cheaper is better within its budget
@@ -712,6 +720,70 @@ async function deleteGoal() {
     await reloadGoals("all");
   } catch (e) { toast("Not deleted: " + e.message, 6000); }
 }
+/* ---------------------------------------------------------------- draft diff: what an unsaved edit cuts or adds */
+// Once a draft's preview is in, each place's draft status (p.goals) is compared with its saved one (p.saved). Pass
+// or needs check under the saved goal and fail or no listings under the draft: "cut" (blue, kept in the list and
+// on the map as it was, with the rule that cuts it); the reverse: "added" (pink, with the saved goal's rule that
+// failed it). S.diff = {kinds: {pk: "cut"|"added"}, why: {pk: [reason]}, cut, added}, null when no draft differs.
+S.diff = null;
+S.only = null; // the summary line's "show": the list holds only the "cut" or only the "added" places
+const okStatus = (s) => s === "pass" || s === "needs_check";
+function diffKind(saved, draft) {
+  const a = okStatus(saved || "no_listings"), b = okStatus(draft || "no_listings");
+  return a && !b ? "cut" : !a && b ? "added" : null;
+}
+// indices of the draft's must-have rules that the saved goal does not have (a changed `people` changes every
+// price / person rule)
+function changedRules(draft, saved) {
+  const old = new Set((saved?.rules || []).map((r) => JSON.stringify(r)));
+  const ppl = (draft.people || null) !== (saved?.people || null);
+  return draft.rules.map((r, i) => (!old.has(JSON.stringify(r)) || (ppl && r.field === "price_per_person") ? i : -1))
+    .filter((i) => i >= 0);
+}
+// what cuts a place: the draft's failing reasons of changed rules (fails[].i, the rule's index); else its reasons the
+// saved goal did not give; else all. A place's deciding listing can change with the edit, so other rules may fail too.
+function cutReasons(d, s, changed) {
+  const rs = d?.reasons || [], fs = d?.fails || [], off = rs.length - fs.length; // no_listings leads with its own reason
+  const items = rs.map((t, k) => ({ t, x: fs[k - off] }));
+  const byRule = items.filter((it) => it.x && it.x.s === "fail" && changed.includes(it.x.i));
+  if (byRule.length) return byRule.map((it) => it.t);
+  const old = new Set(s?.reasons || []);
+  const fresh = items.filter((it) => !old.has(it.t) && (!it.x || it.x.s === "fail"));
+  return (fresh.length ? fresh : items).map((it) => it.t);
+}
+// what adds a place is the same question the other way round: the saved result's failing reasons of the saved
+// rules the draft changed or dropped (cutReasons(saved, draft, changedRules(saved goal, draft)))
+function goalDiff(g) {
+  const saved = savedGoal(g.id) || { rules: [] };
+  const changed = { cut: changedRules(g, saved), added: changedRules(saved, g) };
+  const d = { kinds: {}, why: {}, cut: 0, added: 0 };
+  for (const p of S.places) {
+    const s = p.saved?.[g.id], n = p.goals[g.id];
+    const k = diffKind(s?.status, n?.status);
+    if (!k) continue;
+    d.kinds[p.place_key] = k;
+    d[k]++;
+    d.why[p.place_key] = k === "cut" ? cutReasons(n, s, changed.cut) : cutReasons(s, n, changed.added);
+  }
+  return d;
+}
+// the summary under the count line (always in view, the editor scrolls): "this edit cuts N places (show) · adds M (show)"
+function renderDiffLine() {
+  const el = $("#g-diff");
+  if (!el) return;
+  const d = S.diff;
+  el.hidden = !d;
+  if (!d) { el.innerHTML = ""; return; }
+  const show = (k) => (d[k] ? ` (<a href="#" data-only="${k}">${S.only === k ? "show all" : "show only these"}</a>)` : "");
+  el.innerHTML = `this edit cuts <b class="n-cut">${num(d.cut)}</b> place${d.cut === 1 ? "" : "s"}${show("cut")}`
+    + ` · adds <b class="n-added">${num(d.added)}</b>${show("added")}`;
+  $$("[data-only]", el).forEach((a) => a.addEventListener("click", (e) => {
+    e.preventDefault();
+    S.only = S.only === a.dataset.only ? null : a.dataset.only;
+    renderDiffLine(); renderList();
+  }));
+}
+
 // Which attribute a place fails on: each non-pass goal rule arrives as {s, f, v, lim?, pt?/set?, modes?}
 // (filter.rules.fact, parallel to reasons). The card marks that attribute red (fail) or amber (needs_check);
 // one the card does not show becomes a small chip. Only the selected goal, or every goal under All.
@@ -751,10 +823,14 @@ function filtered() {
   const showInactive = $("#inactive").checked;
   // what a place must have is the goal's rules; the list shows the places whose status is ticked
   return S.places.filter((p) => {
+    const kind = S.diff?.kinds[p.place_key];
+    if (S.diff && S.only && kind !== S.only) return false;
+    // a place the draft cuts or adds is always listed (status ticks and inactive aside), to be looked at: the
+    // summary's counts are the cards shown
     const st = placeStatus(p);
-    if (!sts.has(st)) return false;
+    if (!kind && !sts.has(st)) return false;
     // most no-listings places have no active listing at all: their own tick shows them, inactive or not
-    if (!showInactive && !p.n_active && st !== "no_listings") return false;
+    if (!kind && !showInactive && !p.n_active && st !== "no_listings") return false;
     if (q) {
       const hay = [p.label, p.address, p.city, p.sources, p.title, p.operator].join(" ").toLowerCase();
       if (!hay.includes(q)) return false;
@@ -773,7 +849,8 @@ function sorted(list) {
   const per = (p) => (ppl ? (month(p) == null ? null : month(p) / ppl)
     : goalOffer(p) ? goalOffer(p).price_per_bed : goalTerm(S.goal) === "long" ? p.min_lease_per_bed : p.min_price_per_bed);
   const fns = {
-    status: (p) => [RANK[placeStatus(p)], -(p.goals[S.goal]?.nice_score || 0), nil(per(p))],
+    // a place the draft cuts keeps its saved place in the status order, next to what it was
+    status: (p) => [RANK[S.diff?.kinds[p.place_key] === "cut" && p.saved ? placeStatus({ goals: p.saved }) : placeStatus(p)], -(p.goals[S.goal]?.nice_score || 0), nil(per(p))],
     price: (p) => [nil(month(p))],
     ppb: (p) => [nil(per(p))],
     beds: (p) => [-(p.max_beds || 0)],
@@ -922,6 +999,7 @@ function renderList() {
     + `<b class="n-check">${num(tot.needs_check)}</b> check · <b class="n-fail">${num(tot.fail)}</b> fail`
     + ` · <b class="n-none">${num(tot.no_listings)}</b> no listings`
     + (list.length < S.places.length ? ` · showing ${num(list.length)}` : "");
+  renderDiffLine();
   $("#cards").innerHTML = list.map((p) => {
     const st = placeStatus(p);
     const chips = Object.entries(p.goals).filter(([g]) => S.goal === "all" || g === S.goal).map(([g, r]) => `<span class="chip ${r.status}" title="${esc(r.reasons.join("\n"))}">${esc(g)}: ${esc(STATUS_LABEL[r.status])}</span>`).join("");
@@ -934,14 +1012,16 @@ function renderList() {
         ${limitFacts(p, fails)}${netFact(p, fails)}${parkingFact(p.parking, fails)}${S.goal !== "all" ? parkingCostFact(p.goals[S.goal]?.parking_cost) : ""}${buildingFact(p.building_units, fails)}`;
     const rxb = restrictionBadge(p.restriction, fails);
     const extra = rxb + fails.filter((x) => !x.used).map(failChip).join("");
-    return `<div class="card ${st === "fail" ? "dim" : ""} ${S.selected === p.place_key ? "sel" : ""}" data-pk="${esc(p.place_key)}">
+    const kind = S.diff?.kinds[p.place_key];
+    const cutBy = kind ? `<div class="diff-why ${kind}">${kind === "cut" ? "cut by" : "added by (failed under the saved goal)"}: ${esc(S.diff.why[p.place_key].join(" · "))}</div>` : "";
+    return `<div class="card ${st === "fail" && !kind ? "dim" : ""} ${kind || ""} ${S.selected === p.place_key ? "sel" : ""}" data-pk="${esc(p.place_key)}">
       <h4>${esc(p.label)} ${stars(p.rating)}</h4>
       <div class="facts">
         ${facts}
         <span>${esc(p.sources)}</span>${p.n_active ? "" : '<span style="color:var(--bad)">inactive</span>'}
         ${p.user_status ? `<span>status: ${esc(p.user_status)}</span>` : ""}
       </div>
-      <div class="chips">${chips}${extra}</div>
+      <div class="chips">${chips}${extra}</div>${cutBy}
     </div>`;
   }).join("");
   $$(".card").forEach((el) => {

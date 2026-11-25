@@ -435,8 +435,10 @@ def evaluate_goal(inp: dict[str, Any], goal: Goal) -> tuple[dict[tuple[str, str]
         # an unpriced own-site plan (goal_inputs) is an own-site row: it decides wherever it is, but only whether the
         # place is 'no listings' or a fail (place_outcome); it has no listing result
         decides = pk not in own or is_own_priced(row) or i >= len(listings)
-        # the attribute each non-pass rule judges (rules.fact), in reasons order: cards mark it red or amber
-        fails = [{"s": s, **fact(r, row, goal.people)} for r, (s, _, _) in zip(goal.rules, reasons) if s != PASS]
+        # the attribute each non-pass rule judges (rules.fact), in reasons order: cards mark it red or amber; `i` is
+        # the rule's index in goal.rules (the goal editor names the edited rule that cuts a place)
+        fails = [{"s": s, "i": k, **fact(r, row, goal.people)}
+                 for k, (r, (s, _, _)) in enumerate(zip(goal.rules, reasons)) if s != PASS]
         res = {"status": combine([s for s, _, _ in reasons]), "reasons": reasons, "fails": fails, "nice": nice,
                **({"parking_cost": row_parking_cost(row, pc["spots"])} if pc else {}),
                "nice_score": sum(s == PASS for s, _, _ in nice), "source": row["source"],

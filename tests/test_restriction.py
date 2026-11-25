@@ -87,7 +87,7 @@ def test_name_only_rows_are_read_and_a_place_limit_holds_for_all_its_listings(co
     res = evaluate_all(conn, _goal())["listings"]["g"]
     assert res[("rentcafe", "plan:1")]["status"] == FAIL  # pooled from the building row
     assert '"(VASH)" (rentcafe)' in res[("rentcafe", "plan:1")]["reasons"][0][1]
-    assert res[("rentcafe", "plan:1")]["fails"] == [{"s": FAIL, "f": "restriction", "v": "veterans",
+    assert res[("rentcafe", "plan:1")]["fails"] == [{"s": FAIL, "i": 0, "f": "restriction", "v": "veterans",
                                                       "ev": '"(VASH)" (rentcafe)'}]
     # nothing read (a RentCafe /housing/ row, a name alone): assumed none, so the rule passes
     assert res[("rentcafe", "plan:2")]["status"] == PASS

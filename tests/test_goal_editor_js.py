@@ -119,6 +119,7 @@ const api = async () => [{{ place_key: 'a', goals: {{ lease: 'saved' }} }}];
 const renders = []; let previews = 0;
 const renderList = () => renders.push(S.places[0].goals.lease);
 const previewDraft = () => {{ previews++; }};
+const goalDiff = () => null;
 {_function(src, 'applyGoalResults')}
 {_function(src, 'loadPlaces')}
 (async () => {{
@@ -132,3 +133,88 @@ const previewDraft = () => {{ previews++; }};
 """
     out = json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout)
     assert out == {"renders": ["draft"], "previews": 3}
+
+
+# ---- the draft diff: places an unsaved edit cuts (blue) or adds (pink)
+LEASE_RULES = [{"field": "beds", "type": "min", "value": 3}, {"field": "baths", "type": "min", "value": 2},
+               {"in_net": False, "max": 21, "mode": "walk", "set": "caltrain_stations", "type": "near"}]
+
+
+def _node(src_names: list[str], body: str, prelude: str = "") -> object:
+    if not shutil.which("node"):
+        pytest.skip("node not installed")
+    src = APP_JS.read_text()
+    m = re.search(r"^const okStatus = .*$", src, re.M)
+    assert m, "no okStatus in app.js"
+    script = prelude + "\n" + m.group(0) + "\n" + "\n".join(_function(src, n) for n in src_names) + "\n" + body
+    return json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout)
+
+
+def test_diff_kind_cut_and_added():
+    pairs = [["pass", "fail"], ["needs_check", "no_listings"], ["fail", "pass"], ["no_listings", "needs_check"],
+             ["pass", "needs_check"], ["fail", "no_listings"], [None, "pass"], ["pass", None]]
+    out = _node(["diffKind"], f"console.log(JSON.stringify({json.dumps(pairs)}.map(([a, b]) => diffKind(a, b))));")
+    assert out == ["cut", "cut", "added", "added", None, None, "added", "cut"]
+
+
+def test_changed_rules_are_the_edited_ones():
+    tight = [*LEASE_RULES[:2], {**LEASE_RULES[2], "max": 18}]
+    out = _node(["changedRules"], f"""const saved = {{ rules: {json.dumps(LEASE_RULES)} }};
+      const ppp = {{ field: "price_per_person", type: "max", value: 2500 }};
+      console.log(JSON.stringify([changedRules({{ rules: {json.dumps(tight)} }}, saved),
+        changedRules({{ rules: saved.rules }}, saved),
+        changedRules({{ rules: [ppp], people: 3 }}, {{ rules: [ppp], people: 2 }})]));""")
+    assert out == [[2], [], [0]]
+
+
+def test_cut_by_names_the_edited_rule_not_the_other_fails():
+    # live case (2026-11-25, lease, walk to Caltrain 21 -> 18): the place passed; under the draft every plan fails, so
+    # a 1 bd / 1 ba listing decides and beds and baths fail too. The cut is the walk rule.
+    d = {"status": "fail", "reasons": ["beds >= 3: is 1", "baths >= 2: is 1", "walk to caltrain_stations <= 18: 19 min"],
+         "fails": [{"s": "fail", "i": 0, "f": "beds"}, {"s": "fail", "i": 1, "f": "baths"},
+                   {"s": "fail", "i": 2, "f": "near"}]}
+    out = _node(["cutReasons"], f"console.log(JSON.stringify(cutReasons({json.dumps(d)}, {{ reasons: [] }}, [2])));")
+    assert out == ["walk to caltrain_stations <= 18: 19 min"]
+    # no changed rule fails (a cut to no listings, or results without `i`): the reasons the saved goal did not give
+    nl = {"status": "no_listings", "reasons": ["no price for a fitting plan (1 fits)", "private bath ?: unknown"],
+          "fails": [{"s": "needs_check", "i": 0, "f": "private_bath"}]}
+    out = _node(["cutReasons"], f"console.log(JSON.stringify(cutReasons({json.dumps(nl)}, "
+                                f"{{ reasons: ['private bath ?: unknown'] }}, [1])));")
+    assert out == ["no price for a fitting plan (1 fits)"]
+
+
+def _filtered(diff: dict | None, only: str | None, ticks: list[str]) -> list[str]:
+    places = [{"place_key": "a", "label": "A", "n_active": 1, "goals": {"lease": {"status": "fail"}},
+               "saved": {"lease": {"status": "pass"}}},
+              {"place_key": "b", "label": "B", "n_active": 1, "goals": {"lease": {"status": "pass"}},
+               "saved": {"lease": {"status": "pass"}}},
+              {"place_key": "c", "label": "C", "n_active": 1, "goals": {"lease": {"status": "fail"}},
+               "saved": {"lease": {"status": "fail"}}},
+              {"place_key": "d", "label": "D", "n_active": 1, "goals": {"lease": {"status": "pass"}},
+               "saved": {"lease": {"status": "fail"}}}]
+    prelude = (f"const S = {{ goal: 'lease', places: {json.dumps(places)}, diff: {json.dumps(diff)}, only: {json.dumps(only)} }};\n"
+               "const RANK = { pass: 0, needs_check: 1, no_listings: 2, fail: 3 };\n"
+               f"const $ = (s) => (s === '#q' ? {{ value: '' }} : {{ checked: false }});\n"
+               f"const $$ = () => {json.dumps(ticks)}.map((v) => ({{ value: v, checked: true }}));")
+    return _node(["placeStatus", "filtered"], "console.log(JSON.stringify(filtered().map((p) => p.place_key)));",
+                 prelude)
+
+
+def test_cut_places_stay_listed_and_show_only_cut_or_added():
+    diff = {"kinds": {"a": "cut", "d": "added"}, "why": {"a": ["x"], "d": ["y"]}, "cut": 1, "added": 1}
+    assert _filtered(diff, None, ["pass", "needs_check"]) == ["a", "b", "d"]  # fail unticked: the cut one stays
+    assert _filtered(diff, None, ["fail"]) == ["a", "c", "d"]  # pass unticked: the added one stays
+    assert _filtered(diff, "cut", ["pass", "needs_check", "fail"]) == ["a"]  # "show only these" (cut)
+    assert _filtered(diff, "added", ["pass", "needs_check", "fail"]) == ["d"]  # "show only these" (added)
+    assert _filtered(None, "cut", ["pass", "needs_check"]) == ["b", "d"]  # no draft diff: the toggle does nothing
+
+
+def test_added_by_names_the_loosened_rule():
+    # loosening walk to Caltrain 21 -> 24: the place failed the saved walk rule (index 2); the saved rule the draft
+    # changed is what added it, and the line quotes the saved goal's reason
+    out = _node(["changedRules", "cutReasons"], f"""const saved = {{ rules: {json.dumps(LEASE_RULES)} }};
+      const draft = {{ rules: {json.dumps([*LEASE_RULES[:2], {**LEASE_RULES[2], "max": 24}])} }};
+      const s = {{ status: "fail", reasons: ["walk to caltrain_stations <= 21: 23 min"],
+                   fails: [{{ s: "fail", i: 2, f: "near" }}] }};
+      console.log(JSON.stringify(cutReasons(s, {{ status: "pass", reasons: [] }}, changedRules(saved, draft))));""")
+    assert out == ["walk to caltrain_stations <= 21: 23 min"]

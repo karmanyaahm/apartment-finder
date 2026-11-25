@@ -249,9 +249,10 @@ def test_places_name_the_attribute_each_goal_fails_on(client):
         for r in p["goals"].values():
             assert len(r["fails"]) == len(r["reasons"])
     rwc = next(p for p in places if "Brewster" in (p["address"] or ""))
-    assert rwc["goals"]["lease"]["fails"] == [{"s": "fail", "f": "beds", "v": 2.0}]
+    assert rwc["goals"]["lease"]["fails"] == [{"s": "fail", "i": 1, "f": "beds", "v": 2.0}]  # i: the rule's index
     temp = {x["f"]: x for x in rwc["goals"]["temp"]["fails"]}
-    assert temp["price_month"] == {"s": "fail", "f": "price_month", "v": 4200.0, "lim": 4000}
+    assert {k: v for k, v in temp["price_month"].items() if k != "i"} == \
+        {"s": "fail", "f": "price_month", "v": 4200.0, "lim": 4000}
     assert temp["furnished"]["v"] is False and temp["private_bath"]["s"] == "needs_check"
     assert temp["commute"]["pt"] == "commute_targets:Downtown Palo Alto" and "bike" in temp["commute"]["modes"]
 
@@ -354,6 +355,23 @@ def test_an_amenity_rating_is_the_buildings_for_every_goal_and_a_later_comment_k
     assert res["status"] == "pass"
     assert c.get("/api/places").json()[0]["place_key"] == pk  # the card and drawer read the same rows
     assert [a["goal_id"] for a in c.get(f"/api/places/{pk}").json()["annotations"]] == ["temp", None, None]
+
+
+def test_a_preview_fail_names_its_rule_index(client):
+    """The goal editor's draft diff names the edited rule that cuts a place: each fail carries `i`, the rule's index
+    in the goal's must-haves, and the preview's status and reasons are all it needs (no second request)."""
+    c, _ = client
+    loose = {"label": "d", "rules": [{"type": "min", "field": "beds", "value": 0},
+                                     {"type": "max", "field": "price_month", "value": 100000}], "nice": []}
+    tight = {**loose, "rules": [loose["rules"][0], {"type": "max", "field": "price_month", "value": 1}]}
+    before = c.post("/api/goals/preview", json=loose).json()["places"]
+    after = c.post("/api/goals/preview", json=tight).json()["places"]
+    cut = [pk for pk, r in before.items() if r["status"] in ("pass", "needs_check") and after[pk]["status"] == "fail"]
+    assert cut
+    for pk in cut:
+        r = after[pk]
+        assert [x["i"] for x in r["fails"] if x["s"] == "fail"] == [1]
+        assert any(t.startswith("price_month <= 1") for t in r["reasons"]), r["reasons"]
 
 
 def test_a_restriction_answer_must_be_one_of_the_rules_values(client):

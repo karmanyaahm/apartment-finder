@@ -1,19 +1,19 @@
 :root {
   --bg: #f6f5f2; --panel: #ffffff; --ink: #1d1d1f; --muted: #6b6b70; --line: #e2e0da;
-  --pass: #1f9d55; --check: #e0a100; --fail: #8a8a8a; --none: #7d93ab; --accent: #2457c5; --bad: #c53030;
+  --pass: #1f9d55; --check: #e0a100; --fail: #8a8a8a; --none: #7d93ab; --accent: #2457c5; --cut: #0a84ff; --added: #d6339c; --bad: #c53030;
   --chip-bg: #efeee9;
   --src-google: #1a5fd0; --src-knn: #7a3fc2;  /* commute time sources: Google blue, KNN violet (pass/fail are green/amber/red) */
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #141416; --panel: #1d1d20; --ink: #ececee; --muted: #9a9aa0; --line: #2e2e33;
-    --pass: #3ccf7a; --check: #f2b92b; --fail: #77777d; --none: #6f87a3; --accent: #6b94ff; --bad: #ff6b6b; --chip-bg: #2a2a2f;
+    --pass: #3ccf7a; --check: #f2b92b; --fail: #77777d; --none: #6f87a3; --accent: #6b94ff; --cut: #3ea6ff; --added: #ff70c8; --bad: #ff6b6b; --chip-bg: #2a2a2f;
     --src-google: #8ab4f8; --src-knn: #c39bff;
   }
 }
 :root[data-theme="dark"] {
   --bg: #141416; --panel: #1d1d20; --ink: #ececee; --muted: #9a9aa0; --line: #2e2e33;
-  --pass: #3ccf7a; --check: #f2b92b; --fail: #77777d; --none: #6f87a3; --accent: #6b94ff; --bad: #ff6b6b; --chip-bg: #2a2a2f;
+  --pass: #3ccf7a; --check: #f2b92b; --fail: #77777d; --none: #6f87a3; --accent: #6b94ff; --cut: #3ea6ff; --added: #ff70c8; --bad: #ff6b6b; --chip-bg: #2a2a2f;
   --src-google: #8ab4f8; --src-knn: #c39bff;
 }
 * { box-sizing: border-box; }
@@ -64,6 +64,12 @@ body.busy-goal #cards { opacity: .6; }
   cursor: pointer; }
 .card:hover, .card.sel { border-color: var(--accent); }
 .card.dim { opacity: .55; }
+/* the unsaved draft's diff: cut (blue) and added (pink), dashed apart from the solid accent of hover / selected */
+.card.cut { border: 2px dashed var(--cut); }
+.card.added { border: 2px dashed var(--added); }
+.card .diff-why { font-size: 12px; margin-top: 3px; }
+.card .diff-why.cut { color: var(--cut); } .card .diff-why.added { color: var(--added); }
+#g-diff { padding: 0 12px 4px; } #g-diff .n-cut { color: var(--cut); } #g-diff .n-added { color: var(--added); }
 .card.hl { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); opacity: 1; }
 .card h4 { margin: 0 0 2px; font-size: 14px; }
 .card .facts { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--muted); }
