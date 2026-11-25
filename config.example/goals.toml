@@ -1,16 +1,23 @@
 # Goals are filters over stored data. Changing anything here needs no new scrape.
 #
-# Rule types (see src/aptfinder/filter/rules.py):
-#   equals        field, value                 listing field must equal value
-#   max           field, value, strict?        field <= value (< when strict)
+# Rule types (see src/aptfinder/filter/rules.py RULE_TYPES; the dashboard's goal editor writes the same shapes):
+#   equals        field, value                 term, furnished, private_bath, kind, restriction, parking_included,
+#                                              is_apartment_building
+#   max / min     field, value, strict?        price, price_month, price_per_bed, price_per_person, beds, baths, sqft,
+#                                              parking_spots, parking_usd_month, building_units
 #   size_options  options = [{beds, min_baths}] beds must match one option with baths >= min_baths
-#   dates_cover   start, end                   available for the whole range
-#   commute_any   target, options=[{mode,max}] at least one mode within max minutes to the target
-#   near          set, mode, max               nearest point of a set within max minutes
-#   amenity       name                         amenities list contains name (or user annotation)
+#   dates_cover   start, end                   available for the whole range; a stated minimum stay longer fails
+#   commute_any   target, options=[{mode,max}], in_net?   at least one mode within max minutes to the target
+#   near          set, mode, max, in_net?      nearest point of a set within max minutes
+#   amenity       name, match?, exclude?       amenities list matches name or a match word, none of exclude
 #   known         field                        field is present
-#   (restriction: who may rent, read by `aptf-intake extract`: none | income | senior | veterans | student |
-#    employer | other; a limit stated anywhere at the place holds for all its listings; unread = needs_check)
+#   net_commute   agg, max                     the goal's counted commutes combined (total, mean, median, spread)
+#   not_operator  name                         not rented out by this operator (config/operators.toml)
+#   parking_cost  spots                        what N parking spaces add a month; a nice-to-have that ranks
+#   (restriction: who may rent: none | income | senior | veterans | student | employer | other; a limit stated
+#    anywhere at the place holds for all its listings; nothing stated = assumed none)
+# A goal may set `people = N` (roommates sharing a group lease): price_per_person = price_month / N.
+# in_net: whether a commute or near rule counts in the net commute (default: must-haves yes, nice-to-haves no).
 # Missing input never rejects: the rule returns needs_check and names the field.
 
 [verify]
@@ -114,3 +121,22 @@ max = 10
 [[goals.lease.nice]]
 type = "known"
 field = "sqft"
+
+# More rule shapes, as a goal might use them (uncomment to try; the editor offers each as a preset):
+# [[goals.lease.rules]]
+# type = "equals"
+# field = "is_apartment_building"
+# value = true
+#
+# [[goals.lease.rules]]
+# type = "not_operator"
+# name = "Blueground"
+#
+# [[goals.lease.nice]]
+# type = "parking_cost"
+# spots = 2
+#
+# [[goals.lease.nice]]
+# type = "net_commute"
+# agg = "mean"
+# max = 25
