@@ -31,6 +31,13 @@ def test_airbnb_private_room():
     assert p.url == "https://www.airbnb.com/rooms/48905693"
 
 
+def test_airbnb_monthly_qualifier_is_per_month():
+    item = airbnb_item(price={"label": "$6,709 monthly, originally $8,786", "qualifier": "monthly",
+                              "price": "$6,709", "discountedPrice": "$6,709"})
+    p = ADAPTERS["airbnb"].parse(item, AIRBNB_CFG)
+    assert (p.price, p.price_basis) == (6709, "month")  # not a total for the dates
+
+
 def test_airbnb_shared_and_ambiguous_baths():
     shared = airbnb_item(sharingConfigTitle="Home · 1 bedroom · 1 bed · 2 shared baths", subDescription={"items": []})
     assert ADAPTERS["airbnb"].parse(shared, AIRBNB_CFG).data.private_bath is False

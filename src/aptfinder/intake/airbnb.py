@@ -9,7 +9,9 @@ from typing import Any
 from ..store.models import ObservationData
 from .base import Adapter, Parsed, money
 
-BASIS = {"month": "month", "night": "night", "week": "week", "total": "stay"}
+# Airbnb words a stay of 28+ nights as "monthly" (2026-11-24 runs on) or "month" (earlier): a price per month,
+# not the total for the dates.
+BASIS = {"month": "month", "monthly": "month", "night": "night", "week": "week", "total": "stay"}
 
 
 def build_input(cfg: dict[str, Any], areas: list) -> dict[str, Any]:
