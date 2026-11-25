@@ -34,6 +34,23 @@ def _date(v: Any) -> str | None:
     return "-".join(m.groups()) if m else None
 
 
+MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october",
+          "november", "december"]
+_MOVE_IN = re.compile(r"lowest available price, based on .{0,60}? stay with a move-in date of ([A-Z][a-z]+) (\d{1,2}), "
+                      r"(\d{4})")
+
+
+def _move_in(op: str | None, desc: str | None) -> str | None:
+    """A Blueground unit's first available date from its listing template, when Zumper gives no date: "The advertised
+    rate of $3,860/month is the lowest available price, based on a 4 month(s) and 19 day(s) stay with a move-in date
+    of December 6, 2026". On Apartments.com, where the same template sits beside the unit's AvailableDate, the two
+    agree for 61 of 62 Blueground units (2026-11-25; one said a year later)."""
+    m = _MOVE_IN.search(desc or "") if op == "Blueground" else None
+    if not m or m.group(1).lower() not in MONTHS:
+        return None
+    return f"{m.group(3)}-{MONTHS.index(m.group(1).lower()) + 1:02d}-{int(m.group(2)):02d}"
+
+
 def _baths(full: Any, half: Any) -> float | None:
     if not isinstance(full, (int, float)):
         return None
@@ -86,6 +103,8 @@ def zumper_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] | No
     name = item.get("building_name") or None
     base = dict(address=addr, city=item.get("city"), zip=item.get("zipcode"), lat=item.get("lat"),
                 lon=item.get("lng"), property_name=name, operator=op, title=item.get("title"),
+                # Blueground rents whole furnished homes only: the bath is the renter's own
+                private_bath=True if op == "Blueground" else None,
                 description=(item.get("short_description") or "")[:3000] or None,
                 amenities=(item.get("amenity_tags") or []) + (item.get("building_amenity_tags") or []) or None)
     # a furnished-stay operator's link is not the building's website (Blueground's "1600 Villa Street" listing at
@@ -113,7 +132,8 @@ def zumper_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] | No
             data=ObservationData(**base, kind="apartment", term="short" if short else "long",
                                  furnished=True if short else None, floor_plan=f.get("title"),
                                  beds=f.get("bedrooms"), baths=_baths(f.get("bathrooms"), f.get("half_bathrooms")),
-                                 sqft=f.get("square_feet") or None, available_from=_date(f.get("date_available")),
+                                 sqft=f.get("square_feet") or None, available_from=_date(f.get("date_available"))
+                                 or _move_in(op, base["description"]),
                                  extra={**extra, "plan_listing_id": f.get("listing_id"),
                                         "baths_full": f.get("bathrooms"), "baths_half": f.get("half_bathrooms"),
                                         "plan_price_max": f.get("max_price"), "units_offered": ud.get("active"),
@@ -150,7 +170,7 @@ def _single(lid, url, base, extra, bmin, bmax, tmin, tmax, smin, smax, price, av
                                        furnished=True if short else None, beds=bmin,
                                        baths=tmin if _same(tmin, tmax) else None,
                                        sqft=(smin or None) if _same(smin, smax) else None,
-                                       available_from=_date(avail),
+                                       available_from=_date(avail) or _move_in(op, base.get("description")),
                                        extra={**extra, "property_type": ptype,
                                               "price_max": None if extra["price_range"][1] == price
                                               else extra["price_range"][1]}))
@@ -158,7 +178,7 @@ def _single(lid, url, base, extra, bmin, bmax, tmin, tmax, smin, smax, price, av
 
 def _summary(lid, url, base, extra) -> Parsed:
     return Parsed(source_id=f"building:{extra.get('building_id') or lid}", url=url, price=None, price_basis=None,
-                  data=ObservationData(**base, kind=SITE_INFO,
+                  data=ObservationData(**{**base, "private_bath": None}, kind=SITE_INFO,
                                        extra={**extra, "note": "building summary (beds and prices as ranges): "
                                                                "not an offer"}))
 

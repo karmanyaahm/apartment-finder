@@ -235,9 +235,11 @@ def test_furnished_text_and_blueground_units_are_short_stays():
                                           "Description": "Were you looking for an unfurnished lease? ... (ID #SFO1141)"}]}
     (p,) = ADAPTERS["apartments_com"].parse(single, {})
     assert p.data.furnished is True and p.data.term == "short" and p.data.operator == "Blueground"
+    assert p.data.private_bath is True  # a whole furnished home: the bath is the renter's own
     plain = {**single, "rentals": [{**single["rentals"][0], "MinLeaseTerm": 12, "Description": "unfurnished home"}]}
     (q,) = ADAPTERS["apartments_com"].parse(plain, {})
     assert q.data.furnished is False and q.data.term == "long" and q.data.operator is None
+    assert q.data.private_bath is None
 
 
 def test_furnished_stay_template_without_operator_name():

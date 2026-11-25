@@ -63,10 +63,26 @@ def test_zumper_building_gives_offered_plans_and_website():
 def test_zumper_furnished_stay_and_summary():
     p, = ADAPTERS["zumper"].parse(ZUMPER_BLUEGROUND, {})
     assert (p.source_id, p.price, p.data.beds, p.data.sqft) == ("62879871", 3560, 1, 845)
-    assert (p.data.operator, p.data.furnished, p.data.term) == ("Blueground", True, "short")
+    assert (p.data.operator, p.data.furnished, p.data.term, p.data.private_bath) == ("Blueground", True, "short", True)
     # a listing spanning bedroom counts without plan details is the building, not an offer
     s, = ADAPTERS["zumper"].parse({**ZUMPER_BUILDING, "detail_entity_data_floorplan_listings": None}, {})
     assert s.data.kind == "site_info" and s.price is None and s.source_id == "building:173"
+    assert s.data.private_bath is None
+    assert p.data.available_from is None  # no date and no template sentence: unknown
+
+
+def test_zumper_blueground_move_in_date_from_its_template():
+    """Zumper gives Blueground units no date; their template's move-in date is the unit's first available day."""
+    desc = ("Feel at home wherever you choose to live with Blueground. (ID #SFO1895)   The advertised rate of "
+            "$3,860/month is the lowest available price, based on a 4 month(s) and 19 day(s) stay with a move-in "
+            "date of December 6, 2026. If you're looking")
+    p, = ADAPTERS["zumper"].parse({**ZUMPER_BLUEGROUND, "short_description": desc}, {})
+    assert p.data.available_from == "2026-12-06"
+    p, = ADAPTERS["zumper"].parse({**ZUMPER_BLUEGROUND, "short_description": desc, "date_available": "2026/11/30"}, {})
+    assert p.data.available_from == "2026-11-30"  # Zumper's own date first
+    other = {**ZUMPER_BLUEGROUND, "provider_url": "https://example.com/x", "lease_type": 10, "short_description": desc}
+    p, = ADAPTERS["zumper"].parse(other, {})
+    assert p.data.operator is None and p.data.available_from is None  # only Blueground's template
 
 
 # a house with no floor plans: `min_bathrooms` is the full count only, `min_all_bathrooms` is [full, half]

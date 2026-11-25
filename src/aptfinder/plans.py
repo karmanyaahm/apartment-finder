@@ -8,6 +8,7 @@ Without a size, the plan name decides.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Callable
 
@@ -74,7 +75,7 @@ def inherit_baths(rows: list[dict[str, Any]], readings: dict[tuple[str, str], di
     disagreements: [{source_id, place_key, values: {baths: [source|source_id, ...]}}]."""
     by_place: dict[str, list[dict[str, Any]]] = {}
     for r in rows:
-        if r.get("place_key") and r.get("active") and fields(r).get("baths") is not None \
+        if r.get("place_key") and r.get("active") and (fields(r).get("baths") is not None or _named_plans(r)) \
                 and r["source"] != "direct" and fields(r).get("kind") != "site_info":
             by_place.setdefault(r["place_key"], []).append(r)
     out = []
@@ -84,28 +85,45 @@ def inherit_baths(rows: list[dict[str, Any]], readings: dict[tuple[str, str], di
                 or f.get("beds") is None or not r.get("place_key"):
             continue
         name = _plan_name(f)
-        hits = []
+        hits: list[tuple[dict[str, Any], float]] = []  # (listing, the matching plan's baths)
         for o in by_place.get(r["place_key"], []):
             g = fields(o)
             if g.get("beds") != f["beds"] or offer_kind(g) != offer_kind(f):
                 continue
-            if (f.get("sqft") and g.get("sqft") and abs(g["sqft"] - f["sqft"]) <= SQFT_TOL * f["sqft"]) \
-                    or (name and _plan_name(g) == name):
-                hits.append(o)
-        vals = {fields(o)["baths"] for o in hits}
+            if g.get("baths") is not None and (
+                    (f.get("sqft") and g.get("sqft") and abs(g["sqft"] - f["sqft"]) <= SQFT_TOL * f["sqft"])
+                    or (name and _plan_name(g) == name)):
+                hits.append((o, g["baths"]))
+            elif name:  # a Zillow bedroom row ('3bd') names its building's plans in `extra.building_plans`
+                hits += [(o, p["baths"]) for p in _named_plans(o) if _plan_name({"floor_plan": p.get("name")}) == name
+                         and p.get("beds") == f["beds"] and p.get("baths")]
+        vals = {b for _, b in hits}
         if len(vals) == 1:
-            o = hits[0]
-            f["baths"] = fields(o)["baths"]
+            o = hits[0][0]
+            f["baths"] = hits[0][1]
             f["baths_from"] = {"how": "borrowed", "source": o["source"], "source_id": o["source_id"], "n": len(hits)}
         elif len(vals) > 1:
             groups: dict[float, list[str]] = {}
-            for o in hits:
-                groups.setdefault(fields(o)["baths"], []).append(f"{o['source']}|{o['source_id']}")
+            for o, b in hits:
+                groups.setdefault(b, []).append(f"{o['source']}|{o['source_id']}")
             out.append({"source_id": r["source_id"], "place_key": r["place_key"], "values": groups})
         elif (rd := (readings or {}).get((r["source"], r["source_id"]))) is not None:
             f["baths"] = rd["baths"]
             f["baths_from"] = {"how": "drawing", "seen": rd.get("seen"), "file": rd.get("file")}
     return out
+
+
+def _named_plans(r: dict[str, Any]) -> list[dict[str, Any]]:
+    """The named plans a row lists for its bed count (a Zillow building's bedroom row: `extra.building_plans`, each
+    {name, beds, baths, sqft, ...}); [] for any other row. `data` is the observation JSON, text or parsed."""
+    d = r.get("data")
+    if isinstance(d, str):
+        try:
+            d = json.loads(d)
+        except ValueError:
+            return []
+    ps = ((d or {}).get("extra") or {}).get("building_plans") if isinstance(d, dict) else None
+    return [p for p in ps or [] if isinstance(p, dict)]
 
 
 def baths_note(b: dict[str, Any] | None) -> str:

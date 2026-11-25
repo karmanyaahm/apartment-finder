@@ -128,3 +128,29 @@ def test_filter_uses_borrowed_and_drawing_baths_and_a_hand_value_wins(conn, tmp_
 
     assert ("direct", "baths") not in accuracy(conn)
     assert json.loads(conn.execute("SELECT counts FROM runs WHERE component = 'planread'").fetchone()[0])["readings"][sha]["v"] == 1
+
+
+def test_borrow_from_a_zillow_building_rows_named_plan():
+    """Zillow's bedroom row ('3bd') names no plan itself, but its building page's plans do (`extra.building_plans`):
+    an own-site plan of the same name and beds takes that plan's baths (Indigo ULTRAMARINE, 2026-11-25)."""
+    plans = [{"name": "Ultramarine", "beds": 3, "baths": 2, "sqft": 1481, "price": 7031},
+             {"name": "Cobalt", "beds": 3, "baths": 2.5, "sqft": 1600, "price": 8000}]
+    rows = [
+        _row("direct", "i:ultramarine", beds=3, baths=None, sqft=None, floor_plan="ULTRAMARINE"),
+        _row("direct", "i:azure", beds=3, baths=None, sqft=None, floor_plan="AZURE"),  # no plan of that name
+        _row("direct", "i:3-br", beds=3, baths=None, sqft=None, floor_plan="3 BR"),  # generic: never by name
+        _row("zillow", "9:3bd", beds=3, baths=None, sqft=None, floor_plan="3bd",
+             data=json.dumps({"extra": {"building_plans": plans}})),
+    ]
+    inherit_baths(rows)
+    by = {r["source_id"]: r for r in rows}
+    assert by["i:ultramarine"]["baths"] == 2
+    assert by["i:ultramarine"]["baths_from"] == {"how": "borrowed", "source": "zillow", "source_id": "9:3bd", "n": 1}
+    assert by["i:azure"]["baths"] is None and by["i:3-br"]["baths"] is None
+    # the drawer's rows carry `data` parsed
+    drawer = [{**_row("direct", "i:u", floor_plan="Ultramarine"), "fields": {"beds": 3, "baths": None,
+                                                                            "floor_plan": "Ultramarine", "kind": "apartment"}},
+              {**_row("zillow", "9:3bd"), "data": {"extra": {"building_plans": plans}},
+               "fields": {"beds": 3, "baths": 2, "floor_plan": "3bd", "kind": "apartment"}}]
+    inherit_baths(drawer, fields=lambda r: r["fields"])
+    assert drawer[0]["fields"]["baths"] == 2

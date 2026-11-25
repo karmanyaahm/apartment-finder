@@ -479,3 +479,23 @@ def test_conflict_hidden_when_every_reading_gives_the_same_result(conn):
     k = next(c for c in all_conflicts(conn) if any(l["source_id"] == "k1" for l in c["listings"]))
     # $3,000/bed as a 3bd fails, $2,250/bed as a 4bd passes: the beds decide
     assert goal_relevance(k, tight.rules, res2["listings"]["t"], rows, inp["low"]) == "shown"
+
+
+def test_a_gone_listing_never_holds_a_place_open_over_an_active_one():
+    """The Chateau (2026-11-25): an active Craigslist 3bd fails 'beds >= 4'; a Zillow listing removed from the
+    market, with every field empty, said needs_check and decided the place. An active listing's result decides;
+    a place with only gone listings keeps the best of theirs."""
+    from aptfinder.config import Goal
+    from aptfinder.filter import evaluate_goal
+
+    goal = Goal(label="g", rules=[{"type": "min", "field": "beds", "value": 4}])
+
+    def row(sid, pk, active, beds):
+        return {"source": "x", "source_id": sid, "place_key": pk, "unit_key": None, "active": active, "beds": beds}
+
+    inp = {"listings": [row("cl", "p1", 1, 3), row("zgone", "p1", 0, None),
+                        row("old", "p2", 0, None), row("older", "p2", 0, 2)],
+           "trips": {}, "anns": {}, "low": set(), "own": set()}
+    _, places = evaluate_goal(inp, goal)
+    assert (places["p1"]["status"], places["p1"]["source_id"]) == ("fail", "cl")
+    assert (places["p2"]["status"], places["p2"]["source_id"]) == ("needs_check", "old")

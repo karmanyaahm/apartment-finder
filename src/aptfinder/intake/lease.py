@@ -363,6 +363,9 @@ def apartments2_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed]
                                      available_from=_avail(r.get("AvailableDate") or r.get("AvailableDateText")),
                                      description=desc[:3000] or None,
                                      furnished=furnished,
+                                     # a Blueground (or stay-template) home is a whole furnished unit: its bath
+                                     # is the renter's own, as Airbnb's and Furnished Finder's whole units say
+                                     private_bath=True if (operator == "Blueground" or template) else None,
                                      extra={**extra, "property_type": ptype, "stay_template": template or None,
                                             "min_lease_months": r.get("MinLeaseTerm"),
                                             "max_lease_months": r.get("MaxLeaseTerm")})))

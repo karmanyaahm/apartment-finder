@@ -331,7 +331,9 @@ def evaluate_goal(inp: dict[str, Any], goal: Goal) -> tuple[dict[tuple[str, str]
         if pk is None or not decides:
             continue
         best = pres.get(pk)
-        if best is None or (RANK[res["status"]], -res["nice_score"]) < (RANK[best["status"]], -best["nice_score"]):
+        res["active"] = bool(row.get("active"))
+        if best is None or (not res["active"], RANK[res["status"]], -res["nice_score"]) < \
+                (not best["active"], RANK[best["status"]], -best["nice_score"]):
             pres[pk] = res
     return lres, pres
 
