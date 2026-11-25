@@ -25,7 +25,7 @@ import re
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 from typing import Any, Callable
@@ -333,7 +333,7 @@ def names_unit(quote: str, ev: dict[str, Any]) -> bool:
 
 
 def accept(d: dict[str, Any], item: dict[str, Any], ev: list[dict[str, Any]], blocks: dict[str, str],
-           today: str) -> tuple[bool, str]:
+           today: str, owners: dict[str, list[dict[str, Any]]] | None = None) -> tuple[bool, str]:
     """(accepted, why not) for one of Sonnet's decisions."""
     f, v = d.get("field"), d.get("value")
     if f not in item["decide"]:
@@ -359,6 +359,18 @@ def accept(d: dict[str, Any], item: dict[str, Any], ev: list[dict[str, Any]], bl
             return False, "a third value"
     if f in ("price", "sqft") and _priced_lines(blocks[bid]) >= 3 and not any(names_unit(quote, e) for e in ev):
         return False, "page lists several prices and the quote names no unit"
+    if not item.get("text") and not item.get("cheap") and len(ev) > 1:
+        # a cross conflict won by a source quoting itself proves nothing about the other source: refused for facts
+        # that do not age (beds, baths, sqft); a price only from a current page when every loser was last seen a
+        # week or more ago (a newer page supersedes an older observation)
+        own = (owners or {}).get(bid) or []
+        if own and all(same_value(f, stored_value(e["obs"], f), v, today) for e in own):
+            if f != "price":
+                return False, "the winning source quoting itself"
+            losers = [e for e in ev if not same_value(f, stored_value(e["obs"], f), v, today)]
+            week = (date.fromisoformat(today) - timedelta(days=7)).isoformat()
+            if not bid.startswith("P") or any(e["last_seen"] > week for e in losers):
+                return False, "the winning source quoting itself"
     return True, ""
 
 
@@ -450,8 +462,10 @@ def _decide(conn, items, pages_by_url, texts, today, model, ask_fn, workers, log
             log(f"  ! {it['place_key']} {it['decide']}: {r['error']}")
         else:
             decisions, r["cost"] = ans
+            owners = {f"E{i}": [e] for i, e in enumerate(ev, 1)} | {
+                f"P{j}": [e for e in ev if e["url"] == u] for j, u in enumerate(pages, 1)}
             for d in decisions:
-                ok, why = accept(d, it, ev, blocks, today)
+                ok, why = accept(d, it, ev, blocks, today, owners)
                 r["decisions"].append({**d, "accepted": ok, "why_not": why})
             if it.get("cheap"):  # a real price closes a too-cheap item: only when Sonnet is sure what is offered
                 kind = next((d for d in r["decisions"] if d.get("field") == "kind"), None)
@@ -537,7 +551,8 @@ def reconcile(conn, *, goal: str | None = None, limit: int = 10, max_usd: float 
             raw = settings.RAW_DIR / "reconcile"
             raw.mkdir(parents=True, exist_ok=True)
             (raw / f"run{run_id or 'dry'}-{proxy}-{datetime.now():%H%M%S}.json").write_text(json.dumps(info))
-            cost = (info.get("usd") or 0) + (per * n if proxy == "residential" else 0)
+            # the run's charge; residential traffic may post after the run, so at least the estimate
+            cost = max(info.get("usd") or 0, per * n if proxy == "residential" else 0)
             spent += cost
             apify["usd"] += cost
             apify["runs"].append({k: v for k, v in info.items() if k != "items"})
@@ -604,16 +619,13 @@ def reconcile(conn, *, goal: str | None = None, limit: int = 10, max_usd: float 
 
 
 def retract(conn, check_id: int, why: str) -> int:
-    """Withdraw one of the reconciler's checks: a newer `reconcile:` row on the same observation and field whose
-    stored value (null) matches no current value, so the current_checks view no longer holds a valid check for the
-    listing and field and the conflict reopens. Append-only: the retracted row stays. Refused for a user's check
-    or when the listing's current value is empty (a null stored value would then be valid)."""
+    """Withdraw one of the reconciler's checks: a newer `reconcile:` row on the same observation and field, verdict
+    cannot_tell, stored value null. Where the listing states a value, null matches nothing, so the current_checks
+    view holds no valid check for the listing and field and the conflict reopens; where it states none, the row is
+    the current check and, being no 'wrong', removes the override. Append-only: the retracted row stays. Refused
+    for a user's check."""
     c = conn.execute("SELECT * FROM checks WHERE id = ?", (check_id,)).fetchone()
     if c is None or not c["author"].startswith("reconcile:"):
         raise ValueError(f"check {check_id} is not a reconciler check")
-    o = conn.execute("SELECT lo.* FROM observations o JOIN latest_obs lo ON lo.source = o.source "
-                     "AND lo.source_id = o.source_id WHERE o.id = ?", (c["observation_id"],)).fetchone()
-    if stored_value(dict(o), c["field"]) is None:
-        raise ValueError(f"check {check_id}: the listing's {c['field']} is empty; a retraction would not reopen it")
     return append_check(conn, c["author"], "conflict", c["field"], "cannot_tell", observation_id=c["observation_id"],
                         stored_value=None, note=json.dumps({"retracts": check_id, "why": why}))

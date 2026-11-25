@@ -10,7 +10,7 @@ from aptfinder.verify import reconcile as rc
 def two_sources(conn):
     r = start_run(conn, "intake", "zillow")
     a = append_observation(conn, r, "zillow", "1", {"address": "49 Showers Dr, Mountain View", "beds": 2, "baths": 2,
-                                                   "description": "Sunny 2 bed 2 bath, $3,000/mo, parking."},
+                                                   "description": "Sunny 2 bed 2 bath, parking. Price lowered: now $3,200 per month."},
                            price=3000, price_basis="month", url="https://z/1")
     b = append_observation(conn, r, "zumper", "9", {"address": "49 Showers Drive, Mountain View", "beds": 2,
                                                    "baths": 2, "description": "Two bedrooms. Rent $3,200 per month."},
@@ -31,7 +31,9 @@ def run(conn, fn, **kw):
 def test_accepted_answer_closes_the_conflict_as_machine_checks(conn):
     a, b = two_sources(conn)
     assert [c["fields"] for c in conflict_queue(conn)] == [["price_month"]]
-    st = run(conn, answer(3200, "Rent $3,200 per month", evidence="E2"))
+    st = run(conn, answer(3200, "Rent $3,200 per month", evidence="E2"))  # zumper restating its own price
+    assert st["undecided"] == 1 and st["fields_rejected"] == {"the winning source quoting itself": 1}
+    st = run(conn, answer(3200, "now $3,200 per month", evidence="E1"))  # zillow's own text against its field
     assert st["resolved"] == 1 and conflict_queue(conn) == []
     rows = conn.execute("SELECT author, observation_id, verdict, true_value FROM checks ORDER BY id").fetchall()
     assert [tuple(r) for r in rows] == [("reconcile:sonnet", a, "wrong", "3200"), ("reconcile:sonnet", b, "correct", None)]
@@ -42,14 +44,14 @@ def test_accepted_answer_closes_the_conflict_as_machine_checks(conn):
 
 def test_rejected_answers_write_nothing(conn):
     two_sources(conn)
-    for fn in (answer(3200, "Rent $3,200 a month", evidence="E2"),   # not verbatim
-               answer(3200, "Rent $3,200 per month", evidence="E1"),  # not in that block
-               answer(3100, "Rent $3,200 per month", evidence="E2"),  # value not in quote
-               answer(3200, "Rent $3,200 per month", evidence="E2", confidence="medium")):
+    for fn in (answer(3200, "now $3,200 a month", evidence="E1"),   # not verbatim
+               answer(3200, "now $3,200 per month", evidence="E2"),  # not in that block
+               answer(3100, "now $3,200 per month", evidence="E1"),  # value not in quote
+               answer(3200, "now $3,200 per month", evidence="E1", confidence="medium")):
         st = run(conn, fn)
         assert st["undecided"] == 1
     assert conn.execute("SELECT COUNT(*) FROM checks").fetchone()[0] == 0
-    run(conn, answer(3200, "Rent $3,200 per month", evidence="E2"), dry_run=True)
+    run(conn, answer(3200, "now $3,200 per month", evidence="E1"), dry_run=True)
     assert conn.execute("SELECT COUNT(*) FROM checks").fetchone()[0] == 0
 
 
@@ -99,13 +101,14 @@ def test_open_price_goes_to_the_current_page(conn):
 
 def test_retraction_reopens_the_conflict(conn):
     two_sources(conn)
-    run(conn, answer(3200, "Rent $3,200 per month", evidence="E2"))
+    run(conn, answer(3200, "now $3,200 per month", evidence="E1"))
     assert conflict_queue(conn) == []
     ids = [r[0] for r in conn.execute("SELECT id FROM checks ORDER BY id")]
     rc.retract(conn, ids[0], "test")
     assert [c["fields"] for c in conflict_queue(conn)] == [["price_month"]]
     append_check(conn, "user", "conflict", "price", "correct", observation_id=1, stored_value=3000)
     import pytest
+
     with pytest.raises(ValueError):
         rc.retract(conn, conn.execute("SELECT MAX(id) FROM checks").fetchone()[0], "a user's")
 
