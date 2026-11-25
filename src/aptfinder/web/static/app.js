@@ -1365,7 +1365,7 @@ function cellRoutes(rowId, mode, d = KNN_META) {
 function rowNote(r) {
   if (r.kind !== "set") return "1 route per place per mode";
   const n = r.k > 0 ? Math.min(r.k, r.points || r.k) : r.points;
-  const pick = r.k > 0 ? `${r.k} nearest by straight line` : `all ${r.points} points`;
+  const pick = r.k > 0 ? `${r.k} nearest points by straight line` : `all ${r.points} points`;
   if (!r.paid) return `estimate only (paid = false): ${pick}, no Google routes`;
   if (r.k === 1) return "route to the nearest point only (straight line) — 1 route per place";
   return `routes to the ${pick}; shows the fastest — ${n} routes per place`;
