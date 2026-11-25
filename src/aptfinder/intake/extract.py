@@ -582,16 +582,23 @@ def _identity(conn) -> str:
 
 
 def _estimates(conn, db_path: str) -> str:
+    from ..commute import OsrmLegSource
     from ..trips import estimate_missing
 
     res = estimate_missing(conn, db_path)
-    return f"estimates for {res['places_done']} new places ({res['new_trips']} trips)" + (
+    out = f"estimates for {res['places_done']} new places ({res['new_trips']} trips)" + (
+        f", stopped: {res['error']}" if res["error"] else "")
+    if not OsrmLegSource().up():
+        return out + ", OSRM not running (no routes)"
+    res = estimate_missing(conn, db_path, "osrm")
+    return out + f", OSRM routes for {res['places_done']} new places ({res['new_trips']} trips)" + (
         f", stopped: {res['error']}" if res["error"] else "")
 
 
 def after_steps(conn, db_path: str, *, geocode: bool = True) -> str:
     """Free steps after every intake run that wrote rows: geocode new address strings (not on a reparse), rebuild
-    identity, straight-line commute estimates for places without any. One summary line."""
+    identity, straight-line commute estimates and (when the OSRM service is up) OSRM routes for places without
+    any. One summary line."""
     parts = [_geocode_new(conn)] if geocode else []
     parts.append(_identity(conn))
     parts.append(_estimates(conn, db_path))

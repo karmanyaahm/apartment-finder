@@ -98,6 +98,15 @@ class Commute:
         return res
 
     # ---- public API ------------------------------------------------------------
+    def supports(self, mode: str) -> bool:
+        """Whether the source can answer this mode at all (a source without `modes` answers every one).
+        Composed modes need their routed part: bike+train its bike legs, bike+bus a transit route."""
+        modes = getattr(self.source, "modes", None)
+        if modes is None:
+            return True
+        need = {"bike_train_bike": "bike", "bike_bus_bike": "transit"}.get(mode, mode)
+        return need in modes
+
     def trip(self, origin: LatLon, dest: LatLon, mode: str) -> Trip:
         if mode in BASIC_MODES:
             r = self.leg(origin, dest, mode)

@@ -1,0 +1,15 @@
+# Self-hosted OSRM for commute legs (design.md, commute). Install on the box:
+#   cp deploy/aptf-osrm.service ~/.config/systemd/user/ && systemctl --user daemon-reload
+#   systemctl --user enable --now aptf-osrm.service
+# Needs the graphs first: nix run .#osrm -- build   (data/osrm/, about 15 minutes)
+[Unit]
+Description=aptfinder OSRM routers (car 5000, bicycle 5001, foot 5002 on 127.0.0.1)
+
+[Service]
+WorkingDirectory=%h/Documents/apartment-finder
+ExecStart=/run/current-system/sw/bin/nix run .#osrm -- serve
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=default.target

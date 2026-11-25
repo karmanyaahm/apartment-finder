@@ -11,7 +11,7 @@ import sqlite3
 from typing import Any
 
 from . import settings
-from .commute import Commute, GoogleRoutesLegSource, Station, StraightLineLegSource
+from .commute import Commute, GoogleRoutesLegSource, OsrmLegSource, Station, StraightLineLegSource
 from .commute.geo import haversine_m
 from .config import Point, load_caltrain, load_point_sets, load_points
 from .store import append_trip, connect, init_db
@@ -19,6 +19,11 @@ from .store import append_trip, connect, init_db
 
 class SpendCapReached(RuntimeError):
     pass
+
+
+# free, unmetered providers: no prefilter_km / max_km / `auto` limits, every mode they can answer for every place
+FREE_PROVIDERS = ("estimate", "osrm")
+PROVIDERS = ("estimate", "osrm", "google")
 
 
 def load_google_caps() -> dict[str, Any]:
@@ -85,6 +90,12 @@ def make_source(provider: str, max_calls: int = 200, meter_db: str | None = None
         if not key:
             raise SystemExit("GOOGLE_MAPS_API_KEY is not set in .env")
         return MeteredSource(GoogleRoutesLegSource(key), max_calls, meter_db)
+    if provider == "osrm":
+        src = OsrmLegSource()
+        if not src.up():
+            raise SystemExit("the OSRM service is not answering on 127.0.0.1:5000-5002 "
+                             "(systemctl --user status aptf-osrm; build with: nix run .#osrm -- build)")
+        return src
     return StraightLineLegSource()
 
 
@@ -133,7 +144,7 @@ def compute_for_place(conn: sqlite3.Connection, commute: Commute, place: sqlite3
     origin = (place["lat"], place["lon"])
     if origin[0] is None or origin[1] is None:
         return 0
-    paid = commute.source.name != "estimate"
+    paid = commute.source.name not in FREE_PROVIDERS
     points = load_points()
     pending = []  # written after all routing: the commute cache writes via its own connection
     for set_name, cfg in load_point_sets().items():
@@ -160,6 +171,8 @@ def compute_for_place(conn: sqlite3.Connection, commute: Commute, place: sqlite3
             if paid and not on_demand and cfg.prefilter_km is not None and km > cfg.prefilter_km:
                 continue
             for mode in modes:
+                if not commute.supports(mode):  # e.g. OSRM has no transit: left to the other providers
+                    continue
                 if paid and not on_demand and cfg.auto is not None and mode not in cfg.auto.get(p.name, []):
                     continue
                 limit = cfg.max_km.get(mode)
@@ -201,22 +214,24 @@ def compute_all(conn: sqlite3.Connection, commute: Commute, place_keys: list[str
     return {"places": len(places), "places_done": done, "new_trips": total, "error": error}
 
 
-def estimate_missing(conn: sqlite3.Connection, db_path: str) -> dict[str, Any]:
-    """Free straight-line trips for the places that have none yet under the current point ids (the Pipeline
-    panel's rule, stay places routed as their building), logged as a `commute`/`estimate` run. Places that
-    already have estimates are not routed again (`compute_all` would walk every place)."""
+def estimate_missing(conn: sqlite3.Connection, db_path: str, provider: str = "estimate") -> dict[str, Any]:
+    """Free trips (straight-line `estimate`, or `osrm` routes) for the places that have none yet from that provider
+    under the current point ids (the Pipeline panel's rule, stay places routed as their building), logged as a
+    `commute`/<provider> run. Places that already have them are not routed again (`compute_all` would walk every
+    place)."""
     from .store import finish_run, start_run
 
     located = {r[0] for r in conn.execute("SELECT place_key FROM places WHERE lat IS NOT NULL")}
     routable = {pk for pk in located if pk.split("~", 1)[0] == pk or pk.split("~", 1)[0] not in located}
     current = {p.id for pts in load_points().values() for p in pts}
-    have = {pk for pk, pt in conn.execute("SELECT DISTINCT place_key, point_id FROM trips WHERE provider = 'estimate'")
-            if pt in current}
+    have = {pk for pk, pt in conn.execute("SELECT DISTINCT place_key, point_id FROM trips WHERE provider = ?",
+                                          (provider,)) if pt in current}
     todo = sorted(routable - have)
     if not todo:
         return {"places": 0, "places_done": 0, "new_trips": 0, "error": None}
-    run = start_run(conn, "commute", "estimate", {"places": len(todo), "after": "intake"})
-    res = compute_all(conn, build_commute(db_path, make_source("estimate")), todo)
+    source = make_source(provider)
+    run = start_run(conn, "commute", provider, {"places": len(todo), "after": "intake"})
+    res = compute_all(conn, build_commute(db_path, source), todo)
     finish_run(conn, run, "error" if res["error"] else "ok", {**res, "api_calls": 0}, est_cost=0.0, error=res["error"])
     return res
 
@@ -276,7 +291,7 @@ def _ll(text: str) -> tuple[float, float]:
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="aptf-commute")
     ap.add_argument("--db", default=str(settings.DB_PATH))
-    ap.add_argument("--provider", choices=["estimate", "google"], default="estimate")
+    ap.add_argument("--provider", choices=list(PROVIDERS), default="estimate")
     ap.add_argument("--max-calls", type=int, default=200, help="cap on paid API calls this run")
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("route", help="ad-hoc trip between two coordinates")

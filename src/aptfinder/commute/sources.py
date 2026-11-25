@@ -45,6 +45,46 @@ class StraightLineLegSource:
         return LegResult(minutes=round(d / self.SPEED_M_PER_MIN[mode], 1), distance_m=round(d))
 
 
+class OsrmLegSource:
+    """Self-hosted OSRM: one `osrm-routed` per profile on this machine (car, bicycle, foot). A real route over the
+    OpenStreetMap road network, free and unmetered. Drive is free-flow (no traffic). No transit: returns None."""
+
+    name = "osrm"
+    DEFAULT_URLS = {"drive": "http://127.0.0.1:5000", "bike": "http://127.0.0.1:5001", "walk": "http://127.0.0.1:5002"}
+
+    def __init__(self, urls: dict[str, str] | None = None, client: httpx.Client | None = None):
+        self.urls = urls or dict(self.DEFAULT_URLS)
+        self.modes = tuple(self.urls)
+        self.client = client or httpx.Client(timeout=30)
+        self.calls = 0
+
+    def up(self) -> bool:
+        """Every profile's server answers (a route of zero length)."""
+        try:
+            return all(self.client.get(f"{u}/route/v1/x/-122.08,37.39;-122.08,37.39",
+                                       params={"overview": "false"}, timeout=3).status_code == 200
+                       for u in self.urls.values())
+        except httpx.HTTPError:
+            return False
+
+    def leg(self, origin: LatLon, dest: LatLon, mode: str, depart: str) -> LegResult | None:
+        if mode not in self.urls:
+            return None
+        self.calls += 1
+        coords = f"{origin[1]},{origin[0]};{dest[1]},{dest[0]}"
+        resp = self.client.get(f"{self.urls[mode]}/route/v1/x/{coords}", params={"overview": "false"})
+        try:
+            body = resp.json()
+        except ValueError:
+            raise RuntimeError(f"OSRM HTTP {resp.status_code} ({resp.text[:300]})") from None
+        if body.get("code") in ("NoRoute", "NoSegment"):
+            return None
+        if resp.status_code != 200 or body.get("code") != "Ok":
+            raise RuntimeError(f"OSRM HTTP {resp.status_code} ({body.get('code')}: {body.get('message')})")
+        r = body["routes"][0]
+        return LegResult(minutes=round(r["duration"] / 60, 1), distance_m=round(r["distance"]))
+
+
 def next_departure(depart: str, tz: str = "America/Los_Angeles") -> datetime:
     """'weekday_0830' -> next Tuesday 08:30 local (a representative weekday, always in the future)."""
     kind, hhmm = depart.split("_")

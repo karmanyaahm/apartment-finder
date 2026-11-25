@@ -217,8 +217,9 @@ function limitValue(p, pt, mode) {
 function commuteRows() {
   const g = S.goal !== "all" && S.draft && S.draft.id === S.goal ? S.draft : null;
   if (!g) return [];
+  // transit is not shown (bike+train is the transit option), even where a goal still lists it
   return [...g.rules, ...g.nice].flatMap((r) => r.type === "commute_any" ? (r.options || []).map((o) => [r.target, o.mode])
-    : r.type === "near" ? [[`set:${r.set}`, r.mode]] : []);
+    : r.type === "near" ? [[`set:${r.set}`, r.mode]] : []).filter(([, mode]) => mode !== "transit");
 }
 function limitFacts(p, fails = []) {
   return commuteRows().map(([pt, mode]) => {
@@ -330,7 +331,9 @@ function ruleInputs(r) {
   if (r.type === "dates_cover") return `from <input data-p="start" type="date" value="${esc(r.start)}"> to <input data-p="end" type="date" value="${esc(r.end)}">`;
   if (r.type === "commute_any" || r.type === "near") {
     const pt = r.type === "near" ? `set:${r.set}` : r.target;
-    const mOpts = (sel) => S.meta.modes.map((m) => opt(m, MODE_LABEL[m] || m, sel)).join("");
+    // a mode no longer offered (transit) stays selectable where a rule already uses it, so saving keeps it
+    const mOpts = (sel) => [...S.meta.modes, ...(sel && !S.meta.modes.includes(sel) ? [sel] : [])]
+      .map((m) => opt(m, MODE_LABEL[m] || m, sel)).join("");
     const rows = r.type === "near" ? [{ mode: r.mode, max: r.max }] : r.options;
     return `<select data-pt>${limitOptions().map(([v, l]) => opt(v, l, pt)).join("")}</select> `
       + rows.map((o, i) => `<span class="sub"><select data-p="${r.type === "near" ? "mode" : `options.${i}.mode`}">${mOpts(o.mode)}</select>
@@ -782,7 +785,7 @@ function matrixTable(d) {
     return `<tr><th>${esc(t.split(":")[1])}</th>${cells}</tr>`;
   }).join("");
   return `<div class="scroll-x"><table><tr><th></th>${modes.map((m) => `<th>${esc(MODE_LABEL[m])}</th>`).join("")}</tr>${rows}</table></div>
-    <p class="muted small">Minutes. ~ = straight-line estimate (not routed). Hover a cell for legs.</p>`;
+    <p class="muted small">Minutes. ~ = straight-line estimate (not routed). Hover a cell for legs and provider (osrm: self-hosted route, drive without traffic; google: Google Routes).</p>`;
 }
 
 function nearestBlock(d) {
@@ -893,7 +896,7 @@ async function openPlace(pk) {
     <h3>${isStay ? "Furnished stays" : "Floor plans"}</h3>${planTable}
     ${listingTable}
     <h3>Price history (per month)</h3>${historyChart([...d.listings].sort((a, b) => b.history.length - a.history.length).slice(0, 8))}
-    <h3>Commute <button id="route-btn" class="small">${S.meta.google ? "Route with Google" : "Recompute (estimate)"}</button></h3>
+    <h3>Commute ${S.meta.osrm ? '<button id="osrm-btn" class="small" title="self-hosted OSRM: drive (no traffic), bike, walk and bike+train; free">Route (free)</button> ' : ""}<button id="route-btn" class="small">${S.meta.google ? "Route with Google" : "Recompute (estimate)"}</button></h3>
     <p id="route-status" class="small">${esc(S.routeMsg?.[pk] || "")}</p>
     ${S.meta.google ? "" : '<p class="muted small">No GOOGLE_MAPS_API_KEY on the server: only straight-line estimates can be computed here.</p>'}
     ${S.meta.google ? `<p class="muted small">Routes every target by every mode (about 20 Google calls). Google is metered and capped per month (config/google.toml); when the cap is reached routing stops and the straight-line estimates stay.</p>` : ""}${matrixTable(d)}
@@ -956,6 +959,19 @@ function wireDrawer(pk) {
     const r = await post("api/links", { source, source_id, place_key: null });
     toast("Split recorded"); await loadPlaces(); openPlace(r.place_key);
   }));
+  $("#osrm-btn")?.addEventListener("click", async (e) => {
+    const btn = e.target;
+    btn.disabled = true; btn.textContent = "Routing…";
+    try {
+      const r = await post(`api/trips/${encodeURIComponent(pk)}?provider=osrm`);
+      (S.routeMsg ||= {})[pk] = `Routed with OSRM: ${r.new_trips} new trips.`;
+      toast(S.routeMsg[pk]);
+      await refreshAfterWrite(pk);
+    } catch (err) {
+      toast("OSRM routing failed: " + err.message, 6000);
+      btn.disabled = false; btn.textContent = "Route (free)";
+    }
+  });
   // the outcome stays on the drawer (S.routeMsg) across its re-render; the button always leaves "Routing…"
   $("#route-btn")?.addEventListener("click", async (e) => {
     const btn = e.target, label = btn.textContent;
@@ -1305,7 +1321,7 @@ async function openPipeline() {
     <h3>Own-site scrapes (${d.sites.length})</h3>${sites}
     <details><summary>Station → target bike legs (${anchors.filter((a) => a.routed).length}/${anchors.length} routed)</summary>
       <div class="scroll-x"><table><tr><th>station</th><th>target</th><th>routed</th></tr>
-      ${anchors.map((a) => `<tr><td>${esc(a.station)}</td><td>${esc(a.target)}</td><td>${a.routed ? "Google" : '<span class="muted">estimate</span>'}</td></tr>`).join("")}</table></div></details>
+      ${anchors.map((a) => `<tr><td>${esc(a.station)}</td><td>${esc(a.target)}</td><td>${a.routed ? esc(a.routed === true ? "Google" : a.routed) : '<span class="muted">estimate</span>'}</td></tr>`).join("")}</table></div></details>
   </div>`;
   wireCompute();
   drawAreasMap().catch((e) => { $("#areas-legend").textContent = `Area map failed: ${e.message}`; });
@@ -1321,7 +1337,7 @@ function computeBlock() {
   const n = filtered().length;
   return `<div class="compute small" id="compute">
     <select id="c-point">${pOpts}</select> <select id="c-mode">${mOpts}</select>
-    <select id="c-provider"><option value="estimate">estimate (free)</option><option value="google">Google (paid)</option></select>
+    <select id="c-provider"><option value="estimate">estimate (free)</option>${S.meta.osrm ? '<option value="osrm" selected>OSRM (free, self-hosted)</option>' : ""}<option value="google">Google (paid)</option></select>
     <label><input type="radio" name="c-scope" value="list" checked> the ${n} places the list shows</label>
     <label><input type="radio" name="c-scope" value="zone"> every place in a walk zone</label>
     <label><input type="radio" name="c-scope" value="candidates"> search candidates (in a walk zone, can still pass a goal)</label>
@@ -1359,13 +1375,13 @@ function wireCompute() {
     try {
       const d = await post("api/compute/dry_run", spec);
       const u = d.google_usage_now;
-      out.innerHTML = d.provider === "estimate"
-        ? `${d.places} places · straight-line estimates, free.`
+      out.innerHTML = d.provider === "estimate" || d.provider === "osrm"
+        ? `${d.places} places · ${d.provider === "osrm" ? "self-hosted OSRM routes" : "straight-line estimates"}, free.`
         : `${d.places} places · <b>${d.would_call}</b> uncached Google calls (${esc(Object.entries(d.by_mode).map(([m, k]) => `${m} ${k}`).join(", ") || "none")})
            · est. <b>$${d.est_cost_usd.toFixed(2)}</b> · this month ${u.calls}/${u.cap} calls used
            ${d.over_caps.length ? `<br><span class="reason fail">Would pass ${esc(d.over_caps.join("; "))}: the run stops at the cap.</span>` : ""}
            ${d.note ? `<br><span class="reason fail">${esc(d.note)}</span>` : ""}`;
-      if (d.provider === "estimate" || d.would_call > 0) {
+      if (d.provider === "estimate" || d.provider === "osrm" || d.would_call > 0) {
         const left = u ? u.cap - u.calls : null;
         dry = { spec, calls: d.would_call, left, typed: d.provider === "google" && d.would_call > 20 && left < 5000 };
         $("#c-run").textContent = d.provider === "google" ? `Run: up to ${d.would_call} Google calls` : "Run";

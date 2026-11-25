@@ -13,7 +13,7 @@ from ..plans import inherit_prices, is_own_priced
 from ..verify import accuracy, low_accuracy
 from .rules import CHECK, FAIL, PASS, RANK, Ctx, combine, commute_terms, evaluate, fact
 
-PROVIDER_PREF = {"google": 0, "estimate": 9}
+PROVIDER_PREF = {"google": 0, "osrm": 1, "estimate": 9}
 
 
 class _Trips(defaultdict):

@@ -190,3 +190,69 @@ def test_estimate_uses_a_leg_already_routed_by_a_real_provider(tmp_path):
                    datetime.now(timezone.utc).isoformat()))
     assert guess.minutes != 14.0
     assert c.leg(station, office, "bike").minutes == 14.0  # the routed leg, not the straight-line guess
+
+
+def _osrm_client(answers: dict[str, dict], seen: list[str] | None = None):
+    """An httpx client whose transport answers OSRM requests by port: {port: json body}."""
+    import httpx
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if seen is not None:
+            seen.append(str(req.url))
+        body = answers[str(req.url.port)]
+        return httpx.Response(200 if body.get("code") == "Ok" else 400, json=body)
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_osrm_source_routes_drive_bike_walk_and_has_no_transit():
+    from aptfinder.commute import OsrmLegSource
+
+    ok = {"code": "Ok", "routes": [{"duration": 930.0, "distance": 12345.6}]}
+    seen: list[str] = []
+    src = OsrmLegSource(client=_osrm_client({"5000": ok, "5001": ok, "5002": ok}, seen))
+    r = src.leg((37.40, -122.10), (37.4847, -122.1484), "drive", "weekday_0830")
+    assert (r.minutes, r.distance_m) == (15.5, 12346)
+    assert "/route/v1/x/-122.1,37.4;-122.1484,37.4847" in seen[0] and ":5000/" in seen[0]  # lon,lat; car port
+    assert src.leg((37.40, -122.10), (37.48, -122.14), "transit", "weekday_0830") is None
+    assert src.up()
+
+
+def test_osrm_no_route_is_none_and_errors_raise():
+    from aptfinder.commute import OsrmLegSource
+
+    src = OsrmLegSource(client=_osrm_client({"5001": {"code": "NoRoute", "message": "Impossible route"},
+                                             "5000": {"code": "InvalidQuery", "message": "bad"}}))
+    assert src.leg((37.40, -122.10), (37.41, -122.11), "bike", "weekday_0830") is None
+    with pytest.raises(RuntimeError, match="InvalidQuery"):
+        src.leg((37.40, -122.10), (37.41, -122.11), "drive", "weekday_0830")
+
+
+def test_osrm_is_free_routes_every_place_and_skips_modes_it_cannot_answer(tmp_path):
+    """A free provider ignores prefilter_km / max_km / auto; modes the source lacks (transit, bike+bus) are left
+    to the other providers; bike+train is built from its bike legs."""
+    from aptfinder import trips
+    from aptfinder.store import connect, init_db
+
+    db = str(tmp_path / "a.db")
+    conn = connect(db)
+    init_db(conn)
+    src = FakeSource()
+    src.name = "osrm"
+    src.modes = ("drive", "bike", "walk")
+    place = {"place_key": "far", "lat": 37.80, "lon": -122.27}  # Oakland: beyond every prefilter_km
+    c = trips.build_commute(db, src)
+    assert c.supports("bike_train_bike") and not c.supports("bike_bus_bike") and not c.supports("transit")
+    trips.compute_for_place(conn, c, place)
+    modes = {r[0] for r in conn.execute("SELECT DISTINCT mode FROM trips WHERE point_id LIKE 'commute_targets:%'")}
+    assert modes == {"walk", "bike", "drive", "bike_train_bike"}
+    assert {r[0] for r in conn.execute("SELECT DISTINCT provider FROM trips")} == {"osrm"}
+    assert all(m != "transit" for _, _, m in src.calls)
+
+
+def test_osrm_trip_decides_a_commute_rule_like_google():
+    """An OSRM route is a real route: no estimate band."""
+    from aptfinder.filter.rules import FAIL, PASS, _minutes_status
+
+    assert _minutes_status({"minutes": 26.0, "provider": "osrm"}, 25)[0] == FAIL
+    assert _minutes_status({"minutes": 24.0, "provider": "osrm"}, 25)[0] == PASS
+    assert _minutes_status({"minutes": 24.0, "provider": "estimate"}, 25)[0] != PASS

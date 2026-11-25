@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from .. import pipeline, settings, verify
 from ..areas import in_walk_zone
+from ..commute import OsrmLegSource
 from ..areas import zones as area_zones
 from ..config import Goal, load_goals, load_point_sets, load_points
 from ..filter import (AMENITY_FLAGS, amenity_flags, place_restriction, best_trips, evaluate_all, evaluate_goal, goal_inputs, nearest_by_set,
@@ -30,7 +31,8 @@ from ..store.models import CHECKABLE_FIELDS
 
 STATIC = Path(__file__).parent / "static"
 AUTHOR = "user"
-MODES = ["walk", "bike", "transit", "drive", "bike_train_bike", "bike_bus_bike"]
+# transit is not offered or shown (user, 2026-11-25): bike+train is the transit option; stored transit trips stay
+MODES = ["walk", "bike", "drive", "bike_train_bike", "bike_bus_bike"]
 DEFAULT_ATTRIBUTES = ["overall", "status", "gym", "walk_to_caltrain", "living_room"]
 LISTING_FIELDS = ["price", "price_basis", "price_month", "price_per_bed", "beds", "baths", "sqft", "kind",
                   "term", "furnished", "private_bath", "available_from", "available_to", "address", "unit",
@@ -354,6 +356,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             "point_sets": {k: {"label": v.label or k} for k, v in load_point_sets().items()},
             "attributes": DEFAULT_ATTRIBUTES,
             "google": bool(settings.secret("GOOGLE_MAPS_API_KEY")),
+            "osrm": OsrmLegSource().up(),  # the self-hosted router (drive, bike, walk) answers
             "readonly": redact is not None,  # the redacted view refuses every write: the goal editor is read-only
             "areas": area_zones(),
         }
@@ -730,7 +733,8 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
     # seed; an edit, a new goal or a delete is an annotations row (goal / <id> / definition), latest wins
     def goal_refs() -> dict[str, Any]:
         pts = load_points()
-        return {"modes": MODES, "points": {p.id for v in pts.values() for p in v},
+        # a goal may still name transit (stored Google transit trips); it is only not offered or shown
+        return {"modes": MODES + ["transit"], "points": {p.id for v in pts.values() for p in v},
                 "sets": set(pts) | set(load_point_sets())}
 
     def checked_goal(body: dict[str, Any]) -> dict[str, Any]:
@@ -850,17 +854,19 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
 
     @app.post("/api/trips/{place_key}")
     def route_place(place_key: str, provider: str | None = None) -> dict[str, Any]:
-        from ..trips import SpendCapReached, build_commute, compute_for_place, make_source
+        from ..trips import PROVIDERS, SpendCapReached, build_commute, compute_for_place, make_source
 
         rows = q("SELECT place_key, lat, lon FROM places WHERE place_key = ?", (place_key,))
         if not rows:
             raise HTTPException(404, "no such place")
         # never a silent fallback to estimates: without a key, Google routing is an error the button shows
         provider = provider or "google"
-        if provider not in ("google", "estimate"):
-            raise HTTPException(400, "provider must be google or estimate")
+        if provider not in PROVIDERS:
+            raise HTTPException(400, f"provider must be one of {', '.join(PROVIDERS)}")
         if provider == "google" and not settings.secret("GOOGLE_MAPS_API_KEY"):
             raise HTTPException(400, "GOOGLE_MAPS_API_KEY is not set on the server; nothing was routed")
+        if provider == "osrm" and not OsrmLegSource().up():
+            raise HTTPException(400, "the OSRM service is not running on the server; nothing was routed")
         source = make_source(provider, max_calls=60)
         commute = build_commute(db_path, source)
         try:
@@ -900,8 +906,10 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         return sorted(pk for pk in out if pk in located)
 
     def _check_spec(body: ComputeIn) -> tuple[str, str]:
-        if body.provider not in ("estimate", "google"):
-            raise HTTPException(400, "provider must be estimate or google")
+        if body.provider not in ("estimate", "osrm", "google"):
+            raise HTTPException(400, "provider must be estimate, osrm or google")
+        if body.provider == "osrm" and not OsrmLegSource().up():
+            raise HTTPException(400, "the OSRM service is not running on the server")
         if body.mode not in MODES:
             raise HTTPException(400, f"unknown mode {body.mode!r}")
         sets = load_point_sets()
@@ -920,11 +928,11 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         keys = _compute_places(body)
         if not keys:
             raise HTTPException(400, "no located places in that scope")
-        if body.provider == "estimate":  # free: no calls to count
+        if body.provider in ("estimate", "osrm"):  # free: no calls to count
             with lock:
                 use = google_usage(conn)
             return {"places": len(keys), "would_call": 0, "est_cost_usd": 0.0, "over_caps": [],
-                    "google_usage_now": use, "provider": "estimate"}
+                    "google_usage_now": use, "provider": body.provider}
         res = dry_run(db_path, "google", keys, on_demand=True, only=only)
         cfg = load_point_sets().get(only[0][4:] if only[0].startswith("set:") else only[0].split(":", 1)[0])
         if cfg is not None and not cfg.paid:
