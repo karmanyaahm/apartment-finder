@@ -50,6 +50,12 @@ def test_same_url_is_one_site_and_the_first_entry_in_load_order_is_canonical(tmp
         "655-south-fair-oaks-avenue": "applewood-spruce-apartments"}
 
 
+def test_redirect_links_that_differ_only_in_their_query_are_two_sites():
+    sites = {"a": {"url": "https://www.lease-apts.com/?b=100-main-st"}, "b": {"url": "https://www.lease-apts.com/?b=9-oak-ave"},
+             "c": {"url": "https://lease-apts.com/?b=9-oak-ave"}}
+    assert duplicate_sites(sites) == {"c": "b"}
+
+
 def test_same_prometheus_community_with_different_urls_is_one_site():
     sites = {"a": {"url": "https://prometheusapartments.com/ca/x/a", "platform": "prometheus"},
              "b": {"url": "https://prometheusapartments.com/ca/x/b-other-name", "platform": "prometheus"},

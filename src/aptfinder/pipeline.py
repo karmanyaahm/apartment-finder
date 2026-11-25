@@ -150,7 +150,7 @@ def render_outcomes(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
     out = {}
     for sid, o in last_outcomes(conn).items():
         out[sid] = {**o, "label": describe(o), "retry": o["outcome"] in TRANSIENT,
-                    "stale": o["outcome"] not in TRANSIENT and _fresh(o["at"], datetime.now(timezone.utc)) == "stale"}
+                    "stale": o["outcome"] not in TRANSIENT | {"duplicate"} and _fresh(o["at"], datetime.now(timezone.utc)) == "stale"}
     return out
 
 

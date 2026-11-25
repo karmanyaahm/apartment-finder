@@ -171,14 +171,16 @@ def prometheus_ids() -> dict[str, str]:
 
 
 def site_key(url: str) -> str:
-    """'host/path' of a site URL, the same-site rule's key: `discover.clean_url` (no query, fragment or form
-    path), host lowercased without www., path without its trailing slash, lowercased."""
+    """'host/path[?query]' of a site URL, the same-site rule's key: `discover.clean_url` (no fragment), host
+    lowercased without www., path without its trailing slash, lowercased, and the query when there is one: a
+    redirect link (`lease-apts.com/?...`) names its building only in the query. Stored site URLs have none."""
     from urllib.parse import urlsplit
 
     from .intake.discover import clean_url
 
-    p = urlsplit((clean_url(url)[0] or url).strip())
-    return p.netloc.lower().split(":")[0].removeprefix("www.") + p.path.rstrip("/").lower()
+    p = urlsplit((clean_url(url, keep_query=True)[0] or url).strip())
+    return (p.netloc.lower().split(":")[0].removeprefix("www.") + p.path.rstrip("/").lower()
+            + (f"?{p.query}" if p.query else ""))
 
 
 def duplicate_sites(sites: dict[str, dict[str, Any]], ids: dict[str, str] | None = None) -> dict[str, str]:
