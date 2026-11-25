@@ -40,7 +40,7 @@ Most of Mountain View fails the temp goal on the commute to downtown Palo Alto. 
 - **Gather wide, filter late.** Intake never narrows by goal. Changing a goal needs no new scrape.
 - **Unknown never rejects.** A missing field gives "needs check" and names the field.
 - **Everything from listing sites goes through Apify.** Nothing on this machine fetches a listing page.
-- **Area ledger.** The search region is split into chunks (station walk zones). Each area × source is done, partial or TODO, and `aptf-intake run <source> --chunk X` picks up whatever is left. Spend caps: $1 per run, $0.30 Apify reserve, Google monthly caps.
+- **Area ledger.** The search region is the ZIPs, cities and station boxes the station walk zones touch. Each area × source is done, partial or TODO, and `aptf-intake run <source>` picks up whatever is left of that source's areas. Spend caps: $1 per run, $0.30 Apify reserve, Google monthly caps.
 
 ## What changed today
 

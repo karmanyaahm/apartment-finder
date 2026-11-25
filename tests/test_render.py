@@ -138,7 +138,7 @@ def test_a_page_not_fetched_is_retried_only_a_missing_address_rejects(tmp_path, 
 
     d = tmp_path / "cfg"
     d.mkdir()
-    found = "".join(f'[[found]]\nid = "{i}"\nurl = "https://{i}.example/"\nchunk = "mv"\nplace_key = "p_{i}"\n\n'
+    found = "".join(f'[[found]]\nid = "{i}"\nurl = "https://{i}.example/"\nplace_key = "p_{i}"\n\n'
                     for i in ("old403", "blocked", "noaddr", "again"))
     checks = ('[[check]]\nid = "old403"\nok = false\nreason = "page not fetched"\n\n'  # written before outcomes
               '[[check]]\nid = "blocked"\nok = false\noutcome = "blocked"\nhttp_status = 403\n'
@@ -150,7 +150,7 @@ def test_a_page_not_fetched_is_retried_only_a_missing_address_rejects(tmp_path, 
     monkeypatch.setattr(settings, "CONFIG_DIR", d)
     assert set(load_sites()) == {"old403", "blocked", "again"}  # only the missing address drops a site
     assert check_outcome({"ok": False, "reason": "page has no text"}) == "empty"
-    assert retryable(["mv"]) == ["old403", "blocked"]  # the latest check of 'again' is ok
+    assert retryable() == ["old403", "blocked"]  # the latest check of 'again' is ok
     assert unfetched("https://x.example/", "")["outcome"] == "not_fetched"
     log = 'WARN CheerioCrawler: Request blocked - received 403 status code. {"url":"https://x.example/"}'
     assert unfetched("https://x.example", log) | {"error": None} == {

@@ -10,7 +10,7 @@ from aptfinder.intake.apify import ActorRun
 from aptfinder.intake.base import Adapter, Parsed, coverage, done, run_source
 from aptfinder.store.models import ObservationData
 
-ZIPS = [Area(kind="zip", id=z, label=z, chunks=["c"], city="Mountain View") for z in ("94040", "94041", "94043")]
+ZIPS = [Area(kind="zip", id=z, label=z, city="Mountain View") for z in ("94040", "94041", "94043")]
 
 
 def item_parser(item, cfg):
@@ -34,7 +34,7 @@ def fake(monkeypatch, tmp_path):
     monkeypatch.setattr(base, "load_sources", lambda: {"spend": {"max_usd_per_run": 1.0},
                                                        "fake": {"actor": "a/b", "max_items": 3}})
     monkeypatch.setattr(base.settings, "RAW_DIR", tmp_path / "raw")
-    monkeypatch.setattr("aptfinder.intake.base.load_areas", lambda: (["c"], ZIPS))
+    monkeypatch.setattr("aptfinder.intake.base.load_areas", lambda: ZIPS)
     return calls, plan
 
 

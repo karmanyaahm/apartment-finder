@@ -1,6 +1,6 @@
 """Render buildings' own websites in a real browser and read their offered plans and prices with Claude Haiku.
 
-  aptf-intake render --chunk mountain_view [--site ID] [--retry-failed] [--dry-run]
+  aptf-intake render [--site ID] [--retry-failed] [--dry-run]
 
 Many community sites load floor plans, prices and availability with JavaScript, which the plain page fetch
 (`direct`, cheerio) never sees. This step fetches each site in the site list (`config.load_sites`) through Apify's
@@ -11,7 +11,7 @@ community's own path. Avalon sites are skipped: their page data already gives ev
 
 Each site's outcome is recorded in the run's counts (`areas['<site>#render']`): `ok`, `no_plans`, or a transient
 failure (`blocked`, `timeout`, `empty`, `not_returned`, `error`, `not_read`) with the HTTP status and the
-scraper's message. A chunk run picks transient failures first, then sites never rendered, then those older than
+scraper's message. A run over every site picks transient failures first, then sites never rendered, then those older than
 STALE_DAYS; `ok` and `no_plans` are done until then.
 
 Each site's rendered text goes to headless `claude -p --model haiku` (no tools) with a fixed schema of plans and
@@ -32,7 +32,6 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 from .. import identity, settings
-from ..areas import chunk_of
 from ..config import load_sites
 from ..store import append_observation, finish_run, start_run
 from ..store.models import ObservationData
@@ -314,7 +313,7 @@ def site_text(pages: list[dict[str, Any]]) -> str:
     return "\n\n".join(f"[page {p['url']}]\n{(p.get('text') or '')[:PAGE_BUDGET.get(kind(p), 6000)]}" for p in ps)
 
 
-def render(conn, chunks: list[str], *, sites: list[str] | None = None, model: str = "haiku",
+def render(conn, *, sites: list[str] | None = None, model: str = "haiku",
            max_claude_usd: float = 1.0, max_apify_usd: float = 1.0, dry_run: bool = False,
            retry_failed: bool = False, residential: bool = False) -> dict[str, Any]:
     all_sites = load_sites()
@@ -324,11 +323,6 @@ def render(conn, chunks: list[str], *, sites: list[str] | None = None, model: st
             continue
         if sites and sid not in sites:
             continue
-        if not sites and s.get("chunk") not in chunks:
-            r = conn.execute("SELECT lat, lon FROM listings WHERE source = 'direct' AND lat IS NOT NULL AND "
-                             "source_id LIKE ? LIMIT 1", (f"{sid}:%",)).fetchone()
-            if not r or chunk_of(r["lat"], r["lon"]) not in chunks:
-                continue
         cands.append(sid)
     last = last_outcomes(conn)
     # sites named with --site are rendered whatever their last outcome

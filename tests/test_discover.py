@@ -65,8 +65,8 @@ def test_a_weaker_models_miss_does_not_block_a_stronger_search(conn, tmp_path, m
     (tmp_path / "cfg" / "discovered_sites.toml").write_text(
         '[[miss]]\nplace_key = "%s"\nmodel = "haiku"\nreason = "no site found"\n'
         % conn.execute("SELECT place_key FROM places").fetchone()[0])
-    assert [c["name"] for c in candidates(conn, ["mountain_view"], "sonnet")] == ["Harken"]
-    assert candidates(conn, ["mountain_view"], "haiku") == []
+    assert [c["name"] for c in candidates(conn, "sonnet")] == ["Harken"]
+    assert candidates(conn, "haiku") == []
 
 
 def test_named_building_without_website_is_queued_and_your_url_is_promoted(conn, tmp_path, monkeypatch):
@@ -90,7 +90,7 @@ def test_named_building_without_website_is_queued_and_your_url_is_promoted(conn,
     (item,) = verify.own_site_queue(conn)  # your URL shows at once, pending its check
     assert item["reason"] == "not_checked" and item["urls"][0]["status"] == "pending"
     assert "pending check" in item["urls"][0]["label"]
-    (site,) = promote(conn, ["mountain_view"], limit=10, dry_run=True)["sites"]
+    (site,) = promote(conn, limit=10, dry_run=True)["sites"]
     assert site == ("Harken", "https://harken.example/?utm=x")
     # dismissed ("no plans online, fine"): gone until you add another URL
     append_annotation(conn, "user", "place", item["place_key"], "own_site", comment="dismissed: no plans online")
@@ -114,16 +114,16 @@ def test_every_url_you_add_is_a_site_of_its_own(conn, tmp_path, monkeypatch):
     identity.run(conn)
     pk = conn.execute("SELECT place_key FROM places").fetchone()[0]
     append("found", [{"id": "harken", "place_key": pk, "name": "Harken", "url": "https://harken.example/",
-                      "chunk": "mountain_view", "found_by": "claude-sonnet"}])
+                      "found_by": "claude-sonnet"}])
     append("check", [{"id": "harken", "ok": False, "outcome": "blocked", "http_status": 403,
                       "reason": "page not fetched: blocked (HTTP 403)", "at": "2026-11-24T10:00:00+00:00"}])
     (item,) = verify.own_site_queue(conn)
     assert item["reason"] == "all_failed" and "HTTP 403" in item["urls"][0]["label"]
     for u in ("https://harken.example/", "https://op.example/harken/floorplans", "https://op.example/harken/units"):
         append_annotation(conn, "user", "place", pk, "website", comment=u)
-    got = promote(conn, ["mountain_view"], limit=10, dry_run=True)["sites"]
+    got = promote(conn, limit=10, dry_run=True)["sites"]
     assert got == [("Harken", "https://op.example/harken/floorplans"), ("Harken", "https://op.example/harken/units")]
-    promote(conn, ["mountain_view"], limit=10, fetch=False)
+    promote(conn, limit=10, fetch=False)
     assert sorted(s["url"] for s in load_sites().values() if s.get("place_key") == pk) == [
         "https://harken.example/", "https://op.example/harken/floorplans", "https://op.example/harken/units"]
     # a form is named as the reason, even beside a site that failed

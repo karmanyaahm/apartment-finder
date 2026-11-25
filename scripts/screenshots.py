@@ -39,7 +39,7 @@ with sync_playwright() as p:
 
     goal(page, "lease")
     page.uncheck("#todo")
-    page.evaluate("map.setView([37.398, -122.085], 14)")  # the Mountain View chunk
+    page.evaluate("map.setView([37.398, -122.085], 14)")  # Mountain View and San Antonio walk zones
     time.sleep(4)
     page.screenshot(path=f"{OUT}/1-overview.png")
 

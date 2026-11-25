@@ -103,11 +103,8 @@ function buildPointLayers() {
   }
   const a = S.meta.areas;
   if (a && a.zones) {
-    const zl = L.layerGroup(a.zones.map((z) => {
-      const on = a.active.includes(z.chunk);
-      return L.circle([z.lat, z.lon], { radius: a.radius_km * 1000, color: on ? "#1f9d55" : "#888", weight: on ? 2 : 1,
-        dashArray: on ? null : "6 6", fill: on, fillOpacity: 0.04, interactive: false });
-    }));
+    const zl = L.layerGroup(a.zones.map((z) => L.circle([z.lat, z.lon], {
+      radius: a.radius_km * 1000, color: "#1f9d55", weight: 2, fill: true, fillOpacity: 0.04, interactive: false })));
     zl.addTo(map);
     overlays["Station walk zones (25 min)"] = zl;
   }
@@ -139,11 +136,11 @@ function filtered() {
   const minBeds = parseFloat($("#minbeds").value);
   const maxPpb = parseFloat($("#maxppb").value);
   const showInactive = $("#inactive").checked;
-  const showTodo = $("#todo").checked;
+  const showOutside = $("#outzone").checked;
   return S.places.filter((p) => {
     if (!sts.has(placeStatus(p))) return false;
     if (!showInactive && !p.n_active) return false;
-    if (!showTodo && p.todo) return false;
+    if (!showOutside && !p.in_zone) return false;
     if (!isNaN(minBeds) && !(p.max_beds >= minBeds)) return false;
     if (!isNaN(maxPpb) && p.min_price_per_bed != null && p.min_price_per_bed > maxPpb) return false;
     if (q) {
@@ -194,7 +191,7 @@ function renderList() {
     const mins = minutesFor(p);
     const chips = Object.entries(p.goals).filter(([g]) => S.goal === "all" || g === S.goal).map(([g, r]) => `<span class="chip ${r.status}" title="${esc(r.reasons.join("\n"))}">${esc(g)}: ${esc(STATUS_LABEL[r.status])}</span>`).join("");
     const bb = p.beds.length ? `${p.beds.map((b) => (b === 0 ? "studio" : b + "bd")).join("/")} · ${p.baths.join("/")}ba` : "beds ?";
-    return `<div class="card ${st === "fail" || p.todo ? "dim" : ""} ${S.selected === p.place_key ? "sel" : ""}" data-pk="${esc(p.place_key)}">
+    return `<div class="card ${st === "fail" ? "dim" : ""} ${S.selected === p.place_key ? "sel" : ""}" data-pk="${esc(p.place_key)}">
       <h4>${esc(p.label)} ${stars(p.rating)}</h4>
       <div class="facts">
         ${priceFacts(p)}
@@ -203,7 +200,7 @@ function renderList() {
         <span>${esc(p.sources)}</span>${p.n_active ? "" : '<span style="color:var(--bad)">inactive</span>'}
         ${p.user_status ? `<span>status: ${esc(p.user_status)}</span>` : ""}
       </div>
-      <div class="chips">${p.todo ? `<span class="chip todo" title="outside the active chunks${p.chunk ? ` (in ${esc(p.chunk)})` : " and every station walk zone"}">TODO area</span>` : ""}${chips}</div>
+      <div class="chips">${chips}</div>
     </div>`;
   }).join("");
   $$(".card").forEach((el) => el.addEventListener("click", () => openPlace(el.dataset.pk)));
@@ -645,15 +642,15 @@ async function openPipeline() {
       <td class="nowrap">${s.cost ? "$" + (+s.cost).toFixed(2) : ""}</td>
       <td class="cmd">${cmdList(s.commands) || '<span class="muted">nothing left</span>'}</td></tr>`).join("")}
   </table></div>`;
-  // intake matrix: chunk x area x source, one table per area kind
+  // intake matrix: area x source, one table per area kind
   const matrix = Object.entries(d.intake.sources).filter(([, ss]) => ss.length).map(([kind, ss]) => {
     const rows = d.intake.rows.filter((r) => r.kind === kind);
     if (!rows.length) return "";
     const cell = (c) => stChip(c.state, c.state === "todo" ? "todo" : c.empty ? "empty"
       : `${c.state === "partial" ? "partial " : ""}${(c.date || "").slice(5)}`);
     return `<div class="scroll-x"><table>
-      <tr><th>chunk</th><th>${esc(kind)} area</th>${ss.map((s) => `<th>${esc(s)}</th>`).join("")}</tr>
-      ${rows.map((r) => `<tr class="${r.active ? "" : "off"}"><td>${esc(r.chunk)}${r.active ? "" : ' <span class="muted small">(not active)</span>'}</td><td>${esc(r.area)}</td>
+      <tr><th>${esc(kind)} area</th>${ss.map((s) => `<th>${esc(s)}</th>`).join("")}</tr>
+      ${rows.map((r) => `<tr><td>${esc(r.area)}</td>
         ${ss.map((s) => `<td class="cell" title="${r.cells[s].run_id ? `run ${r.cells[s].run_id}` : "never covered"}">${cell(r.cells[s])}</td>`).join("")}</tr>`).join("")}
     </table></div>`;
   }).join("");
@@ -663,13 +660,13 @@ async function openPipeline() {
       <td>$${(+r.cost).toFixed(2)}</td></tr>`).join("")}</table></div>`;
   const web = d.stages.find((s) => s.id === "websites");
   const models = Object.entries(web.no_site_models).map(([m, n]) => `${m}: ${n}`).join(", ");
-  const webTable = `<div class="scroll-x"><table><tr><th>website state</th><th>active chunks</th><th>all</th></tr>
+  const webTable = `<div class="scroll-x"><table><tr><th>website state</th><th>in walk zones</th><th>all</th></tr>
     ${Object.entries(web.labels).map(([k, label]) => `<tr><td>${esc(label)}${k === "no_site" && models ? ` <span class="muted">(${esc(models)})</span>` : ""}</td>
-      <td>${web.active_by_state[k] || 0}</td><td>${web.by_state[k] || 0}</td></tr>`).join("")}
-    <tr><td><b>named buildings</b></td><td><b>${web.active_named}</b></td><td><b>${web.named}</b></td></tr></table></div>`;
-  const sites = `<div class="scroll-x"><table><tr><th>site</th><th>chunk</th><th>state</th><th>last scrape</th><th>last render</th><th>rows</th><th>priced</th><th>re-scrape</th></tr>
-    ${d.sites.map((s) => `<tr class="${s.active ? "" : "off"}"><td><a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.name)}</a>${s.discovered ? ' <span class="muted small">(found by search)</span>' : ""}${s.check && s.check.outcome !== "ok" ? `<br><span class="small ${s.check.outcome === "rejected" ? "reason fail" : "muted"}">address check: ${esc(s.check.label)}</span>` : ""}</td>
-      <td>${esc(s.chunk || "?")}</td><td>${stChip(s.state, s.state === "todo" ? "never" : s.state)}</td><td>${day(s.last)}</td>
+      <td>${web.zone_by_state[k] || 0}</td><td>${web.by_state[k] || 0}</td></tr>`).join("")}
+    <tr><td><b>named buildings</b></td><td><b>${web.zone_named}</b></td><td><b>${web.named}</b></td></tr></table></div>`;
+  const sites = `<div class="scroll-x"><table><tr><th>site</th><th>state</th><th>last scrape</th><th>last render</th><th>rows</th><th>priced</th><th>re-scrape</th></tr>
+    ${d.sites.map((s) => `<tr><td><a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.name)}</a>${s.discovered ? ' <span class="muted small">(found by search)</span>' : ""}${s.check && s.check.outcome !== "ok" ? `<br><span class="small ${s.check.outcome === "rejected" ? "reason fail" : "muted"}">address check: ${esc(s.check.label)}</span>` : ""}</td>
+      <td>${stChip(s.state, s.state === "todo" ? "never" : s.state)}</td><td>${day(s.last)}</td>
       <td>${renderCell(s.render)}</td>
       <td>${s.rows}${s.info_only ? ' <span class="muted small">photos/link only</span>' : ""}</td><td>${s.priced}</td><td class="cmd"><code>${esc(s.command)}</code></td></tr>`).join("")}
   </table></div>`;
@@ -677,7 +674,7 @@ async function openPipeline() {
   const stuck = d.stuck_runs.length ? `<p class="reason fail small">Runs never closed (still 'running'): ${d.stuck_runs.map((r) => `#${r.id} ${esc(r.component)}/${esc(r.source || "")} ${day(r.started_at)}`).join(", ")}</p>` : "";
   body.innerHTML = `<div class="pipe">
     <h2>Pipeline status</h2>
-    <p class="muted small">Computed now from the logs (${esc(d.now.slice(0, 16).replace("T", " "))} UTC). Active chunks: ${esc(d.active.join(", ") || "none")}; headline states count only those. Stale = older than ${d.stale_days} days.
+    <p class="muted small">Computed now from the logs (${esc(d.now.slice(0, 16).replace("T", " "))} UTC). Website, own-site and Google counts are over places inside a station walk zone. Stale = older than ${d.stale_days} days.
       ${["done", "partial", "stale", "todo", "blocked"].map((s) => stChip(s)).join(" ")}</p>
     ${stuck}${statusBlock(S.status)}
     <h3>Search areas</h3><div id="areas-map" class="areas-map"></div><div id="areas-legend" class="small"></div>
@@ -843,7 +840,7 @@ async function boot() {
   $("#mode").value = "bike";
   initMap();
   $$("#base-switch button").forEach((b) => b.addEventListener("click", () => setBase(b.dataset.base)));
-  ["#q", "#sort", "#target", "#mode", "#minbeds", "#maxppb", "#inactive", "#todo", ...$$(".st")].forEach((el) => {
+  ["#q", "#sort", "#target", "#mode", "#minbeds", "#maxppb", "#inactive", "#outzone", ...$$(".st")].forEach((el) => {
     const node = typeof el === "string" ? $(el) : el;
     node.addEventListener("input", renderList);
   });

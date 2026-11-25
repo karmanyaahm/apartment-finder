@@ -39,7 +39,7 @@ class FakeResp:
         return self._b
 
 
-BOX = Area(kind="box", id="mountain_view", label="", chunks=["c"], bbox=[37.38, -122.09, 37.41, -122.06])
+BOX = Area(kind="box", id="mountain_view", label="", bbox=[37.38, -122.09, 37.41, -122.06])
 
 
 def test_places_run_meters_every_page_and_marks_full_queries_partial(conn, monkeypatch, tmp_path):
@@ -84,7 +84,7 @@ def test_places_call_cap_spans_every_box_of_a_run(conn, monkeypatch, tmp_path):
         sent.append(body)
         return FakeResp({"places": [{**PLACE, "id": f"q{len(sent)}"}]})  # one page each
 
-    box2 = Area(kind="box", id="san_antonio", label="", chunks=["c"], bbox=[37.39, -122.12, 37.42, -122.09])
+    box2 = Area(kind="box", id="san_antonio", label="", bbox=[37.39, -122.12, 37.42, -122.09])
     monkeypatch.setattr(base.settings, "RAW_DIR", tmp_path / "raw")
     adapter = base.Adapter(**{**ADAPTERS["google_places"].__dict__,
                               "fetch": lambda cfg, areas, cap, usd, c: places.fetch(cfg, areas, cap, usd, c, post=post)})

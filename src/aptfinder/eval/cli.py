@@ -101,7 +101,7 @@ def cmd_recall(db: str) -> None:
     from ..config import load_areas
 
     covered_zips = {aid for (src, aid) in coverage(conn) if src in ("zillow", "apartments_com")}
-    covered_cities = {a.city for a in load_areas()[1] if a.kind == "zip" and a.id in covered_zips}
+    covered_cities = {a.city for a in load_areas() if a.kind == "zip" and a.id in covered_zips}
     tiers: dict[str, list[tuple[str, str]]] = {}
     for r in load_benchmark():
         found = False

@@ -1,10 +1,12 @@
 """aptf-intake: run a source over intake areas (config/areas.toml) and keep a done/left ledger.
 
-  aptf-intake coverage                         # what's done and what's left, per chunk, area and source
-  aptf-intake run zillow --chunk palo_alto     # every not-yet-covered area of that chunk, one batched run
+  aptf-intake coverage                         # what's done and what's left, per source and area
+  aptf-intake run zillow                       # every not-yet-covered area of the source's kind, one batched run
   aptf-intake run zillow --area 94301 --area 94025 [--reload]
   aptf-intake reparse <source> <raw file> [--covers complete|partial]   # re-ingest saved output (free)
-  aptf-intake discover-sites --chunk mountain_view [--limit 5] [--dry-run]   # find community websites
+  aptf-intake discover-sites [--limit 5] [--dry-run]   # find websites of buildings in a station walk zone
+  aptf-intake promote-sites [--limit 100] [--retry-failed] [--dry-run]
+  aptf-intake render [--site ID] [--retry-failed] [--dry-run]   # every site in the list by default
 """
 
 from __future__ import annotations
@@ -24,35 +26,31 @@ SHORT = {"direct": "direct", "zillow": "zillow", "apartments_com": "apts.com", "
 
 
 def print_coverage(conn) -> None:
-    chunks, areas = load_areas()
+    areas = load_areas()
     cov = coverage(conn)
-    kinds = {"zip": [s for s, a in ADAPTERS.items() if a.area_kind == "zip"],
-             "city": [s for s, a in ADAPTERS.items() if a.area_kind == "city"],
-             "box": [s for s, a in ADAPTERS.items() if a.area_kind == "box"],
-             "site": [s for s, a in ADAPTERS.items() if a.area_kind == "site"]}
     left = n_done = 0
-    for chunk in chunks:
-        print(f"\n=== chunk {chunk}")
-        for kind, srcs in kinds.items():
-            mine = [a for a in areas if a.kind == kind and chunk in a.chunks and a.chunks[0] == chunk]
-            if not mine:
-                continue
-            print(f"  {kind:5s} {'':24s}" + "".join(f"{SHORT[s]:>13s}" for s in srcs))
-            for a in mine:
-                cells = []
-                for s in srcs:
-                    c = cov.get((s, a.id))
-                    if c and c["state"] in ("complete", "empty"):
-                        n_done += 1
-                        tag = "empty" if c["state"] == "empty" else c["date"][5:]
-                        cells.append(f"{tag}{'*' if c['legacy'] else ''} r{c['run_id']}")
-                    elif c:
-                        left += 1
-                        cells.append(f"PARTIAL r{c['run_id']}")
-                    else:
-                        left += 1
-                        cells.append("TODO")
-                print(f"  {'':5s} {a.label[:24]:24s}" + "".join(f"{x:>13s}" for x in cells))
+    for kind in ("zip", "city", "box", "site"):
+        srcs = [s for s, a in ADAPTERS.items() if a.area_kind == kind]
+        mine = [a for a in areas if a.kind == kind]
+        if not srcs or not mine:
+            continue
+        print(f"\n=== {kind}")
+        print(f"  {'':24s}" + "".join(f"{SHORT[s]:>13s}" for s in srcs))
+        for a in mine:
+            cells = []
+            for s in srcs:
+                c = cov.get((s, a.id))
+                if c and c["state"] in ("complete", "empty"):
+                    n_done += 1
+                    tag = "empty" if c["state"] == "empty" else c["date"][5:]
+                    cells.append(f"{tag}{'*' if c['legacy'] else ''} r{c['run_id']}")
+                elif c:
+                    left += 1
+                    cells.append(f"PARTIAL r{c['run_id']}")
+                else:
+                    left += 1
+                    cells.append("TODO")
+            print(f"  {a.label[:24]:24s}" + "".join(f"{x:>13s}" for x in cells))
     print(f"\n{n_done} area-source pairs done, {left} left (TODO or PARTIAL).  * = earlier whole-city / box "
           "query; PARTIAL = cap hit or actor failed; the next `run` picks TODO and PARTIAL areas up again.")
 
@@ -61,11 +59,11 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="aptf-intake")
     ap.add_argument("--db", default=str(settings.DB_PATH))
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("coverage", help="done / left per chunk, area and source")
+    sub.add_parser("coverage", help="done / left per source and area")
     r = sub.add_parser("run")
     r.add_argument("source", choices=sorted(ADAPTERS))
-    r.add_argument("--chunk", action="append", default=[])
-    r.add_argument("--area", action="append", default=[], help="area id (ZIP, city name, or box id)")
+    r.add_argument("--area", action="append", default=[],
+                   help="area id (ZIP, city name, box id or site id); default every area of the source's kind")
     r.add_argument("--reload", action="store_true", help="include areas already covered")
     r.add_argument("--max-items", type=int)
     r.add_argument("--max-usd", type=float)
@@ -77,7 +75,6 @@ def main(argv: list[str] | None = None) -> None:
                     help="credit the file's areas in the coverage ledger (a trial scraped on another copy)")
     ds = sub.add_parser("discover-sites", help="find community websites with a local headless Claude (web search "
                                                "only), then fetch and address-check them through Apify")
-    ds.add_argument("--chunk", action="append", required=True)
     ds.add_argument("--limit", type=int, default=10)
     ds.add_argument("--batch", type=int, default=5, help="buildings per Claude call")
     ds.add_argument("--model", default="sonnet")
@@ -86,7 +83,6 @@ def main(argv: list[str] | None = None) -> None:
     ds.add_argument("--dry-run", action="store_true", help="list the buildings that would be searched")
     ps = sub.add_parser("promote-sites", help="turn websites that listings already name into community sites: "
                                               "fetch through Apify, keep the ones showing the address, scrape them")
-    ps.add_argument("--chunk", action="append", required=True)
     ps.add_argument("--limit", type=int, default=100)
     ps.add_argument("--no-fetch", action="store_true")
     ps.add_argument("--retry-failed", action="store_true", help="only fetch again found sites whose page was not "
@@ -104,8 +100,7 @@ def main(argv: list[str] | None = None) -> None:
                                                           "(free; after a change to the checks)")
     rd = sub.add_parser("render", help="render buildings' own sites in a browser (Apify) and read offered plans "
                                        "and prices with Claude Haiku")
-    rd.add_argument("--chunk", action="append", default=[])
-    rd.add_argument("--site", action="append", default=[], help="site id (repeatable); default every site in --chunk")
+    rd.add_argument("--site", action="append", default=[], help="site id (repeatable); default every site")
     rd.add_argument("--model", default="haiku")
     rd.add_argument("--max-usd", type=float, default=1.0, help="cap for each of Apify and Claude")
     rd.add_argument("--retry-failed", action="store_true", help="only sites whose last render failed (blocked, "
@@ -129,7 +124,7 @@ def main(argv: list[str] | None = None) -> None:
         from .render import render
 
         try:
-            res = render(conn, args.chunk, sites=args.site or None, model=args.model, max_claude_usd=args.max_usd,
+            res = render(conn, sites=args.site or None, model=args.model, max_claude_usd=args.max_usd,
                          max_apify_usd=args.max_usd, dry_run=args.dry_run, retry_failed=args.retry_failed,
                          residential=args.residential)
         except Blocker as e:
@@ -142,7 +137,7 @@ def main(argv: list[str] | None = None) -> None:
         from .extract import extract
 
         try:
-            res = (promote(conn, args.chunk, limit=args.limit, dry_run=args.dry_run, fetch=not args.no_fetch,
+            res = (promote(conn, limit=args.limit, dry_run=args.dry_run, fetch=not args.no_fetch,
                            retry_failed=args.retry_failed)
                    if args.cmd == "promote-sites" else
                    extract(conn, args.source, limit=args.limit, batch=args.batch, model=args.model,
@@ -156,7 +151,7 @@ def main(argv: list[str] | None = None) -> None:
         from .discover import Blocker, discover
 
         try:
-            res = discover(conn, args.chunk, limit=args.limit, batch=args.batch, model=args.model,
+            res = discover(conn, limit=args.limit, batch=args.batch, model=args.model,
                            max_usd=args.max_usd, dry_run=args.dry_run, fetch=not args.no_fetch)
         except Blocker as e:
             raise SystemExit(f"BLOCKED: {e}")
@@ -164,9 +159,8 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     adapter = ADAPTERS[args.source]
-    _, areas = load_areas()
-    pick = [a for a in areas if a.kind == adapter.area_kind
-            and (a.id in args.area or any(c in a.chunks for c in args.chunk))]
+    areas = load_areas()
+    pick = [a for a in areas if a.kind == adapter.area_kind and (not args.area or a.id in args.area)]
     if not args.reload:
         cov = coverage(conn)
         pick = [a for a in pick if not done(cov, args.source, a.id)]

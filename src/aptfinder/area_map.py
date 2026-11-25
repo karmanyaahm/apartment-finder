@@ -53,7 +53,7 @@ def _core(pts: list[tuple[float, float]]) -> list[tuple[float, float]]:
 def area_map(conn: sqlite3.Connection) -> dict[str, Any]:
     from .intake import ADAPTERS
 
-    _, areas = load_areas()
+    areas = load_areas()
     with open(settings.CONFIG_DIR / "areas.toml", "rb") as f:
         radius_m = float(tomllib.load(f).get("radius_km", 1.54)) * 1000
     kinds = {k: sorted(s for s, a in ADAPTERS.items() if a.area_kind == k) for k in ("zip", "city", "box")}

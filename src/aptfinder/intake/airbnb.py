@@ -93,7 +93,7 @@ def area_of(item: dict[str, Any], ids: list[str]) -> str | None:
     la, lo = co.get("latitude"), co.get("longitude")
     if la is None or lo is None:
         return None
-    for a in load_areas()[1]:
+    for a in load_areas():
         if a.kind == "box" and a.id in ids:
             s, w, n, e = a.bbox
             if s <= la <= n and w <= lo <= e:

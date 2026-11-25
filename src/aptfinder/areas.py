@@ -1,5 +1,5 @@
-"""Which chunk (station walk zone group) a point falls in, and whether that chunk is being worked now.
-Computed on read from config/areas.toml and the station list; nothing is stored."""
+"""Whether a point lies in some Caltrain station's walk zone (config/areas.toml: each `[[box]]` station and
+`radius_km`). Computed on read; nothing is stored."""
 
 from __future__ import annotations
 
@@ -12,32 +12,23 @@ from .config import load_points
 
 
 @lru_cache(maxsize=1)
-def _cfg() -> tuple[tuple[str, ...], float, tuple[tuple[str, float, float], ...], tuple[str, ...]]:
+def _cfg() -> tuple[float, tuple[tuple[str, float, float], ...]]:
     with open(settings.CONFIG_DIR / "areas.toml", "rb") as f:
         raw = tomllib.load(f)
     stations = {p.name: p for p in load_points().get("caltrain_stations", [])}
-    zones = tuple((chunk, stations[n].lat, stations[n].lon)
-                  for chunk in raw.get("chunks", []) for n in raw.get("chunk_stations", {}).get(chunk, [])
-                  if n in stations)
-    return tuple(raw.get("active", [])), float(raw.get("radius_km", 1.54)), zones, tuple(raw.get("chunks", []))
+    names = list(dict.fromkeys(b["station"] for b in raw.get("box", [])))
+    return (float(raw.get("radius_km", 1.54)),
+            tuple((n, stations[n].lat, stations[n].lon) for n in names if n in stations))
 
 
-def chunk_of(lat: float | None, lon: float | None) -> str | None:
-    """The first chunk (in work order) with a station within the walk radius, else None."""
+def in_walk_zone(lat: float | None, lon: float | None) -> bool:
+    """True when some station's walk radius covers the point. Unknown location: False."""
     if lat is None or lon is None:
-        return None
-    _, radius, zones, _ = _cfg()
-    for chunk, la, lo in zones:
-        if haversine_m((lat, lon), (la, lo)) <= radius * 1000:
-            return chunk
-    return None
-
-
-def is_active(chunk: str | None) -> bool:
-    return chunk is not None and chunk in _cfg()[0]
+        return False
+    radius, zs = _cfg()
+    return any(haversine_m((lat, lon), (la, lo)) <= radius * 1000 for _, la, lo in zs)
 
 
 def zones() -> dict:
-    active, radius, z, order = _cfg()
-    return {"active": list(active), "radius_km": radius, "order": list(order),
-            "zones": [{"chunk": c, "lat": la, "lon": lo} for c, la, lo in z]}
+    radius, zs = _cfg()
+    return {"radius_km": radius, "zones": [{"station": n, "lat": la, "lon": lo} for n, la, lo in zs]}

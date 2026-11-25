@@ -35,7 +35,7 @@ Screenshots are real data, shown with `aptf-web --redact` (below).
 | **Goal rules** | `equals` (field = value), `max` (field at most a value), `size_options` (beds with a minimum of baths), `dates_cover` (available for a date range), `commute_any` (any mode within N minutes of a target), `near` (nearest point of a set within N minutes), `amenity`, `known` (field present); each rule is either required or nice to have |
 | **Trust** | per-source accuracy per field from hand checks; a field below the threshold counts as unknown (needs check) |
 | **You** | ratings and comments per place on any attribute (overall, gym, living room, ...), plus hand checks of listing fields |
-| **Search area** | cities, a bounding box, and Caltrain walk-zone chunks in `config/areas.toml` |
+| **Search area** | cities, a bounding box, and the ZIPs, cities and station boxes of the Caltrain walk zones in `config/areas.toml` |
 | **Spend** | Apify cost per run and a monthly reserve; Google Routes calls per run and per month |
 
 Goal examples are in [config.example/goals.toml](config.example/goals.toml).
@@ -55,18 +55,18 @@ Then edit your copy in `config/`:
 
 - `goals.toml`: what you are looking for (rules and nice-to-haves, see [Everything it considers](#everything-it-considers)).
 - `points/commute_targets.csv`: where you commute to.
-- `areas.toml`: the search area, split into chunks (Caltrain station walk zones). `active = [...]` lists the chunks you are working on now; places outside them show as TODO and get no paid routing. Regenerate for another region with `scripts/plan_areas.py`.
+- `areas.toml`: the search area: the ZIP codes, cities and station boxes that the Caltrain station walk zones touch. Each source covers every area of its own kind (ZIP, city or box). Regenerate for another region with `scripts/plan_areas.py`.
 - `direct_sites.toml`: buildings' own websites to read (optional).
 - `redact.toml`: strings to hide in screenshots (optional).
 
 ## 2. Gather and explore
 
-Every scrape goes through Apify, with spend caps (`config/sources.toml`: $1 per run and a reserve). Limit what a run covers with `--chunk` (one chunk of `areas.toml`), `--area` (one ZIP, city or box id), `--max-items` and `--max-usd`, and look first with `--dry-run`:
+Every scrape goes through Apify, with spend caps (`config/sources.toml`: $1 per run and a reserve). A run covers every area of the source's kind not covered yet; limit it with `--area` (one ZIP, city, box or site id, repeatable), `--max-items` and `--max-usd`, and look first with `--dry-run`:
 
 ```sh
-nix run .#intake -- coverage                                     # what is done and left, per chunk, area and source
-nix run .#intake -- run zillow --chunk mountain_view --dry-run   # which areas would run; spends nothing
-nix run .#intake -- run zillow --chunk mountain_view             # sources: zillow apartments_com craigslist airbnb furnishedfinder direct
+nix run .#intake -- coverage                                     # what is done and left, per source and area
+nix run .#intake -- run zillow --dry-run                         # which areas would run; spends nothing
+nix run .#intake -- run zillow                                   # sources: zillow apartments_com craigslist airbnb furnishedfinder direct
 nix run .#intake -- run craigslist --area 94041 --max-usd 0.25   # one ZIP, capped
 nix run .#identity                                               # match listings to buildings and units
 nix run .#commute -- compute                                     # free straight-line estimates for every place
@@ -83,17 +83,18 @@ Buildings' own websites (the source of truth when found) and facts that sit only
 ```sh
 nix run .#intake -- extract craigslist                           # Haiku reads listing text: address, name, website, furnished, ...
 nix run .#intake -- extract furnishedfinder
-nix run .#intake -- promote-sites --chunk mountain_view          # websites listings name -> fetched via Apify, address-checked, scraped
-nix run .#intake -- discover-sites --chunk mountain_view --limit 40   # web search for buildings still without a site
-nix run .#intake -- run direct --chunk mountain_view             # re-scrape every known building website
-nix run .#intake -- run google_places --chunk mountain_view     # apartment communities from Google Places (official API; metered, caps in config/google.toml)
-nix run .#intake -- run zumper --chunk mountain_view            # Zumper: floor plans and building websites, per city
-nix run .#intake -- run padmapper --chunk mountain_view         # PadMapper (Zumper's inventory, search results only), per city
-nix run .#intake -- run portfolio --chunk mountain_view         # big operators' city pages (Greystar, UDR, AvalonBay, ...) -> communities and their pages
+nix run .#intake -- promote-sites                                # websites listings name -> fetched via Apify, address-checked, scraped
+nix run .#intake -- discover-sites --limit 40                    # web search for buildings still without a site
+nix run .#intake -- run direct                                   # scrape every known building website not scraped yet (--reload: all)
+nix run .#intake -- render --dry-run                             # render own sites in a browser, Haiku reads plans and prices
+nix run .#intake -- run google_places                            # apartment communities from Google Places, per station box (official API; metered, caps in config/google.toml)
+nix run .#intake -- run zumper                                   # Zumper: floor plans and building websites, per city
+nix run .#intake -- run padmapper                                # PadMapper (Zumper's inventory, search results only), per city
+nix run .#intake -- run portfolio                                # big operators' city pages (Greystar, UDR, AvalonBay, ...) -> communities and their pages
 nix run .#verify -- samples --source zumper --n 5 --seed 1     # random rows of a source with the page to open, to check by hand
 ```
 
-The dashboard's **Pipeline** button shows, live, every stage from intake to Google routing: done, partial, todo, stale (over a week old) or blocked, per chunk, area, source and building website, with the command that runs the rest.
+The dashboard's **Pipeline** button shows, live, every stage from intake to Google routing: done, partial, todo, stale (over a week old) or blocked, per source and area and per building website, with the command that runs the rest.
 
 A diagram of the whole pipeline, with what has run and what is planned: [pipeline flow chart](https://claude.ai/artifact/JAGKeZFdoEGYFBRyzzaG7B) (a claude.ai page, shared by link).
 

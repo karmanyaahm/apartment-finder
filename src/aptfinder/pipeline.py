@@ -1,7 +1,8 @@
 """Where each stage of the pipeline stands, computed on read from the logs and config (nothing stored): what has
 run, what is partial, what has never run, what is stale (older than STALE_DAYS), what is blocked, and the command
 that would run the rest. Feeds the dashboard's Pipeline panel (`/api/pipeline`) and the drawer's Pipeline section
-(`place_status`). Headline states are scoped to the active chunks (config/areas.toml `active`)."""
+(`place_status`). Intake covers every area of each source's kind; the website, own-site and Google stages count the
+places inside some station's walk zone (`areas.in_walk_zone`)."""
 
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
-from .areas import chunk_of, is_active
+from .areas import in_walk_zone
 from .config import CHECK_LABEL, CHECK_RETRY, check_outcome, load_areas, load_goals, load_points, load_sites
 from .verify import is_named_building
 
@@ -178,14 +179,10 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
     from .trips import google_usage
 
     now = now or datetime.now(timezone.utc)
-    chunks, areas = load_areas()
-    active = [c for c in chunks if is_active(c)]
+    areas = load_areas()
     runs = _runs(conn)
     places = [dict(r) for r in conn.execute("SELECT place_key, property_name, address, lat, lon FROM places")]
-    for p in places:
-        p["chunk"] = chunk_of(p["lat"], p["lon"])
-    by_key = {p["place_key"]: p for p in places}
-    in_active = {p["place_key"] for p in places if is_active(p["chunk"])}
+    in_zone = {p["place_key"] for p in places if in_walk_zone(p["lat"], p["lon"])}
     stages: list[dict[str, Any]] = []
 
     def stage(sid: str, label: str, state: str, summary: str, commands: list[str], **extra: Any) -> None:
@@ -196,47 +193,41 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
     sites = load_sites()
     kinds = Counter(a.kind for a in areas)
     stage("configure", "Configure", "done",
-          f"{len(chunks)} chunks ({', '.join(active) or 'none'} active), {kinds['zip']} ZIPs, {kinds['city']} cities, "
-          f"{kinds['box']} boxes, {len(sites)} sites, {len(goals)} goals",
-          ["edit config/*.toml (areas.toml `active` picks the chunks being worked)"],
-          counts={"chunks": len(chunks), "active": active, "areas": dict(kinds), "sites": len(sites),
-                  "goals": list(goals)})
+          f"{kinds['zip']} ZIPs, {kinds['city']} cities, {kinds['box']} station boxes, {len(sites)} sites, "
+          f"{len(goals)} goals", ["edit config/*.toml"],
+          counts={"areas": dict(kinds), "sites": len(sites), "goals": list(goals)})
 
-    # 2. intake: chunk x area x source, like `aptf-intake coverage`
+    # 2. intake: per area kind, area x source, like `aptf-intake coverage`
     cov = coverage(conn)
     srcs = {k: [s for s, ad in ADAPTERS.items() if ad.area_kind == k] for k in ("zip", "city", "box")}
     rows, todo_cmds = [], {}
-    for chunk in chunks:
-        for kind, ss in srcs.items():
-            for a in areas:
-                if a.kind != kind or not a.chunks or a.chunks[0] != chunk:
-                    continue
-                act = [c for c in a.chunks if c in active]
-                cells = {}
-                for s in ss:
-                    c = cov.get((s, a.id))
-                    if not c:
-                        st = "todo"
-                    elif c["state"] == "partial":
-                        st = "partial"
-                    else:
-                        st = _fresh(c["date"], now)
-                    cells[s] = {"state": st, "date": c["date"] if c else None, "run_id": c["run_id"] if c else None,
-                                "items": c.get("items") if c else None, "empty": bool(c) and c["state"] == "empty"}
-                    if act and st != "done":
-                        reload = " --reload" if st == "stale" else ""
-                        todo_cmds.setdefault(f"{INTAKE} run {s} --chunk {act[0]}{reload}", None)
-                rows.append({"chunk": chunk, "area": a.label, "area_id": a.id, "kind": kind, "active": bool(act),
-                             "cells": cells})
-    act_cells = [c["state"] for r in rows if r["active"] for c in r["cells"].values()]
-    n = Counter(act_cells)
+    for kind, ss in srcs.items():
+        for a in areas:
+            if a.kind != kind:
+                continue
+            cells = {}
+            for s in ss:
+                c = cov.get((s, a.id))
+                if not c:
+                    st = "todo"
+                elif c["state"] == "partial":
+                    st = "partial"
+                else:
+                    st = _fresh(c["date"], now)
+                cells[s] = {"state": st, "date": c["date"] if c else None, "run_id": c["run_id"] if c else None,
+                            "items": c.get("items") if c else None, "empty": bool(c) and c["state"] == "empty"}
+                if st != "done":
+                    todo_cmds.setdefault(f"{INTAKE} run {s}" + (" --reload" if st == "stale" else ""), None)
+            rows.append({"area": a.label, "area_id": a.id, "kind": kind, "cells": cells})
+    all_cells = [c["state"] for r in rows for c in r["cells"].values()]
+    n = Counter(all_cells)
     src_rows = []
     for s in ADAPTERS:
         info = _run_info(runs, "intake", s)
         src_rows.append({"source": s, "area_kind": ADAPTERS[s].area_kind, **info})
-    stage("intake", "Intake (aggregators)", _roll(act_cells),
-          f"active chunks: {n['done']} done, {n['stale']} stale, {n['partial']} partial, {n['todo']} todo "
-          f"of {len(act_cells)} area-source pairs", list(todo_cmds),
+    stage("intake", "Intake (aggregators)", _roll(all_cells),
+          f"{n['done']} done, {n['stale']} stale, {n['partial']} partial, {n['todo']} todo "
+          f"of {len(all_cells)} area-source pairs", list(todo_cmds),
           counts=dict(n), cost=round(sum(r["cost"] for r in src_rows if r["source"] != "direct"), 2))
 
     # 3. identity (intake runs it inline too, so its state comes from the data, not its run rows): an unlinked
@@ -293,29 +284,23 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
     for p in named:
         p["web"] = ws.get(p["place_key"], {}).get("state", "not_searched")
     all_c = Counter(p["web"] for p in named)
-    act_named = [p for p in named if p["place_key"] in in_active]
+    act_named = [p for p in named if p["place_key"] in in_zone]
     act_c = Counter(p["web"] for p in act_named)
     no_site_models = Counter(ws[p["place_key"]].get("model") for p in named if p["web"] == "no_site")
-    cmds = []
-    for ch in active:
-        mine = Counter(p["web"] for p in act_named if p["chunk"] == ch)
-        if mine["known"]:
-            cmds.append(f"{INTAKE} promote-sites --chunk {ch}")
-        if mine["listed"]:
-            cmds.append(f"{INTAKE} run direct --chunk {ch}")
-        if mine["not_searched"]:
-            cmds.append(f"{INTAKE} discover-sites --chunk {ch} --limit 40")
+    cmds = ([f"{INTAKE} promote-sites"] if act_c["known"] else []) + (
+        [f"{INTAKE} run direct"] if act_c["listed"] else []) + (
+        [f"{INTAKE} discover-sites --limit 40"] if act_c["not_searched"] else [])
     runnable = act_c["not_searched"] + act_c["known"] + act_c["listed"]
     found = act_c["priced"] + act_c["scraped"]
     web_state = ("done" if not act_named else "todo" if act_c["not_searched"] == len(act_named)
                  else "partial" if runnable else "blocked" if act_c["blocked"] else "done")
     stage("websites", "Website finding", web_state,
-          f"active chunks: {found} of {len(act_named)} named buildings have their own site scraped; "
+          f"walk zones: {found} of {len(act_named)} named buildings have their own site scraped; "
           f"{act_c['not_searched']} not searched, {act_c['blocked']} blocked",
           cmds + (["blocked sites need a browser-rendering actor or residential proxies (your decision)"]
                   if act_c["blocked"] else []),
-          labels=WEB_STATES, by_state=dict(all_c), active_by_state=dict(act_c), named=len(named),
-          active_named=len(act_named), no_site_models=dict(no_site_models),
+          labels=WEB_STATES, by_state=dict(all_c), zone_by_state=dict(act_c), named=len(named),
+          zone_named=len(act_named), no_site_models=dict(no_site_models),
           **_run_info(runs, "discover", "claude-websearch"))
 
     # 6. own-site scrapes, one row per site in the list
@@ -330,15 +315,13 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
     checks = site_checks()
     site_rows = []
     for sid, s in sites.items():
-        p = by_key.get(s.get("place_key") or "")
-        chunk = s.get("chunk") or (p["chunk"] if p else None)
         last = (seen.get(sid) or {}).get("last")
         st = stats.get(sid) or {}
         rd = renders.get(sid)
         if s.get("platform") in RENDER_SKIP:
             rd = {"outcome": "skipped", "label": "not needed (page data gives every unit)"}
         site_rows.append({"id": sid, "name": s.get("name") or sid, "url": s["url"], "platform": s.get("platform"),
-                          "chunk": chunk, "active": is_active(chunk), "last": last, "state": _fresh(last, now),
+                          "last": last, "state": _fresh(last, now),
                           "rows": st.get("rows") or 0, "priced": st.get("priced") or 0,
                           "info_only": bool(st.get("rows")) and st.get("info") == st.get("rows"),
                           "discovered": bool(s.get("verify_address")),
@@ -346,24 +329,20 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
                           "command": f"{INTAKE} run direct --area {sid}" + (" --reload" if last else "")})
     order = {"todo": 0, "stale": 1, "done": 2}
     site_rows.sort(key=lambda r: (order[r["state"]], r["last"] or "", r["name"].lower()))
-    act_sites = [r for r in site_rows if r["active"]]
-    sc = Counter(r["state"] for r in act_sites)
+    sc = Counter(r["state"] for r in site_rows)
     cmds = []
-    for ch in active:
-        mine = Counter(r["state"] for r in act_sites if r["chunk"] == ch)
-        if mine["todo"]:
-            cmds.append(f"{INTAKE} run direct --chunk {ch}")
-        if mine["stale"]:
-            cmds.append(f"{INTAKE} run direct --chunk {ch} --reload")
-        rmine = Counter((r["render"] or {}).get("retry") for r in act_sites if r["chunk"] == ch)
-        if rmine[True]:
-            cmds.append(f"{INTAKE} render --chunk {ch} --retry-failed")
-        if any(not r["render"] or r["render"].get("stale") for r in act_sites if r["chunk"] == ch):
-            cmds.append(f"{INTAKE} render --chunk {ch}")
-    rc = Counter((r["render"] or {"outcome": "never"})["outcome"] for r in act_sites)
-    stage("sites", "Own-site scrapes", _roll([r["state"] for r in act_sites]),
-          f"active chunks: {sc['done']} fresh, {sc['stale']} stale, {sc['todo']} never scraped "
-          f"of {len(act_sites)} sites ({len(site_rows)} in the list); rendered: "
+    if sc["todo"]:
+        cmds.append(f"{INTAKE} run direct")
+    if sc["stale"]:
+        cmds.append(f"{INTAKE} run direct --reload")
+    if any((r["render"] or {}).get("retry") for r in site_rows):
+        cmds.append(f"{INTAKE} render --retry-failed")
+    if any(not r["render"] or r["render"].get("stale") for r in site_rows):
+        cmds.append(f"{INTAKE} render")
+    rc = Counter((r["render"] or {"outcome": "never"})["outcome"] for r in site_rows)
+    stage("sites", "Own-site scrapes", _roll([r["state"] for r in site_rows]),
+          f"{sc['done']} fresh, {sc['stale']} stale, {sc['todo']} never scraped "
+          f"of {len(site_rows)} sites; rendered: "
           + (", ".join(f"{n} {k}" for k, n in rc.most_common()) or "none"), cmds,
           counts=dict(sc), render_counts=dict(rc), **_run_info(runs, "intake", "direct"))
 
@@ -404,7 +383,7 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
     for pk in routing_candidates(conn, res=res):  # routed as its building, like `compute --candidates`
         base = pk.split("~", 1)[0]
         cands.add(base if base in located else pk)
-    act_cands = sorted(pk for pk in cands if pk in in_active and pk in located)
+    act_cands = sorted(pk for pk in cands if pk in in_zone and pk in located)
     g_done = sum(1 for pk in act_cands if "google" in provs.get(pk, ()))
     usage = google_usage(conn)
     from . import settings
@@ -413,7 +392,7 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
     capped = usage["calls"] >= usage["cap"]
     g_state = ("done" if g_done == len(act_cands) else "blocked" if capped or not key
                else "todo" if not g_done else "partial")
-    stage("google", "Google routing (candidates in active chunks)", g_state,
+    stage("google", "Google routing (candidates in station walk zones)", g_state,
           f"{g_done} of {len(act_cands)} candidate places routed; {sum('google' in v for v in provs.values())} places "
           f"routed in all; {usage['calls']}/{usage['cap']} calls this month"
           + ("; GOOGLE_MAPS_API_KEY not set" if not key else "") + ("; monthly cap reached" if capped else ""),
@@ -427,7 +406,7 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
     open_conflicts = verify.all_conflicts(conn)
     conflicts = len(open_conflicts)
     pending = sum(c["pending_render"] for c in open_conflicts)  # an own-site render will likely settle these
-    # the own-site queue: named buildings in active chunks whose own site gave no usable offer
+    # the own-site queue: named buildings in a walk zone whose own site gave no usable offer
     no_web = len(verify.own_site_queue(conn))  # named buildings whose own site gave nothing usable
     stage("verify", "Verify (hand checks)",
           "done" if not conflicts and not no_web else "todo" if not n_checks else "partial",
@@ -447,7 +426,7 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
     stuck = [dict(r) for r in conn.execute(
         "SELECT id, component, source, started_at FROM runs WHERE status = 'running' ORDER BY id")
         if (_days(r["started_at"], now) or 0) > 1 / 24]  # running for over an hour
-    return {"now": now.isoformat(timespec="seconds"), "stale_days": STALE_DAYS, "chunks": chunks, "active": active,
+    return {"now": now.isoformat(timespec="seconds"), "stale_days": STALE_DAYS,
             "stages": stages, "intake": {"sources": srcs, "rows": rows, "runs": src_rows}, "sites": site_rows,
             "stuck_runs": stuck}
 

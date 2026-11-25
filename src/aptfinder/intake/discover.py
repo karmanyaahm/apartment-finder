@@ -1,8 +1,8 @@
 """Find apartment communities' own websites with a local, headless Claude Code that may only web-search.
 
-  aptf-intake discover-sites --chunk mountain_view [--limit 40] [--dry-run]
+  aptf-intake discover-sites [--limit 40] [--dry-run]
 
-Buildings come from the `places` view: a property name, inside the chunk, no community site yet and not
+Buildings come from the `places` view: a property name, inside some station's walk zone (`areas.in_walk_zone`), no community site yet and not
 searched before. Claude (`claude -p`, the only tool WebSearch: it never fetches a page from this machine) proposes
 a URL or null per building. A proposal is cleaned (no query string, no tour/apply/contact path, no aggregator or
 social host) and appended to config/discovered_sites.toml as `[[found]]` (misses as `[[miss]]`, so reruns skip
@@ -26,7 +26,7 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from .. import settings
-from ..areas import chunk_of
+from ..areas import in_walk_zone
 from ..config import CHECK_LABEL, CHECK_RETRY, check_outcome, last_checks, load_areas, load_sites
 from ..store import finish_run, start_run
 
@@ -127,8 +127,8 @@ def _rank(model: str | None) -> int:
     return next((v for k, v in MODEL_RANK.items() if k in (model or "").lower()), 0)
 
 
-def candidates(conn, chunks: list[str], model: str = "sonnet") -> list[dict[str, Any]]:
-    """Named buildings in the chunks with no community site yet, not searched before by this model or a
+def candidates(conn, model: str = "sonnet") -> list[dict[str, Any]]:
+    """Named buildings in a station walk zone with no community site yet, not searched before by this model or a
     stronger one (a weaker model's "no site" does not block a stronger search); most listings first."""
     rec = _records()
     run_model = {r["id"]: json.loads(r["params"] or "{}").get("model")
@@ -143,10 +143,9 @@ def candidates(conn, chunks: list[str], model: str = "sonnet") -> list[dict[str,
     out = []
     for r in conn.execute("SELECT place_key, property_name, address, lat, lon, n_listings FROM places "
                           "WHERE property_name IS NOT NULL AND address IS NOT NULL ORDER BY n_listings DESC"):
-        ch = chunk_of(r["lat"], r["lon"])
-        if ch in chunks and r["place_key"] not in seen | have:
+        if in_walk_zone(r["lat"], r["lon"]) and r["place_key"] not in seen | have:
             out.append({"key": r["place_key"], "name": html.unescape(r["property_name"]).strip(),
-                        "address": r["address"], "chunk": ch})
+                        "address": r["address"]})
     return out
 
 
@@ -188,9 +187,9 @@ def _slug(name: str, taken: set[str]) -> str:
     return sid
 
 
-def discover(conn, chunks: list[str], *, limit: int, batch: int, model: str, max_usd: float,
+def discover(conn, *, limit: int, batch: int, model: str, max_usd: float,
              dry_run: bool = False, fetch: bool = True) -> dict[str, Any]:
-    cands = candidates(conn, chunks, model)[:limit]
+    cands = candidates(conn, model)[:limit]
     est = round(0.025 * len(cands) / max(1, batch) * min(batch, 3), 2)  # trial: ~$0.024 per one-building call
     if dry_run or not cands:
         return {"buildings": [f'{c["name"]} | {c["address"]}' for c in cands], "estimated_usd": est}
@@ -213,7 +212,7 @@ def discover(conn, chunks: list[str], *, limit: int, batch: int, model: str, max
         for c in group:
             a = by_key.get(c["key"]) or {"url": None, "note": "no answer for this key"}
             url, why = clean_url(a.get("url"))
-            base = {"place_key": c["key"], "name": c["name"], "address": c["address"], "chunk": c["chunk"],
+            base = {"place_key": c["key"], "name": c["name"], "address": c["address"],
                     "found_at": now, "run_id": run, "model": model, "note": (a.get("note") or "")[:300]}
             if url:
                 sid = _slug(c["name"], taken)
@@ -234,16 +233,16 @@ def discover(conn, chunks: list[str], *, limit: int, batch: int, model: str, max
     return res
 
 
-def retryable(chunks: list[str]) -> list[str]:
-    """Found sites in the chunks whose latest check did not fetch the page (blocked, timed out, empty): fetched
+def retryable() -> list[str]:
+    """Found sites whose latest check did not fetch the page (blocked, timed out, empty): fetched
     again by `promote-sites`."""
     rec = _records()
     last = last_checks(rec)
     return [f["id"] for f in rec.get("found", [])
-            if f.get("chunk") in chunks and f["id"] in last and check_outcome(last[f["id"]]) in CHECK_RETRY]
+            if f["id"] in last and check_outcome(last[f["id"]]) in CHECK_RETRY]
 
 
-def promote(conn, chunks: list[str], *, limit: int, dry_run: bool = False, fetch: bool = True,
+def promote(conn, *, limit: int, dry_run: bool = False, fetch: bool = True,
             retry_failed: bool = False) -> dict[str, Any]:
     """Websites that listings already name (Apartments.com's website field, URLs read from Craigslist text by
     `extract`) become `[[found]]` sites without a search, then go through the same Apify fetch and address check
@@ -252,7 +251,7 @@ def promote(conn, chunks: list[str], *, limit: int, dry_run: bool = False, fetch
     fetched last time (blocked, timed out) are fetched again with them; `retry_failed`: only those."""
     from collections import Counter
 
-    retry = retryable(chunks)
+    retry = retryable()
     if retry_failed:
         if dry_run or not retry or not fetch:
             return {"retry": retry}
@@ -268,7 +267,7 @@ def promote(conn, chunks: list[str], *, limit: int, dry_run: bool = False, fetch
             "p.address, p.lat, p.lon FROM listings l JOIN places p ON p.place_key = l.place_key "
             "WHERE l.active = 1 AND l.source <> 'direct' AND p.address IS NOT NULL "
             "AND json_extract(l.data, '$.extra.website') IS NOT NULL"):
-        if r["place_key"] in have or chunk_of(r["lat"], r["lon"]) not in chunks:
+        if r["place_key"] in have or not in_walk_zone(r["lat"], r["lon"]):
             continue
         by_place.setdefault(r["place_key"], Counter())[(r["website"], r["source"])] += 1
         info[r["place_key"]] = r
@@ -285,7 +284,7 @@ def promote(conn, chunks: list[str], *, limit: int, dry_run: bool = False, fetch
             "WHERE a.entity_type = 'place' AND a.attribute = 'website' AND a.comment LIKE 'http%' "
             "AND p.address IS NOT NULL ORDER BY a.id"):
         url = clean_url(r["website"], keep_query=True)[0] or r["website"]
-        if norm(url) in known or chunk_of(r["lat"], r["lon"]) not in chunks:
+        if norm(url) in known or not in_walk_zone(r["lat"], r["lon"]):
             continue
         known.add(norm(url))
         by_place.pop(r["place_key"], None)  # your URL outranks a listing's link for the same place
@@ -299,7 +298,7 @@ def promote(conn, chunks: list[str], *, limit: int, dry_run: bool = False, fetch
         sid = _slug(name, taken)
         taken.add(sid)
         rows.append({"id": sid, "place_key": pk, "name": name, "address": r["address"],
-                     "chunk": chunk_of(r["lat"], r["lon"]), "found_at": now, "platform": platform_of(url), "url": url,
+                     "found_at": now, "platform": platform_of(url), "url": url,
                      "found_by": "you (Verify)" if source == "you" else f"{source} listing",
                      "note": "typed in Verify" if source == "you" else f"website field of {n} listing(s)"})
     if dry_run or not (rows or retry):
@@ -318,7 +317,7 @@ def fetch_and_check(conn, ids: list[str]) -> dict[str, Any]:
     from .base import run_source
 
     direct.sites.cache_clear()
-    _, areas = load_areas()
+    areas = load_areas()
     pick = [a for a in areas if a.kind == "site" and a.id in ids]
     res = run_source(conn, ADAPTERS["direct"], pick)
     items, apify_runs = [], []
