@@ -27,6 +27,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 from typing import Any, Callable
 
 from .. import settings
@@ -37,6 +38,9 @@ AUTHOR = "reconcile:sonnet"
 MODEL = "sonnet"
 ACTOR = "apify/playwright-scraper"
 DC_USD_PER_PAGE = 0.004  # datacenter playwright page, compute only (render: about $0.003)
+# hosts that answered 403 to apify/playwright-scraper through both the datacenter and the US residential proxy
+# (pilot 2026-11-25: 3 Zillow homedetails pages, 3 Apartments.com pages); never sent
+BLOCKED_HOSTS = ("zillow.com", "apartments.com")
 FETCH_FIELDS = {"price", "beds", "baths", "sqft", "available_from"}  # worth a current page
 NOT_HANDLED = {"address"}
 MAX_TEXT = 6000
@@ -498,7 +502,8 @@ def reconcile(conn, *, goal: str | None = None, limit: int = 10, max_usd: float 
     apify, pages_by_url, gone = {"usd": 0.0, "runs": []}, {}, set()
     want = [r for r in results if not r["error"] and any(
         not d["accepted"] and d.get("field") in FETCH_FIELDS for d in r["decisions"])]
-    urls = list(dict.fromkeys(e["url"] for r in want for e in r["ev"] if e["url"]))
+    urls = list(dict.fromkeys(e["url"] for r in want for e in r["ev"] if e["url"] and not any(
+        (urlsplit(e["url"]).hostname or "").endswith(h) for h in BLOCKED_HOSTS)))
     if urls and max_usd > 0:
         spent = 0.0
         for proxy in (["datacenter", "residential"] if residential else ["datacenter"]):
