@@ -1002,10 +1002,11 @@ function computeBlock() {
     <label><input type="radio" name="c-scope" value="zone"> every place in a walk zone</label>
     <label><input type="radio" name="c-scope" value="candidates"> search candidates (in a walk zone, can still pass a goal)</label>
     <button id="c-dry">Dry run</button>
-    <span id="c-confirm" class="hidden">to run, type the Google calls <input id="c-n" type="number" style="width:5em">
-      and the calls left this month <input id="c-left" type="number" style="width:5em"></span>
-    <button id="c-run" class="accent hidden">Run</button>
+    <span id="c-confirm" class="hidden">to run, type the Google calls (<b id="c-n-want"></b>) <input id="c-n" type="number" style="width:5em">
+      and the calls left this month (<b id="c-left-want"></b>) <input id="c-left" type="number" style="width:5em"></span>
+    <button id="c-run" class="accent hidden">Run</button> <span id="c-hint" class="muted hidden">type both numbers to unlock</span>
     <div id="c-out" class="muted"></div>
+    <div id="c-job" class="muted"></div>
     <details id="c-log-box"><summary>Recent computations (each Google call is also logged)</summary><div id="c-log">…</div></details></div>`;
 }
 function computeSpec() {
@@ -1016,12 +1017,14 @@ function computeSpec() {
 function wireCompute() {
   let dry = null;
   const out = $("#c-out");
-  const reset = () => { dry = null; $("#c-run").classList.add("hidden"); $("#c-confirm").classList.add("hidden"); };
+  const reset = () => { dry = null; ["#c-run", "#c-confirm", "#c-hint"].forEach((id) => $(id).classList.add("hidden")); };
   // a Google run of more than 20 calls unlocks only when both numbers are typed exactly
   const typedOk = () => !dry?.typed || (+$("#c-n").value === dry.calls && +$("#c-left").value === dry.left);
-  ["#c-n", "#c-left"].forEach((id) => $(id).addEventListener("input", () => {
+  const lock = () => {
     $("#c-run").disabled = !typedOk();
-  }));
+    $("#c-hint").classList.toggle("hidden", !$("#c-run").disabled || $("#c-run").classList.contains("hidden"));
+  };
+  ["#c-n", "#c-left"].forEach((id) => $(id).addEventListener("input", lock));
   loadComputeLog();
   ["#c-point", "#c-mode", "#c-provider", ...$$("input[name=c-scope]")].forEach((el) =>
     (typeof el === "string" ? $(el) : el).addEventListener("input", () => { reset(); out.textContent = ""; }));
@@ -1044,31 +1047,35 @@ function wireCompute() {
         $("#c-run").textContent = d.provider === "google" ? `Run: up to ${d.would_call} Google calls` : "Run";
         $("#c-run").classList.remove("hidden");
         $("#c-n").value = ""; $("#c-left").value = "";
+        $("#c-n-want").textContent = d.would_call; $("#c-left-want").textContent = left;
         $("#c-confirm").classList.toggle("hidden", !dry.typed);
-        $("#c-run").disabled = !typedOk();
+        lock();
         if (dry.typed) out.innerHTML += `<br>More than 20 calls: type <b>${d.would_call}</b> and <b>${left}</b> below to unlock Run.`;
       } else out.innerHTML += "<br>Nothing to route: every pair is cached.";
     } catch (e) { out.textContent = "Dry run failed: " + e.message; }
   });
   $("#c-run").addEventListener("click", async () => {
     if (!dry) return;
-    $("#c-run").classList.add("hidden");
+    $("#c-run").classList.add("hidden"); $("#c-hint").classList.add("hidden");
     try {
       if (!typedOk()) { $("#c-run").classList.remove("hidden"); return; }
       await post("api/compute/run", { ...dry.spec, confirm_calls: dry.spec.provider === "google" ? dry.calls : null,
         confirm_left: dry.typed ? +$("#c-left").value : null });
       dry = null;
-      pollCompute(out);
+      pollCompute();
     } catch (e) { out.textContent = "Not started: " + e.message; }
   });
-  api("api/compute/status").then((s) => { if (s.state === "running") pollCompute(out); }).catch(() => {});
+  // a running job reports on its own line, so it never overwrites the dry run's numbers
+  api("api/compute/status").then((s) => { if (s.state === "running") pollCompute(); }).catch(() => {});
 }
-async function pollCompute(out) {
+async function pollCompute() {
   const s = await api("api/compute/status").catch((e) => ({ state: "error", result: { error: e.message } }));
+  const out = $("#c-job");  // looked up each time: the panel may have been redrawn since
+  if (!out) return;
   const what = s.spec ? `${s.spec.mode} to ${s.spec.point} (${s.spec.provider})` : "";
   if (s.state === "running") {
     out.textContent = `Running ${what}: ${s.done}/${s.places} places, ${s.new_trips} new trips…`;
-    setTimeout(() => pollCompute(out), 1500);
+    setTimeout(pollCompute, 1500);
     return;
   }
   const r = s.result || {};
