@@ -22,3 +22,6 @@ dist/
 *.swp
 *~
 .DS_Store
+
+# agent worktrees and scratch (AGENTS.md rule 15)
+.agents/
