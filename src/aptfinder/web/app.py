@@ -19,9 +19,10 @@ from .. import pipeline, settings, verify
 from ..areas import in_walk_zone
 from ..areas import zones as area_zones
 from ..config import Goal, load_goals, load_point_sets, load_points
-from ..filter import AMENITY_FLAGS, amenity_flags, best_trips, evaluate_all, evaluate_goal, goal_inputs, nearest_by_set
+from ..filter import (AMENITY_FLAGS, amenity_flags, best_trips, evaluate_all, evaluate_goal, goal_inputs, nearest_by_set,
+                      place_commute_terms)
 from ..filter import goals as goalstore
-from ..filter.rules import EQUALS_FIELDS, KNOWN_FIELDS, NUMERIC_FIELDS, RULE_TYPES
+from ..filter.rules import AGGS, EQUALS_FIELDS, KNOWN_FIELDS, NUMERIC_FIELDS, RULE_TYPES
 from ..plans import plan_image, site_drawings
 from ..plans import plan_key as _plan_key
 from ..store import append_annotation, append_check, append_link, connect, init_db
@@ -237,9 +238,10 @@ class LinkIn(BaseModel):
     place_key: str | None = None  # None = split this listing into its own place
 
 
-def goal_view(r: dict[str, Any]) -> dict[str, Any]:
-    """A place's result for one goal as the list needs it."""
-    return {"status": r["status"], "nice_score": r["nice_score"],
+def goal_view(r: dict[str, Any], commute: list[tuple[float | None, bool]] | None = None) -> dict[str, Any]:
+    """A place's result for one goal as the list needs it. `commute`: the net-commute terms, [minutes or null,
+    estimate] per hard commute rule of the goal (filter.place_commute_terms), summed on the card."""
+    return {"commute": [[m, e] for m, e in commute or []],"status": r["status"], "nice_score": r["nice_score"],
             "reasons": [t for s, t, *_ in r["reasons"] if s != "pass"],
             "fails": r["fails"],  # the attribute of each reason, for red/amber facts
             "unit_key": r["unit_key"], "source": r["source"], "source_id": r["source_id"]}
@@ -366,6 +368,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
     def places() -> list[dict[str, Any]]:
         res = cached("evaluate_all", lambda: evaluate_all(conn))
         trips = cached("best_trips", lambda: best_trips(conn))
+        goal_defs = effective().goals
         listings = q("SELECT * FROM listings WHERE place_key IS NOT NULL")
         by_place: dict[str, list[dict[str, Any]]] = {}
         for row in listings:
@@ -386,7 +389,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             for gid, pres in res["places"].items():
                 r = pres.get(pk)
                 if r:
-                    goals[gid] = goal_view(r)
+                    goals[gid] = goal_view(r, place_commute_terms(goal_defs[gid], trips, pk) if gid in goal_defs else None)
             title = next((x["title"] for x in rows if x.get("title")), None)
             cover = gather_photos([{**x, "data": json.loads(x["data"])} for x in rows], limit=1, files=files)
             a = anns.get(pk, {})
@@ -709,7 +712,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             "legacy_imported": LEGACY_GOAL in edits,
             # what the editor offers: rule types (label, required and optional keys), fields, presets
             "types": {t: {"label": lab, "keys": req, "optional": opt} for t, (lab, req, opt) in RULE_TYPES.items()},
-            "numeric_fields": NUMERIC_FIELDS, "equals_fields": EQUALS_FIELDS, "known_fields": KNOWN_FIELDS,
+            "aggs": AGGS, "numeric_fields": NUMERIC_FIELDS, "equals_fields": EQUALS_FIELDS, "known_fields": KNOWN_FIELDS,
             "amenities": {k: {"match": w, "exclude": x} for k, (w, x) in AMENITY_FLAGS.items()},
             "modes": refs["modes"], "points": sorted(refs["points"]), "sets": sorted(refs["sets"]),
         }
@@ -744,8 +747,9 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         /api/places, for the list while you edit."""
         d = checked_goal(body)
         inp = cached("goal_inputs", lambda: goal_inputs(conn))
-        _, pres = evaluate_goal(inp, Goal(**d))
-        return {"places": {pk: goal_view(r) for pk, r in pres.items()}}
+        goal = Goal(**d)
+        _, pres = evaluate_goal(inp, goal)
+        return {"places": {pk: goal_view(r, place_commute_terms(goal, inp["trips"], pk)) for pk, r in pres.items()}}
 
     def nearby_places(place_key: str, max_m: float = 300.0, n: int = 8) -> list[dict[str, Any]]:
         from ..commute.geo import haversine_m

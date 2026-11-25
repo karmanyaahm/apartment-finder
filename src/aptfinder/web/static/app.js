@@ -184,7 +184,7 @@ const lsGet = (k) => { try { return localStorage.getItem(k); } catch { return nu
 const lsSet = (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch { /* blocked */ } };
 function readView() {
   return {
-    sort: $("#sort").value, target: $("#target").value, mode: $("#mode").value,
+    sort: $("#sort").value, agg: $("#agg").value, target: $("#target").value, mode: $("#mode").value,
     statuses: $$(".st").filter((c) => c.checked).map((c) => c.value),
     inactive: $("#inactive").checked, outzone: $("#outzone").checked,
   };
@@ -192,6 +192,7 @@ function readView() {
 function applyView(f) {
   const has = (sel, v) => v != null && [...$(sel).options].some((o) => o.value === v);
   if (has("#sort", f.sort)) $("#sort").value = f.sort;
+  if (has("#agg", f.agg)) $("#agg").value = f.agg;
   if (has("#target", f.target)) $("#target").value = f.target;
   if (has("#mode", f.mode)) $("#mode").value = f.mode;
   if (Array.isArray(f.statuses)) $$(".st").forEach((c) => { c.checked = f.statuses.includes(c.value); });
@@ -237,6 +238,38 @@ function limitFacts(p, fails = []) {
   }).join("");
 }
 
+/* ---------------------------------------------------------------- net commute: the goal's commute rules together */
+// Each place's goal result carries `commute`: [minutes or null, estimate] per hard commute rule of the goal (one
+// per roommate), the same time each rule checks. The Net selector picks how they combine: total, mean, median or
+// spread (standard deviation: low = everyone's commute is alike). Unknown terms are never counted as 0: the card
+// says how many are unknown and the sort puts such places after the complete ones. All shows no net commute.
+function aggregate(vals, agg) {
+  if (!vals.length) return null;
+  const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+  if (agg === "total") return mean * vals.length;
+  if (agg === "mean") return mean;
+  if (agg === "median") { const v = [...vals].sort((a, b) => a - b), n = v.length; return n % 2 ? v[(n - 1) / 2] : (v[n / 2 - 1] + v[n / 2]) / 2; }
+  return Math.sqrt(vals.reduce((a, x) => a + (x - mean) ** 2, 0) / vals.length); // spread
+}
+function netCommute(p) {
+  const terms = S.goal === "all" ? null : p.goals[S.goal]?.commute;
+  if (!terms || !terms.length) return null;
+  const known = terms.filter((t) => t[0] != null).map((t) => t[0]);
+  return { v: aggregate(known, $("#agg").value), sd: aggregate(known, "spread"), n: terms.length, known: known.length,
+    est: terms.some((t) => t[0] != null && t[1]) };
+}
+function netFact(p, fails) {
+  const n = netCommute(p);
+  if (!n) return "";
+  const agg = $("#agg").value;
+  const mk = markFor(fails, (x) => x.f === "net_commute");
+  const trips = `${n.n} trip${n.n > 1 ? "s" : ""}${n.est ? ", est." : ""}`;
+  if (n.v == null) return `<span${mk || ' data-ff="needs_check"'}>net commute: no times yet (${trips})</span>`;
+  const main = agg === "spread" ? `spread ±<b>${num(n.v)}</b> min` : `${agg} <b>${num(n.v)}</b> min${n.known > 1 ? ` · spread ±${num(n.sd)}` : ""}`;
+  const unk = n.known < n.n ? (agg === "total" ? ` + ? (${n.n - n.known} unknown)` : ` of ${n.known} known (${n.n - n.known} unknown)`) : "";
+  return `<span${mk}>net commute ${main}${unk} (${trips})</span>`;
+}
+
 /* ---------------------------------------------------------------- goals: the filter panel edits the selected goal */
 // A goal is {id, label, rules, nice} (filter/rules.py rule dicts). The panel edits a draft of the selected goal;
 // every change is judged on the server (POST api/goals/preview, writes nothing) and shown in the list at once.
@@ -270,6 +303,7 @@ function ruleTemplates() {
     ["private bath", { type: "equals", field: "private_bath", value: true }],
     ["available for dates", { type: "dates_cover", start: new Date().toISOString().slice(0, 10), end: new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10) }],
     ["field known", { type: "known", field: "sqft" }],
+    ["net commute (all commute rules)", { type: "net_commute", agg: $("#agg").value || "total", max: 90 }],
   ];
 }
 const opt = (v, label, sel) => `<option value="${esc(v)}"${String(v) === String(sel) ? " selected" : ""}>${esc(label)}</option>`;
@@ -289,6 +323,9 @@ function ruleInputs(r) {
     const vals = G.equals_fields[r.field] || [];
     return `<select data-p="field">${Object.keys(G.equals_fields).map((f) => opt(f, fieldName(f), r.field)).join("")}</select> =
       <select data-p="value" data-json>${vals.map((v) => opt(JSON.stringify(v), v === true ? "yes" : v === false ? "no" : v, JSON.stringify(r.value))).join("")}</select>`;
+  }
+  if (r.type === "net_commute") {
+    return `<select data-p="agg">${G.aggs.map((a) => opt(a, a, r.agg)).join("")}</select> of the commute rules ≤ ${numIn("max", r.max, 3.5, 1)} min`;
   }
   if (r.type === "known") return `<select data-p="field">${G.known_fields.map((f) => opt(f, fieldName(f), r.field)).join("")}</select> known`;
   if (r.type === "size_options") {
@@ -589,6 +626,7 @@ function failChip(x) {
   if (x.f === "commute") t = `${x.modes.map((m) => MODE_LABEL[m] || m).join("/")} to ${x.pt.split(":").slice(1).join(":")}`;
   else if (x.f === "near") t = `${x.modes.map((m) => MODE_LABEL[m] || m).join("/")} to nearest ${S.meta.point_sets?.[x.set]?.label || x.set}`;
   else if (x.f === "amenity") t = `no ${x.v}`;
+  else if (x.f === "net_commute") t = `net commute (${x.agg}) > ${num(x.lim)}`;
   else t = `${FACT_LABEL[x.f] || x.f.replace(/_/g, " ")} ${fmtv(x.v)}${x.lim != null && x.s === "fail" && x.v != null ? ` ${x.min ? "<" : ">"} ${num(x.lim)}` : ""}`;
   return `<span class="chip ff-chip" data-ff="${x.s}" title="${esc(`${x.goal}: ${x.text}`)}">${esc(t)}</span>`;
 }
@@ -620,6 +658,8 @@ function sorted(list) {
     price: (p) => [nil(goalTerm(S.goal) === "short" ? p.min_stay_month : goalTerm(S.goal) === "long" ? p.min_lease_month : p.min_price_month)],
     ppb: (p) => [nil(goalTerm(S.goal) === "long" ? p.min_lease_per_bed : p.min_price_per_bed)],
     beds: (p) => [-(p.max_beds || 0)], minutes: (p) => [nil(minutesFor(p)?.minutes)],
+    // complete sums first, then those with unknown terms (by what is known), then none
+    net: (p) => { const n = netCommute(p); return n && n.v != null ? [n.known < n.n ? 1 : 0, n.v] : [2, 0]; },
     rating: (p) => [-(p.rating || 0)], nice: (p) => [-(Math.max(0, ...Object.values(p.goals).map((g) => g.nice_score || 0)))],
   };
   const f = fns[key];
@@ -681,7 +721,7 @@ function renderList() {
     const facts = `${priceFacts(p, fails)}
         <span>${bb}</span>
         <span${cm}>${mins ? `<b>${num(mins.minutes)}</b> min ${esc(mode)} to ${esc(tgt)}${mins.provider === "estimate" ? " (est.)" : ""}` : `${esc(mode)} to ${esc(tgt)}: not computed`}</span>
-        ${limitFacts(p, fails)}`;
+        ${limitFacts(p, fails)}${netFact(p, fails)}`;
     const extra = fails.filter((x) => !x.used).map(failChip).join("");
     return `<div class="card ${st === "fail" ? "dim" : ""} ${S.selected === p.place_key ? "sel" : ""}" data-pk="${esc(p.place_key)}">
       <h4>${esc(p.label)} ${stars(p.rating)}</h4>
@@ -1514,7 +1554,7 @@ async function boot() {
   selectGoal(savedGoal("lease") ? "lease" : "all");
   $$("#base-switch button").forEach((b) => b.addEventListener("click", () => setBase(b.dataset.base)));
   $("#q").addEventListener("input", renderList);
-  ["#sort", "#target", "#mode", "#inactive", "#outzone", ...$$(".st")].forEach((el) => {
+  ["#sort", "#agg", "#target", "#mode", "#inactive", "#outzone", ...$$(".st")].forEach((el) => {
     const node = typeof el === "string" ? $(el) : el;
     node.addEventListener("input", () => { saveView(); renderList(); });
   });

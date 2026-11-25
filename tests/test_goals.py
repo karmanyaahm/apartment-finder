@@ -142,3 +142,70 @@ def test_min_rule_and_amenity_exclusions():
     park = {"type": "amenity", "name": "parking", "match": ["parking"], "exclude": ["no parking"]}
     assert evaluate(park, row, Ctx())[0] == FAIL
     assert validate_rule(park, modes=MODES, points=set(), sets=set()) is None
+
+
+# ---------------------------------------------------------------- net commute
+ROOMMATES = [
+    {"type": "commute_any", "target": "commute_targets:Googleplex", "options": [{"mode": "drive", "max": 25}]},
+    {"type": "commute_any", "target": "commute_targets:Meta HQ",
+     "options": [{"mode": "drive", "max": 30}, {"mode": "bike", "max": 30}]},
+    {"type": "near", "set": "caltrain_stations", "mode": "walk", "max": 20},
+]
+
+
+def _trip(m, provider="google"):
+    return {"minutes": m, "provider": provider}
+
+
+def test_commute_terms_use_each_rules_pair():
+    from aptfinder.filter.rules import commute_terms
+    trips = {("commute_targets:Googleplex", "drive"): _trip(20),
+             ("commute_targets:Meta HQ", "drive"): _trip(31), ("commute_targets:Meta HQ", "bike"): _trip(12, "estimate"),
+             ("commute_targets:Meta HQ", "walk"): _trip(1)}  # walk is not an option of that rule: ignored
+    nearest = {("caltrain_stations", "walk"): _trip(9)}
+    assert commute_terms(ROOMMATES, trips, nearest) == [(20, False), (12, True), (9, False)]
+    # unknown stays unknown, never 0
+    assert commute_terms(ROOMMATES, {}, {}) == [(None, False)] * 3
+
+
+@pytest.mark.parametrize("agg,want", [("total", 60), ("mean", 15), ("median", 12.5), ("spread", 9.3541435)])
+def test_aggregates(agg, want):
+    from aptfinder.filter.rules import aggregate
+    assert aggregate([10, 30, 15, 5], agg) == pytest.approx(want)
+    assert aggregate([], agg) is None
+    assert aggregate([7, 3, 5], "median") == 5
+
+
+def test_net_commute_rule():
+    from aptfinder.filter.rules import CHECK
+    trips = {("commute_targets:Googleplex", "drive"): _trip(20), ("commute_targets:Meta HQ", "drive"): _trip(30)}
+    nearest = {("caltrain_stations", "walk"): _trip(10)}
+    ctx = Ctx(trips=trips, nearest=nearest, commute_rules=ROOMMATES)
+    assert evaluate({"type": "net_commute", "agg": "total", "max": 60}, {}, ctx)[0] == PASS
+    assert evaluate({"type": "net_commute", "agg": "total", "max": 59}, {}, ctx)[0] == FAIL
+    assert evaluate({"type": "net_commute", "agg": "mean", "max": 20}, {}, ctx)[0] == PASS
+    assert evaluate({"type": "net_commute", "agg": "spread", "max": 5}, {}, ctx)[0] == FAIL  # 8.2 min
+    # one roommate's time unknown: never counted as 0
+    del trips[("commute_targets:Googleplex", "drive")]
+    s, why = evaluate({"type": "net_commute", "agg": "total", "max": 1000}, {}, ctx)
+    assert s == CHECK and "1 of 3" in why
+    assert evaluate({"type": "net_commute", "agg": "total", "max": 9}, {}, Ctx())[0] == CHECK
+    assert validate_rule({"type": "net_commute", "agg": "sum", "max": 9}, modes=MODES, points=set(), sets=set())
+
+
+def test_places_carry_the_goals_commute_terms(client):
+    c, _ = client
+    body = {"label": "roommates", "rules": [
+        {"type": "commute_any", "target": "commute_targets:Downtown Palo Alto", "options": [{"mode": "bike", "max": 30}]},
+        {"type": "near", "set": "caltrain_stations", "mode": "walk", "max": 30},
+        {"type": "net_commute", "agg": "total", "max": 45}], "nice": []}
+    assert c.post("/api/goals", json=body).status_code == 200
+    places = c.get("/api/places").json()
+    for p in places:
+        terms = p["goals"]["roommates"]["commute"]
+        assert len(terms) == 2
+        bike = p["minutes"].get("commute_targets:Downtown Palo Alto|bike")
+        assert terms[0][0] == (bike["minutes"] if bike else None)
+    prev = c.post("/api/goals/preview", json=body).json()["places"]
+    assert all(prev[p["place_key"]]["commute"] == p["goals"]["roommates"]["commute"] for p in places)
+    assert {p["goals"]["roommates"]["status"] for p in places} <= {"pass", "needs_check", "fail"}

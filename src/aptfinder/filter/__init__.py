@@ -11,7 +11,7 @@ from typing import Any
 from ..config import Goal, GoalsConfig, load_goals
 from ..plans import inherit_prices, is_own_priced
 from ..verify import accuracy, low_accuracy
-from .rules import CHECK, FAIL, PASS, RANK, Ctx, combine, evaluate, fact
+from .rules import CHECK, FAIL, PASS, RANK, Ctx, combine, commute_terms, evaluate, fact
 
 PROVIDER_PREF = {"google": 0, "estimate": 9}
 
@@ -96,13 +96,14 @@ def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> dic
 def evaluate_goal(inp: dict[str, Any], goal: Goal) -> tuple[dict[tuple[str, str], Any], dict[str, Any]]:
     """(listing results, place results) of one goal over goal_inputs."""
     listings, trips, anns, low, own = inp["listings"], inp["trips"], inp["anns"], inp["low"], inp["own"]
+    commute = [r for r in goal.rules if r["type"] in COMMUTE_RULES]  # the terms of a net_commute rule
     lres: dict[tuple[str, str], Any] = {}
     pres: dict[str, Any] = {}
     for row in listings:
         pk = row["place_key"]
         t = trips.get(pk, {})
         ctx = Ctx(trips=t, nearest=nearest_by_set(t), annotations=anns.get(pk, {}),
-                  untrusted={f for (src, f) in low if src == row["source"]})
+                  untrusted={f for (src, f) in low if src == row["source"]}, commute_rules=commute)
         # (status, text, rule type): the type lets callers set aside commute rules (routing_candidates)
         reasons = [(*evaluate(r, row, ctx), r["type"]) for r in goal.rules]
         nice = [(*evaluate(r, row, ctx), r["type"]) for r in goal.nice]
@@ -120,6 +121,12 @@ def evaluate_goal(inp: dict[str, Any], goal: Goal) -> tuple[dict[tuple[str, str]
         if best is None or (RANK[res["status"]], -res["nice_score"]) < (RANK[best["status"]], -best["nice_score"]):
             pres[pk] = res
     return lres, pres
+
+
+def place_commute_terms(goal: Goal, trips: dict[str, Any], pk: str) -> list[tuple[float | None, bool]]:
+    """The net-commute terms of a place for a goal (rules.commute_terms over its hard commute rules)."""
+    t = trips.get(pk, {})
+    return commute_terms([r for r in goal.rules if r["type"] in COMMUTE_RULES], t, nearest_by_set(t))
 
 
 def evaluate_all(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> dict[str, Any]:

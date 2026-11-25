@@ -157,6 +157,8 @@ td.nowrap { white-space: nowrap; }
 
 /* goal editor: the filter panel edits the selected goal's rules */
 .goal-editor { font-size: 12px; }
+/* a long goal must not squeeze the card list: the controls scroll on their own */
+.controls { max-height: 60vh; overflow-y: auto; }
 .goal-editor summary { cursor: pointer; padding: 2px 0; }
 .goal-editor details[open] summary { margin-bottom: 4px; }
 .goal-editor .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 4px 0; }

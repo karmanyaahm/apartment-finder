@@ -21,6 +21,47 @@ class Ctx:
     nearest: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)  # (set, mode) -> best
     annotations: dict[str, dict[str, Any]] = field(default_factory=dict)  # attribute -> latest
     untrusted: set[str] = field(default_factory=set)  # fields of this listing's source with low accuracy
+    commute_rules: list[dict[str, Any]] = field(default_factory=list)  # the goal's hard commute rules (net_commute)
+
+
+# ---------------------------------------------------------------- net commute: one term per commute rule of a goal
+# (a roommate each). A term is the minutes that rule reads: commute_any, its fastest option with a time; near, the
+# nearest point of the set by that mode. Unknown terms are never counted as 0.
+AGGS = ["total", "mean", "median", "spread"]  # spread: standard deviation, low = everyone's commute is alike
+
+
+def commute_terms(rules: list[dict[str, Any]], trips: dict[tuple[str, str], dict[str, Any]],
+                  nearest: dict[tuple[str, str], dict[str, Any]]) -> list[tuple[float | None, bool]]:
+    """(minutes or None, is an estimate) per commute rule, in rule order."""
+    out: list[tuple[float | None, bool]] = []
+    for r in rules:
+        if r["type"] == "commute_any":
+            ts = [t for o in r["options"] if (t := trips.get((r["target"], o["mode"]))) and t.get("minutes") is not None]
+        elif r["type"] == "near":
+            ts = [t for t in [nearest.get((r["set"], r["mode"]))] if t and t.get("minutes") is not None]
+        else:
+            continue
+        best = min(ts, key=lambda t: t["minutes"]) if ts else None
+        out.append((best["minutes"], best["provider"] == "estimate") if best else (None, False))
+    return out
+
+
+def aggregate(values: list[float], agg: str) -> float | None:
+    """total, mean, median or spread (population standard deviation) of known minutes; None when there are none."""
+    if not values:
+        return None
+    if agg == "total":
+        return float(sum(values))
+    mean = sum(values) / len(values)
+    if agg == "mean":
+        return mean
+    if agg == "median":
+        v = sorted(values)
+        n = len(v)
+        return float(v[n // 2]) if n % 2 else (v[n // 2 - 1] + v[n // 2]) / 2
+    if agg == "spread":
+        return (sum((x - mean) ** 2 for x in values) / len(values)) ** 0.5
+    raise ValueError(f"unknown aggregate {agg!r}")
 
 
 def _label(rule: dict[str, Any]) -> str:
@@ -44,6 +85,8 @@ def _label(rule: dict[str, Any]) -> str:
         return f"has {rule['name']}"
     if t == "known":
         return f"{rule['field']} known"
+    if t == "net_commute":
+        return f"net commute ({rule['agg']}) <= {rule['max']}"
     return t
 
 
@@ -161,6 +204,18 @@ def evaluate(rule: dict[str, Any], row: dict[str, Any], ctx: Ctx) -> tuple[str, 
     if t == "known":
         return (PASS, label) if row.get(rule["field"]) is not None else (CHECK, f"{rule['field']} unknown")
 
+    if t == "net_commute":
+        terms = commute_terms(ctx.commute_rules, ctx.trips, ctx.nearest)
+        if not terms:
+            return CHECK, f"{label}: the goal has no commute rules"
+        unknown = sum(m is None for m, _ in terms)
+        if unknown:
+            return CHECK, f"{label}: {unknown} of {len(terms)} commute times not computed"
+        v = aggregate([m for m, _ in terms], rule["agg"])
+        s, tag = _minutes_status({"minutes": v, "provider": "estimate" if any(e for _, e in terms) else "google"},
+                                 rule["max"])
+        return s, f"{label}: {tag}"
+
     raise ValueError(f"unknown rule type {t!r}")
 
 
@@ -190,6 +245,8 @@ def fact(rule: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
         return {"f": "near", "set": rule["set"], "modes": [rule["mode"]]}
     if t == "amenity":
         return {"f": "amenity", "v": rule["name"]}
+    if t == "net_commute":
+        return {"f": "net_commute", "agg": rule["agg"], "lim": rule["max"]}
     return {"f": t}
 
 
@@ -215,6 +272,7 @@ RULE_TYPES: dict[str, tuple[str, list[str], list[str]]] = {
     "near": ("nearest point of a set", ["set", "mode", "max"], []),
     "amenity": ("amenity", ["name"], ["match", "exclude"]),
     "known": ("field known", ["field"], []),
+    "net_commute": ("net commute", ["agg", "max"], []),
 }
 
 
@@ -282,6 +340,11 @@ def validate_rule(rule: Any, *, modes: list[str], points: set[str], sets: set[st
             return f"near: mode must be one of {', '.join(modes)}"
         if not _num(rule["max"]) or rule["max"] <= 0:
             return "near: max must be minutes > 0"
+    if t == "net_commute":
+        if rule["agg"] not in AGGS:
+            return f"net_commute: agg must be one of {', '.join(AGGS)}"
+        if not _num(rule["max"]) or rule["max"] <= 0:
+            return "net_commute: max must be minutes > 0"
     if t == "amenity":
         if not isinstance(rule["name"], str) or not rule["name"].strip():
             return "amenity: name must be text"
