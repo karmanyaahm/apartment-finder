@@ -209,7 +209,12 @@ def click_starts(picks: list[str | None], known: str | None, own_hosts: set[str]
 
 
 def names_city(page: dict[str, Any], city: str) -> bool:
-    return not city or city.lower() in ((page.get("title") or "") + " " + (page.get("text") or "")).lower()
+    """The page names the building's city, and its title names no other state ('Floor Plans of Emerald Apartments
+    in Mesa, AZ' mentions 'Mountain View' in its text; run 665, 2026-11-25)."""
+    title = page.get("title") or ""
+    if any(st != "CA" for st in re.findall(r",\s*([A-Z]{2})\b", title)):
+        return False
+    return not city or city.lower() in (title + " " + (page.get("text") or "")).lower()
 
 
 GOOGLE_ACTOR = "apify/google-search-scraper"  # $0.0025 a results page (BRONZE), Apify needs a $0.50 charge cap

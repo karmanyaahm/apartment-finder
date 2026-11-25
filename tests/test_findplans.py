@@ -166,3 +166,9 @@ def test_base_rent_is_the_price_and_the_fee_total_is_kept():
     got = check_plans([{"name": "A7", "price": 3851, "sqft": 796, "total_monthly": 3857.8}], text)[0]
     assert got["price"] == 3851 and got["total_monthly"] == 3857.8
     assert "total_monthly" not in check_plans([{"name": "A7", "price": 3851, "total_monthly": 4999}], text)[0]
+
+
+def test_a_title_naming_another_state_is_another_building():
+    assert not names_city({"title": "Floor Plans of Emerald Apartments in Mesa, AZ", "text": "Mountain View Rd"},
+                          "Mountain View")
+    assert names_city({"title": "Floor Plans of Waverley in Menlo Park, CA", "text": ""}, "Menlo Park")

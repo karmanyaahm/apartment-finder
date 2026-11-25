@@ -40,7 +40,7 @@ SECRET_ENV = ("APIFY_TOKEN", "GOOGLE_MAPS_API_KEY")
 AGGREGATOR_HOSTS = {
     "apartments.com", "zillow.com", "trulia.com", "hotpads.com", "rent.com", "rentcafe.com", "apartmentlist.com",
     "apartmentguide.com", "zumper.com", "padmapper.com", "craigslist.org", "craigslist.com", "realtor.com",
-    "redfin.com", "forrent.com", "corporatehousing.com", "forrentuniversity.com", "yellowpages.com", "apartmentfinder.com", "apartmenthomeliving.com", "rentals.com", "rentable.co",
+    "redfin.com", "forrent.com", "corporatehousing.com", "forrentuniversity.com", "collegestudentapartments.com", "keyhousing.com", "yellowpages.com", "apartmentfinder.com", "apartmenthomeliving.com", "rentals.com", "rentable.co",
     "homes.com", "move.com", "liveapartments.com", "apartmentratings.com", "niche.com", "airbnb.com", "vrbo.com",
     "furnishedfinder.com", "blueground.com", "vrent.com", "turbotenant.com", "hemlane.com",
     "matterport.com", "ricoh360.com",
