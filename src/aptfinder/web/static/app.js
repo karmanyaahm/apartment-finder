@@ -761,11 +761,16 @@ function filtered() {
 function sorted(list) {
   const key = $("#sort").value;
   const nil = (v) => (v == null ? Infinity : v);
+  // under a goal, prices are the goal's offer (the cheapest of its best status, filter.goal_offer), as on the card
+  const month = (p) => (goalOffer(p) ? goalOffer(p).price_month : goalTerm(S.goal) === "short" ? p.min_stay_month : goalTerm(S.goal) === "long" ? p.min_lease_month : p.min_price_month);
+  // a goal with people: the card's $/person (its offer's price ÷ people) replaces $/bed
+  const ppl = S.goal !== "all" ? goalPeople(S.goal) : null;
+  const per = (p) => (ppl ? (month(p) == null ? null : month(p) / ppl)
+    : goalOffer(p) ? goalOffer(p).price_per_bed : goalTerm(S.goal) === "long" ? p.min_lease_per_bed : p.min_price_per_bed);
   const fns = {
-    // under a goal, prices are the goal's offer (the cheapest of its best status, filter.goal_offer), as on the card
-    status: (p) => [RANK[placeStatus(p)], -(p.goals[S.goal]?.nice_score || 0), nil(goalOffer(p) ? goalOffer(p).price_per_bed : p.min_price_per_bed)],
-    price: (p) => [nil(goalOffer(p) ? goalOffer(p).price_month : goalTerm(S.goal) === "short" ? p.min_stay_month : goalTerm(S.goal) === "long" ? p.min_lease_month : p.min_price_month)],
-    ppb: (p) => [nil(goalOffer(p) ? goalOffer(p).price_per_bed : goalTerm(S.goal) === "long" ? p.min_lease_per_bed : p.min_price_per_bed)],
+    status: (p) => [RANK[placeStatus(p)], -(p.goals[S.goal]?.nice_score || 0), nil(per(p))],
+    price: (p) => [nil(month(p))],
+    ppb: (p) => [nil(per(p))],
     beds: (p) => [-(p.max_beds || 0)],
     // complete sums first, then those with unknown terms (by what is known), then none
     // complete, then partial (mean / median of the known trips), then a total missing a time, then no time at all
@@ -900,6 +905,9 @@ function buildingFact(b, fails = []) {
 function stars(n) { return n ? `<span class="stars" title="${n}/5">${"★".repeat(n)}${"☆".repeat(5 - n)}</span>` : ""; }
 
 function renderList() {
+  // "price / bed" sorts by $/person under a goal with people, as its cards show
+  const ppbOpt = $('#sort option[value="ppb"]');
+  if (ppbOpt) ppbOpt.textContent = S.goal !== "all" && goalPeople(S.goal) ? "price / person" : "price / bed";
   const list = sorted(filtered());
   drawMarkers(list);
   // totals by status for the selected goal (All: each place's best), then how many the list shows if some are hidden

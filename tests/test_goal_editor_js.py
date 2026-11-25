@@ -75,3 +75,30 @@ def test_net_total_needs_every_counted_time():
         out[agg] = json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout)
     assert out["total"]["v"] is None and (out["total"]["known"], out["total"]["n"]) == (2, 3)
     assert out["mean"]["v"] == 15
+
+
+def _sort_order(goal: dict, key: str = "ppb") -> list[str]:
+    """app.js sorted() over the three cards the user saw (lease goal, people 3): their labels in order."""
+    if not shutil.which("node"):
+        pytest.skip("node not installed")
+    places = [
+        {"label": "3BED & 2BATH", "goals": {"lease": {"offer": {"price_month": 3664, "price_per_bed": 1221, "beds": 3}}}},
+        {"label": "227 Church St", "goals": {"lease": {"offer": {"price_month": 5200, "price_per_bed": 1300, "beds": 4}}}},
+        {"label": "Palmetto", "goals": {"lease": {"offer": {"price_month": 3995, "price_per_bed": 1332, "beds": 3}}}},
+    ]
+    src = APP_JS.read_text()
+    script = (f"const S = {{ goal: 'lease', draft: {json.dumps(goal)}, goalsData: {{ goals: [] }} }};\n"
+              f"const $ = () => ({{ value: {json.dumps(key)} }});\nconst RANK = {{}};\n"
+              "const goalOffer = (p) => (S.goal !== 'all' && p.goals[S.goal]?.offer) || null;\n"
+              "const savedGoal = () => null;\n"
+              f"{_function(src, 'goalPeople')}\n{_function(src, 'goalTerm')}\n{_function(src, 'sorted')}\n"
+              f"console.log(JSON.stringify(sorted({json.dumps(places)}).map((p) => p.label)));")
+    return json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout)
+
+
+def test_price_sort_is_per_person_under_a_goal_with_people():
+    # the card shows the offer's price ÷ people, so the sort orders by that: 1,221 < 1,332 < 1,733
+    goal = {"id": "lease", "rules": [], "nice": [], "people": 3}
+    assert _sort_order(goal) == ["3BED & 2BATH", "Palmetto", "227 Church St"]
+    # no people: price / bed (1,221 < 1,300 < 1,332)
+    assert _sort_order({**goal, "people": None}) == ["3BED & 2BATH", "227 Church St", "Palmetto"]
