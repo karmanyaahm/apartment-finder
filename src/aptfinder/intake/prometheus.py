@@ -211,6 +211,7 @@ def read(conn, *, sites: list[str] | None = None, dry_run: bool = False, get: Ge
     per_area: dict[str, Any] = {}
     report: dict[str, Any] = {}
     n_obs = n_req = 0
+    answers: dict[str, Any] = {}  # community id -> (units, failure) of this run
     try:
         for sid, s in pick.items():
             if n_req:
@@ -222,7 +223,10 @@ def read(conn, *, sites: list[str] | None = None, dry_run: bool = False, get: Ge
                 n_req += src == "page"
                 rec.update(community_id=cid, id_from=src)
                 units = None
-                if cid:
+                if cid in answers:  # another list entry for the same community: asked once per run
+                    units, fail = answers[cid]
+                    rec.update(same_as=cid)
+                elif cid:
                     if src == "page":
                         time.sleep(delay)
                     url = API.format(id=cid, date=day)
@@ -230,6 +234,7 @@ def read(conn, *, sites: list[str] | None = None, dry_run: bool = False, get: Ge
                                              "Referer": s["url"]})
                     n_req += 1
                     units, fail = units_outcome(status, body)
+                    answers[cid] = (units, fail)
                     rec.update(request=url, status=status,
                                **({"units": units} if units is not None else {"body": (body or "")[:2000]}))
             except Exception as e:  # network failure: this site only
@@ -243,6 +248,12 @@ def read(conn, *, sites: list[str] | None = None, dry_run: bool = False, get: Ge
                 continue
             addr, _ = _site_address(conn, sid, s)
             rows = unit_rows(units, sid, s, address=addr, drawings=_drawings(conn, sid), community=cid)
+            if units and not rows:  # units we cannot read: a changed format, never 'nothing offered' (rule 8)
+                fail = {"outcome": "error", "http_status": 200,
+                        "error": f"{len(units)} units, none with a unit number: format changed?"}
+                per_area[f"{sid}#render"] = {"state": "failed", "items": 0, **fail}
+                report[sid] = describe({**fail, "at": None}) + f": {fail['error']}"
+                continue
             for source_id, data, price in rows:
                 append_observation(conn, run, "direct", source_id, data, url=s["url"], price=price,
                                    price_basis="month" if price else None, raw_path=str(raw_path), commit=False)

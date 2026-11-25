@@ -106,3 +106,15 @@ def test_the_community_id_comes_from_the_stored_page_data_before_any_page_fetch(
     assert calls == [url]
     assert json.loads((tmp_path / "prometheus_ids.json").read_text()) == {"the-dean": "4495429"}
     assert last_outcomes(conn)["the-dean"]["outcome"] == "no_plans"
+
+
+def test_units_without_numbers_are_an_error_not_nothing_offered(conn, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(settings, "RAW_DIR", tmp_path / "raw")
+    (tmp_path / "prometheus_ids.json").write_text('{"the-dean": "4495429"}')
+    url = API.format(id="4495429", date="2026-12-01")
+    odd = [{k: v for k, v in u.items() if k != "unitNumber"} for u in DEAN]
+    res = read(conn, sites=["the-dean"], get=_fake({url: (200, json.dumps(odd))}, []), delay=0,
+               today=__import__("datetime").date(2026, 12, 1))
+    assert "format changed" in res["sites"]["the-dean"]
+    assert last_outcomes(conn)["the-dean"]["outcome"] == "error"  # state failed: retires nothing
