@@ -513,11 +513,12 @@ function selectGoal(id) {
 }
 function renderGoalSwitch() {
   const gs = $("#goal-switch");
-  gs.innerHTML = [`<button data-goal="all">All</button>`, ...S.goalsData.goals.map((g) => `<button data-goal="${esc(g.id)}" title="${esc(g.label)}">${esc(g.id)}</button>`)].join("");
-  $$("button", gs).forEach((b) => {
-    b.classList.toggle("on", b.dataset.goal === S.goal);
-    b.addEventListener("click", () => selectGoal(b.dataset.goal));
-  });
+  gs.innerHTML = [`<option value="all">All goals</option>`, ...S.goalsData.goals.map((g) => `<option value="${esc(g.id)}">${esc(g.label || g.id)}</option>`)].join("");
+  gs.value = S.goal;
+  if (!gs.dataset.bound) {
+    gs.dataset.bound = "1";
+    gs.addEventListener("change", () => { if (!selectGoal(gs.value)) gs.value = S.goal; }); // kept unsaved edits: stay put
+  }
 }
 // after a save: the goal list, the meta (default target), and every place's saved results
 async function reloadGoals(selectId) {
