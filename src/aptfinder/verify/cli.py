@@ -38,6 +38,9 @@ def main(argv: list[str] | None = None) -> None:
                     help="only these conflict kinds (repeatable)")
     rp.add_argument("--retract", type=int, nargs="+", metavar="CHECK_ID", help="withdraw these reconciler checks")
     rp.add_argument("--why", default="", help="reason recorded with --retract")
+    rp.add_argument("--listing", metavar="SOURCE:SOURCE_ID", help="read chosen fields of this one listing")
+    rp.add_argument("--field", action="append", help="with --listing: a field to read (repeatable)")
+    rp.add_argument("--no-stored", action="store_true", help="leave out the raw pages we hold (verify/stored.py)")
     rp.add_argument("--dry-run", action="store_true", help="decide and report, write no checks")
     rp.add_argument("--out", help="append one JSON line per conflict to this file")
     args = ap.parse_args(argv)
@@ -48,6 +51,13 @@ def main(argv: list[str] | None = None) -> None:
 
         from .reconcile import reconcile, retract
 
+        if args.listing:
+            from .reconcile import reconcile_listing
+
+            src, sid = args.listing.split(":", 1)
+            print(json.dumps(reconcile_listing(conn, src, sid, args.field or [], model=args.model,
+                                               dry_run=args.dry_run, stored=not args.no_stored), indent=1, default=str))
+            return
         if args.retract:
             for cid in args.retract:
                 print(cid, "->", retract(conn, cid, args.why))
@@ -55,7 +65,7 @@ def main(argv: list[str] | None = None) -> None:
         stats = reconcile(conn, goal=args.goal, limit=args.limit, skip=args.skip, max_usd=args.max_usd,
                           dry_run=args.dry_run, model=args.model, workers=args.workers,
                           residential=not args.datacenter, out_path=Path(args.out) if args.out else None,
-                          kinds=set(args.kind) if args.kind else None, log=lambda m: print(m, flush=True))
+                          kinds=set(args.kind) if args.kind else None, stored=not args.no_stored, log=lambda m: print(m, flush=True))
         print(json.dumps(stats, indent=1, default=str))
         return
     if args.cmd == "samples":

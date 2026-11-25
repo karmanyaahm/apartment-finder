@@ -68,8 +68,9 @@ SYSTEM = (
     "on a field of one apartment, plan or room. You get every listing's stored fields with when each value was seen, "
     "its text, and sometimes its current web page. Decide each disputed field: the value that is true now, or "
     "undecided. Rules: use only what the evidence states, never guess; quote, verbatim and short (one line, under 200 "
-    "characters), the text that states the value, copied exactly from the evidence you name (a text or page block, "
-    "never the stored-fields line); a newer page or observation supersedes an older one; watch for a per-room price "
+    "characters), the text that states the value, copied exactly from the evidence you name (a text block E, a "
+    "stored page block S or a current page block P, never the stored-fields line); a newer page or observation "
+    "supersedes an older one (each stored page gives its fetch date); watch for a per-room price "
     "vs a whole-unit rent, a price range or 'starting at' price of a plan vs one unit, '1.5 baths' vs '1 bath + "
     "powder room', a building page listing several plans (quote the line of this unit's plan), and remarks that "
     "contradict structured fields. Price is the monthly rent in dollars. Dates are YYYY-MM-DD ('available now' is "
@@ -84,7 +85,7 @@ SCHEMA = {"type": "object", "required": ["decisions"], "properties": {"decisions
         "status": {"type": "string", "enum": ["decided", "undecided"]},
         "value": {"description": "the true value: a number, true/false, 'YYYY-MM-DD', or 'room' for kind"},
         "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
-        "evidence": {"type": ["string", "null"], "description": "id of the evidence block quoted, e.g. 'E2' or 'P1'"},
+        "evidence": {"type": ["string", "null"], "description": "id of the evidence block quoted, e.g. 'E2', 'S1' or 'P1'"},
         "quote": {"type": ["string", "null"], "description": "verbatim from that block"},
         "reason": {"type": "string", "description": "one sentence"},
         "need_page": {"type": "boolean"}}}}}}
@@ -166,9 +167,12 @@ def select(conn, goal: str | None = None, relevance: dict[int, list[str]] | None
 class Texts:
     """A listing's text as `extract` reads it (description, amenities, raw allowlisted lines, Zillow's page)."""
 
-    def __init__(self) -> None:
+    def __init__(self, stored: bool = False) -> None:
+        from .stored import Stored
+
         self.raws: dict[str, Any] = {}
         self.zpages: dict[str, Any] | None = None
+        self.stored = Stored() if stored else None  # pages we hold (verify/stored.py)
 
     def __call__(self, source: str, obs: dict[str, Any], data: dict[str, Any]) -> str:
         from ..intake.extract import RAW_SOURCES, RawIndex, entry_text, raw_lines
@@ -217,7 +221,17 @@ def listing_evidence(conn, l: dict[str, Any], fields: list[str], texts: Texts) -
     return {"source": l["source"], "source_id": l["source_id"], "obs": obs, "url": obs["url"],
             "stored": {k: v for k, v in stored.items() if v not in (None, "", [])},
             "history": hist, "first_seen": seen[0][:10], "last_seen": seen[1][:10],
-            "text": texts(l["source"], obs, data)}
+            "text": texts(l["source"], obs, data),
+            "stored_pages": texts.stored(conn, l["source"], obs) if texts.stored else []}
+
+
+def stored_blocks(ev: list[dict[str, Any]]) -> list[tuple[str, int, dict[str, Any]]]:
+    """(block id 'S1'.., listing index (E<i>), stored page) for every stored page of the conflict's listings."""
+    out = []
+    for i, e in enumerate(ev, 1):
+        for sp in e.get("stored_pages") or []:
+            out.append((f"S{len(out) + 1}", i, sp))
+    return out
 
 
 def build_prompt(item: dict[str, Any], ev: list[dict[str, Any]], pages: dict[str, dict[str, Any]],
@@ -231,6 +245,9 @@ def build_prompt(item: dict[str, Any], ev: list[dict[str, Any]], pages: dict[str
                      "'beds' only if the stated count is wrong.")
     if item.get("text"):
         parts.append(f"The source's structured field says one thing; its own text was read as {item['text']}.")
+    if item.get("asked"):
+        parts.append("The user asked for these fields of this listing to be read again: its stored value may be "
+                     "wrong (a date or condition stated only in the title or text).")
     for i, e in enumerate(ev, 1):
         bid = f"E{i}"
         blocks[bid] = e["text"]
@@ -239,6 +256,10 @@ def build_prompt(item: dict[str, Any], ev: list[dict[str, Any]], pages: dict[str
                      f"seen {e['first_seen']} to {e['last_seen']}\nstored fields: {json.dumps(e['stored'])}\n"
                      f"values of the disputed fields over time (newest first): {hist}\n"
                      f"text:\n{e['text'] or '(none)'}")
+    for bid, i, sp in stored_blocks(ev):  # pages we already hold, each with its fetch date
+        blocks[bid] = sp["text"]
+        parts.append(f"### {bid}: {sp['label']} for listing E{i} (fetched {sp.get('fetched') or 'date unknown'})"
+                     f"\n{sp['text']}")
     for j, (url, p) in enumerate(pages.items(), 1):
         bid = f"P{j}"
         blocks[bid] = p["text"]
@@ -463,6 +484,7 @@ def _decide(conn, items, pages_by_url, texts, today, model, ask_fn, workers, log
         else:
             decisions, r["cost"] = ans
             owners = {f"E{i}": [e] for i, e in enumerate(ev, 1)} | {
+                bid: [ev[i - 1]] for bid, i, _ in stored_blocks(ev)} | {
                 f"P{j}": [e for e in ev if e["url"] == u] for j, u in enumerate(pages, 1)}
             for d in decisions:
                 ok, why = accept(d, it, ev, blocks, today, owners)
@@ -477,11 +499,14 @@ def _decide(conn, items, pages_by_url, texts, today, model, ask_fn, workers, log
     return out
 
 
-def write_checks(conn, r: dict[str, Any], model: str, run_id: int | None) -> list[dict[str, Any]]:
+def write_checks(conn, r: dict[str, Any], model: str, run_id: int | None, queue: str = "conflict"
+                 ) -> list[dict[str, Any]]:
     """Append the checks of every accepted decision of one item (one transaction per field)."""
     written = []
     mine = user_checked(conn)  # read again: the user may have answered meanwhile
-    by_bid = {f"E{i}": e["url"] for i, e in enumerate(r["ev"], 1)} | {f"P{j}": u for j, u in enumerate(r["pages"], 1)}
+    by_bid = {f"E{i}": e["url"] for i, e in enumerate(r["ev"], 1)} | {f"P{j}": u for j, u in enumerate(r["pages"], 1)} | {
+        bid: r["ev"][i - 1]["url"] for bid, i, _ in stored_blocks(r["ev"])}
+    stored_of = {bid: f"{sp['label']} (fetched {sp.get('fetched')})" for bid, _, sp in stored_blocks(r["ev"])}
     for d in r["decisions"]:
         if not d["accepted"]:
             continue
@@ -490,13 +515,14 @@ def write_checks(conn, r: dict[str, Any], model: str, run_id: int | None) -> lis
             d["accepted"], d["why_not"] = False, why or "user answered meanwhile"
             continue
         note = json.dumps({"quote": d["quote"], "evidence": d["evidence"], "url": by_bid.get(d["evidence"]),
-                           "model": model, "confidence": d["confidence"], "reason": d["reason"], "run": run_id})
+                           "model": model, "confidence": d["confidence"], "reason": d["reason"], "run": run_id,
+                           **({"stored": stored_of[d["evidence"]]} if d["evidence"] in stored_of else {})})
         for x in rows:
             o = x["e"]["obs"]
             conn.execute(
                 "INSERT INTO checks (ts, author, queue, observation_id, field, stored_value, verdict, true_value, "
-                "note) VALUES (?, ?, 'conflict', ?, ?, ?, ?, ?, ?)",
-                (datetime.now(timezone.utc).isoformat(timespec="seconds"), AUTHOR, o["id"], d["field"],
+                "note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (datetime.now(timezone.utc).isoformat(timespec="seconds"), AUTHOR, queue, o["id"], d["field"],
                  json.dumps(x["stored"]), x["verdict"],
                  json.dumps(x["true"]) if x["verdict"] == "wrong" else None, note))
         conn.commit()
@@ -508,20 +534,21 @@ def reconcile(conn, *, goal: str | None = None, limit: int = 10, max_usd: float 
               model: str = MODEL, workers: int = 4, residential: bool = True, skip: int = 0,
               ask_fn: Callable[[str], tuple[list, float]] | None = None, fetch_fn: Callable | None = None,
               relevance: dict[int, list[str]] | None = None, out_path: Path | None = None,
-              kinds: set[str] | None = None,
+              kinds: set[str] | None = None, stored: bool = True,
               log: Callable[[str], None] = print) -> dict[str, Any]:
     """Reconcile up to `limit` open conflicts (from `skip`). `max_usd`: Apify cap for current pages (0: stored
-    evidence only). `dry_run`: decide and report, write nothing."""
+    evidence only). `stored`: also the raw pages we hold for each listing (`verify/stored.py`). `dry_run`: decide
+    and report, write nothing."""
     from ..intake.apify import RESIDENTIAL_USD_PER_PAGE, credit
 
     today = date.today().isoformat()
     items, skipped = select(conn, goal, relevance, kinds)
     todo = items[skip:skip + limit]
     ask_fn = ask_fn or (lambda p: ask(p, model))
-    texts = Texts()
+    texts = Texts(stored=stored)
     run_id = None if dry_run else start_run(conn, "verify", "reconcile", {
         "model": model, "goal": goal, "limit": limit, "skip": skip, "max_apify_usd": max_usd,
-        "residential": residential, "kinds": sorted(kinds or [])})
+        "residential": residential, "kinds": sorted(kinds or []), "stored_pages": stored})
     log(f"reconcile: {len(todo)} of {len(items)} open conflicts (skipped: {skipped}); Apify cap ${max_usd:.2f}")
     results = _decide(conn, todo, {}, texts, today, model, ask_fn, workers, log)
     # second pass: fields still open that a current page could settle
@@ -572,7 +599,8 @@ def reconcile(conn, *, goal: str | None = None, limit: int = 10, max_usd: float 
                     new["cost"] += r["cost"]
                     results[i] = new
     stats = {"examined": len(results), "resolved": 0, "partly": 0, "undecided": 0, "errors": 0,
-             "fields_accepted": 0, "fields_rejected": {}, "sonnet_usd": 0.0, "by_goal": {}}
+             "fields_accepted": 0, "fields_accepted_by_block": {}, "fields_rejected": {}, "sonnet_usd": 0.0,
+             "by_goal": {}}
     out_f = open(out_path, "a") if out_path else None
     for r in results:
         stats["sonnet_usd"] += r["cost"]
@@ -585,6 +613,9 @@ def reconcile(conn, *, goal: str | None = None, limit: int = 10, max_usd: float 
                  else "partly" if fields_done else "undecided")
         stats["errors" if state == "error" else state] += 1
         stats["fields_accepted"] += len(acc)
+        for d in acc:
+            b = (d.get("evidence") or "?")[:1]
+            stats["fields_accepted_by_block"][b] = stats["fields_accepted_by_block"].get(b, 0) + 1
         for d in r["decisions"]:
             if not d["accepted"]:
                 stats["fields_rejected"][d["why_not"]] = stats["fields_rejected"].get(d["why_not"], 0) + 1
@@ -596,6 +627,8 @@ def reconcile(conn, *, goal: str | None = None, limit: int = 10, max_usd: float 
         rec = {"place_key": r["item"]["place_key"], "unit_key": r["item"].get("unit_key"),
                "kind": r["item"]["kind_tag"], "goals": r["item"]["goals"], "fields": r["item"]["decide"],
                "state": state, "error": r["error"], "pages": r["pages"], "written": written,
+               "stored": [{"block": bid, "listing": f"E{i}", "label": sp["label"], "fetched": sp.get("fetched"),
+                           "chars": len(sp["text"])} for bid, i, sp in stored_blocks(r["ev"])],
                "listings": [{"source": e["source"], "source_id": e["source_id"], "url": e["url"],
                              "values": {f: stored_value(e["obs"], f) for f in r["item"]["decide"]},
                              "last_seen": e["last_seen"]} for e in r["ev"]],
@@ -612,6 +645,8 @@ def reconcile(conn, *, goal: str | None = None, limit: int = 10, max_usd: float 
     stats["sonnet_usd"] = round(stats["sonnet_usd"], 3)
     stats["apify_usd_est"] = round(apify["usd"], 3)
     stats["apify_runs"] = apify["runs"]
+    if texts.stored:
+        stats["stored_missing"] = texts.stored.missing
     if run_id is not None:
         finish_run(conn, run_id, "ok", {k: v for k, v in stats.items()}, est_cost=round(apify["usd"], 4))
     stats["run_id"] = run_id
@@ -629,3 +664,34 @@ def retract(conn, check_id: int, why: str) -> int:
         raise ValueError(f"check {check_id} is not a reconciler check")
     return append_check(conn, c["author"], "conflict", c["field"], "cannot_tell", observation_id=c["observation_id"],
                         stored_value=None, note=json.dumps({"retracts": check_id, "why": why}))
+
+
+def reconcile_listing(conn, source: str, source_id: str, fields: list[str], *, model: str = MODEL,
+                      dry_run: bool = False, ask_fn: Callable[[str], tuple[list, float]] | None = None,
+                      stored: bool = True, log: Callable[[str], None] = print) -> dict[str, Any]:
+    """Sonnet reads chosen fields of one listing at the user's request (no conflict needed), under the same
+    acceptance as conflicts; an accepted answer is a `reconcile:sonnet` check in queue 'adhoc' (a wrong verdict with
+    the true value overrides the stored one while the source's value is unchanged). Refused on a field the user
+    checked. -> {decisions, written}."""
+    row = conn.execute("SELECT obs_id, place_key, unit_key FROM listings WHERE source = ? AND source_id = ?",
+                       (source, source_id)).fetchone()
+    if row is None:
+        raise ValueError(f"no listing {source}:{source_id}")
+    mine = user_checked(conn)
+    fs = [f for f in fields if (source, source_id, f) not in mine]
+    item = {"place_key": row["place_key"], "unit_key": row["unit_key"], "fields": fs, "decide": fs, "goals": [],
+            "kind_tag": "asked", "asked": True,
+            "listings": [{"source": source, "source_id": source_id, "obs_id": row["obs_id"]}]}
+    if not fs:
+        return {"decisions": [], "written": [], "skipped": "the user checked every field"}
+    (r,) = _decide(conn, [item], {}, Texts(stored=stored), date.today().isoformat(), model,
+                   ask_fn or (lambda p: ask(p, model)), 1, log)
+    run_id = None if dry_run else start_run(conn, "verify", "reconcile", {"model": model, "listing":
+                                                                         f"{source}:{source_id}", "fields": fs})
+    written = [] if dry_run else write_checks(conn, r, model, run_id, queue="adhoc")
+    out = {"decisions": [{k: d.get(k) for k in ("field", "value", "confidence", "evidence", "quote", "reason",
+                                                "accepted", "why_not")} for d in r["decisions"]],
+           "written": written, "error": r["error"], "sonnet_usd": round(r["cost"], 4), "run_id": run_id}
+    if run_id is not None:
+        finish_run(conn, run_id, "error" if r["error"] else "ok", {"written": written}, est_cost=0.0)
+    return out

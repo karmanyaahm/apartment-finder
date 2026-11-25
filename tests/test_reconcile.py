@@ -126,3 +126,65 @@ def test_past_availability_dates_are_no_conflict():
 
     assert not _differs("available_from", "2026-01-04", "2020-01-05")
     assert _differs("available_from", "2026-01-04", "2999-01-05")
+
+
+# --- stored pages (verify/stored.py) -----------------------------------------------------------------------------
+
+def test_stored_item_lines_drop_noise_and_keep_one_unit_per_line():
+    from aptfinder.verify.stored import item_lines, mine_first
+    item = {"listingId": "3dkqvmd", "propertyName": "Parker Palo Alto", "imageUrl": "https://img/x.jpg",
+            "reviews": [{"text": "great"}], "priceHistory": [{"price": 2900}], "location": {"latitude": 37.4},
+            "rentals": [{"BedsText": "1 Bed", "Rent": 3095, "UnitNumber": "1145-011", "Amenities": [1, 2]},
+                        {"BedsText": "2 Beds", "Rent": 3895, "UnitNumber": "2586-008", "PhotoUrl": "https://p"}]}
+    lines = item_lines(item)
+    assert lines == ["listingId: 3dkqvmd", "propertyName: Parker Palo Alto", "rentals[0]: BedsText: 1 Bed; Rent: 3095; UnitNumber: 1145-011",
+                     "rentals[1]: BedsText: 2 Beds; Rent: 3895; UnitNumber: 2586-008"]
+    assert mine_first(lines, {"unit": "2586-008"})[0].startswith("rentals[1]")
+
+
+def test_a_stored_page_settles_a_conflict_and_never_wins_by_quoting_its_own_listing(conn, monkeypatch):
+    import json
+    a, b = two_sources(conn)
+    pages = {"zillow": [{"label": "stored Zillow detail page of zpid 1", "fetched": "2026-11-24",
+                         "text": "home_status: FOR_RENT\nprice_change: now $3,200/mo"}],
+             "zumper": [{"label": "stored zumper item, run9.json", "fetched": "2026-11-24",
+                         "text": "floorplan_listings[0]: bedrooms: 2; price: 3200"}]}
+    monkeypatch.setattr("aptfinder.verify.stored.Stored.__call__", lambda self, conn, src, obs: pages[src])
+    seen = []
+
+    def fn(value, quote, evidence):
+        def ask(prompt):
+            seen.append(prompt)
+            return answer(value, quote, evidence)(prompt)
+        return ask
+    st = run(conn, fn(3200, "price: 3200", "S2"))  # zumper's own stored item restating its price: refused
+    assert st["fields_rejected"] == {"the winning source quoting itself": 1}
+    assert "### S1: stored Zillow detail page of zpid 1 for listing E1 (fetched 2026-11-24)" in seen[0]
+    st = run(conn, fn(3200, "now $3,200/mo", "S1"))  # zillow's own page against zillow's stored price
+    assert st["resolved"] == 1 and st["fields_accepted_by_block"] == {"S": 1}
+    note = json.loads(conn.execute("SELECT note FROM checks WHERE observation_id = ?", (a,)).fetchone()[0])
+    assert note["evidence"] == "S1" and note["url"] == "https://z/1"
+    assert note["stored"] == "stored Zillow detail page of zpid 1 (fetched 2026-11-24)"
+    st = run(conn, fn(3200, "now $3,200/mo", "S1"), stored=False)  # nothing open any more
+    assert st["examined"] == 0
+
+
+def test_one_listing_read_at_the_users_request_overrides_its_date(conn):
+    """Furnished Finder 829696_1: '6-Months Min Beginning March' in the title, available_from today in the data."""
+    r = start_run(conn, "intake", "furnishedfinder")
+    o = append_observation(conn, r, "furnishedfinder", "829696_1", {
+        "title": "6-Months Min Beginning March. MASTER BEDROOM", "available_from": "2026-11-24",
+        "lat": 37.44, "lon": -122.16}, price=2050, price_basis="month", url="https://ff/829696_1")
+    identity.run(conn)
+    prompts = []
+
+    def ask(p):
+        prompts.append(p)
+        return answer("2027-03-01", "6-Months Min Beginning March", field="available_from")(p)
+    res = rc.reconcile_listing(conn, "furnishedfinder", "829696_1", ["available_from"], ask_fn=ask,
+                               log=lambda m: None)
+    assert res["written"] == [{"field": "available_from", "value": "2027-03-01", "listings": 1}]
+    assert "asked for these fields" in prompts[0]
+    c = conn.execute("SELECT author, queue, observation_id, verdict, true_value FROM checks").fetchone()
+    assert tuple(c) == ("reconcile:sonnet", "adhoc", o, "wrong", '"2027-03-01"')
+    assert conn.execute("SELECT available_from FROM listings WHERE source_id = '829696_1'").fetchone()[0] == "2027-03-01"
