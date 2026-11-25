@@ -9,7 +9,7 @@ from __future__ import annotations
 from .keys import APPROX_PIN_SOURCES
 from .models import CHECKABLE_FIELDS
 
-LOG_TABLES = ["runs", "observations", "links", "trips", "checks", "annotations", "api_calls", "media"]
+LOG_TABLES = ["runs", "observations", "links", "trips", "checks", "annotations", "api_calls", "media", "geocodes"]
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -132,6 +132,25 @@ CREATE TABLE IF NOT EXISTS media (
     stored_bytes INTEGER
 );
 CREATE INDEX IF NOT EXISTS media_url ON media(url);
+
+-- Google's reading of an address string (identity.addresses: one row per Geocoding API answer since 2026-11-25):
+-- the first result whose street and house number are the ones written (`precise` 1, identity.addresses.geocode_parts),
+-- else the first result (`precise` 0). New data, not a copy of an observation. The `places` view positions a
+-- Craigslist-only place on it (latest row per address).
+CREATE TABLE IF NOT EXISTS geocodes (
+    id            INTEGER PRIMARY KEY,
+    ts            TEXT NOT NULL,
+    address       TEXT NOT NULL,
+    status        TEXT,
+    precise       INTEGER NOT NULL DEFAULT 0,
+    lat           REAL,
+    lon           REAL,
+    location_type TEXT,
+    types         TEXT CHECK (types IS NULL OR json_valid(types)),
+    place_id      TEXT,
+    formatted     TEXT
+);
+CREATE INDEX IF NOT EXISTS geocodes_address ON geocodes(address, id);
 """
 
 
@@ -359,8 +378,30 @@ FROM listings WHERE unit_key IS NOT NULL GROUP BY unit_key;
 -- Each descriptive field comes from the best listing that has it: direct (the place's own site) first,
 -- then the most recently observed. Window functions keep this one pass over `listings`.
 CREATE VIEW places AS
-WITH l AS MATERIALIZED (
+WITH g AS MATERIALIZED (
+    -- the latest geocode per address, when it placed the address precisely (street-level, the written number)
+    SELECT address, lat AS g_lat, lon AS g_lon FROM (
+        SELECT address, lat, lon, precise, location_type,
+               ROW_NUMBER() OVER (PARTITION BY address ORDER BY id DESC) AS rn FROM geocodes
+    ) WHERE rn = 1 AND precise = 1 AND lat IS NOT NULL AND location_type IS NOT 'APPROXIMATE'
+), p AS MATERIALIZED (
+    -- each listing's position and how good it is (tier): 0 its own pin, from a source that places the building;
+    -- 1 a Craigslist row's address as Google placed it, within 5 km of the post's pin (planar, at 37.4 N); 2 a
+    -- Craigslist pin (the poster's account or area point). lat and lon always come from the same tier.
+    SELECT x.*,
+        CASE WHEN x.source NOT IN ({approx}) AND x.lat IS NOT NULL THEN 0
+             WHEN x.source IN ({approx}) AND g.g_lat IS NOT NULL AND (x.lat IS NULL OR
+                  ((g.g_lat - x.lat) * 111.0) * ((g.g_lat - x.lat) * 111.0)
+                  + ((g.g_lon - x.lon) * 88.2) * ((g.g_lon - x.lon) * 88.2) <= 25.0) THEN 1
+             WHEN x.lat IS NOT NULL THEN 2 END AS pos_tier,
+        g.g_lat, g.g_lon
+    FROM listings x LEFT JOIN g ON x.source IN ({approx}) AND g.address = x.address
+    WHERE x.place_key IS NOT NULL
+), l AS MATERIALIZED (
     SELECT *,
+        CASE pos_tier WHEN 1 THEN g_lat ELSE lat END AS pos_lat,
+        CASE pos_tier WHEN 1 THEN g_lon ELSE lon END AS pos_lon,
+        MIN(pos_tier) OVER (PARTITION BY place_key) AS best_tier,
         FIRST_VALUE(address) OVER (PARTITION BY place_key
             ORDER BY address IS NULL, source = 'direct' DESC, observed_at DESC) AS p_address,
         FIRST_VALUE(city) OVER (PARTITION BY place_key
@@ -369,14 +410,15 @@ WITH l AS MATERIALIZED (
             ORDER BY property_name IS NULL, source = 'direct' DESC, observed_at DESC) AS p_name,
         FIRST_VALUE(operator) OVER (PARTITION BY place_key
             ORDER BY operator IS NULL, source = 'direct' DESC, observed_at DESC) AS p_operator
-    FROM listings WHERE place_key IS NOT NULL
+    FROM p
 )
 SELECT place_key, MAX(p_address) AS address, MAX(p_city) AS city, MAX(p_name) AS property_name,
        MAX(p_operator) AS operator,
-       -- position: a Craigslist pin is an account or area point, not the building; it counts only when no other
-       -- source places the building (store.keys.APPROX_PIN_SOURCES; a Craigslist-only place keeps its pin)
-       COALESCE(AVG(CASE WHEN source NOT IN ({approx}) THEN lat END), AVG(lat)) AS lat,
-       COALESCE(AVG(CASE WHEN source NOT IN ({approx}) AND lat IS NOT NULL THEN lon END), AVG(lon)) AS lon,
+       -- position: the mean of the best tier's positions (p above). A Craigslist pin is an account or area point,
+       -- not the building: it counts only when no other source places the building and Google did not place a
+       -- Craigslist row's address (store.keys.APPROX_PIN_SOURCES)
+       AVG(CASE WHEN pos_tier = best_tier THEN pos_lat END) AS lat,
+       AVG(CASE WHEN pos_tier = best_tier THEN pos_lon END) AS lon,
        SUM(kind IS NOT 'site_info') AS n_listings, SUM(active AND kind IS NOT 'site_info') AS n_active, COUNT(DISTINCT unit_key) AS n_units,
        group_concat(DISTINCT source) AS sources,
        MIN(price_month) AS min_price_month, MIN(price_per_bed) AS min_price_per_bed,

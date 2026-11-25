@@ -95,3 +95,70 @@ def test_adopt_origins_reads_a_legacy_trip_origin_from_the_leg_cache(conn):
     assert (res["legacy"], res["adopted"], res["adopted_current"]) == (2, 2, 1)
     assert best_trips(conn)["p_a"][(PA, "walk")]["minutes"] == 20.5
     assert trips.stale_plan(conn) == {(PA, "walk"): ["p_b"]}
+
+
+def _geo(conn, address, lat, lon, precise=1, location_type="ROOFTOP"):
+    conn.execute("INSERT INTO geocodes (ts, address, status, precise, lat, lon, location_type, types) "
+                 "VALUES ('2026-11-25T00:00:00Z', ?, 'OK', ?, ?, ?, ?, '[\"street_address\"]')",
+                 (address, precise, lat, lon, location_type))
+    conn.commit()
+
+
+def test_craigslist_only_place_sits_on_its_geocoded_address(conn):
+    r = start_run(conn, "intake", "x")
+    _obs(conn, r, "craigslist", "a", "p_a", address="1 A St, Palo Alto, CA", lat=37.42, lon=-122.08)
+    _obs(conn, r, "craigslist", "far", "p_far", address="2 B St, Palo Alto, CA", lat=37.42, lon=-122.08)
+    _obs(conn, r, "craigslist", "vague", "p_vague", address="3 C St, Palo Alto, CA", lat=37.42, lon=-122.08)
+    _obs(conn, r, "craigslist", "mix", "p_mix", address="4 D St, Palo Alto, CA", lat=37.42, lon=-122.08)
+    _obs(conn, r, "zillow", "z", "p_mix", address="4 D St, Palo Alto, CA", lat=37.41, lon=-122.09)
+    before = {pk: tuple(_place(conn, pk)) for pk in ("p_a", "p_far", "p_vague", "p_mix")}
+    _geo(conn, "1 A St, Palo Alto, CA", 37.4250, -122.0850)  # 720 m from the pin: used
+    _geo(conn, "2 B St, Palo Alto, CA", 37.50, -122.08)  # 8.9 km off: the pin stays
+    _geo(conn, "3 C St, Palo Alto, CA", 37.43, -122.09, precise=0)  # not the written number: the pin stays
+    _geo(conn, "4 D St, Palo Alto, CA", 37.43, -122.07)  # another source places the building: it wins
+    assert tuple(_place(conn, "p_a")) == (37.4250, -122.0850)
+    assert {pk: tuple(_place(conn, pk)) for pk in ("p_far", "p_vague", "p_mix")} == \
+        {pk: before[pk] for pk in ("p_far", "p_vague", "p_mix")}
+    assert before["p_mix"] == (37.41, -122.09)
+    _geo(conn, "1 A St, Palo Alto, CA", 37.43, -122.09, precise=1, location_type="APPROXIMATE")  # latest row rules
+    assert tuple(_place(conn, "p_a")) == (37.42, -122.08)
+
+
+def test_positions_geocode_cached_craigslist_addresses_once(conn, tmp_path, monkeypatch):
+    from aptfinder import settings
+    from aptfinder.identity import addresses
+
+    cache = {"1 A St, Palo Alto, CA": {"street": "1 a st", "city": "palo alto"},
+             "9 Z St, Palo Alto, CA": {"fallback": True},  # Google never placed it: no position to ask for
+             "4 D St, Palo Alto, CA": {"street": "4 d st", "city": "palo alto"}}
+    monkeypatch.setattr(addresses, "load_geocodes", lambda: cache)
+    r = start_run(conn, "intake", "x")
+    _obs(conn, r, "craigslist", "a", "p_a", address="1 A St, Palo Alto, CA", lat=37.42, lon=-122.08)
+    _obs(conn, r, "craigslist", "z", "p_z", address="9 Z St, Palo Alto, CA", lat=37.42, lon=-122.08)
+    _obs(conn, r, "craigslist", "mix", "p_mix", address="4 D St, Palo Alto, CA", lat=37.42, lon=-122.08)
+    _obs(conn, r, "zillow", "zz", "p_mix", address="4 D St, Palo Alto, CA", lat=37.41, lon=-122.09)
+    assert addresses.positions_todo(conn) == ["1 A St, Palo Alto, CA"]
+
+    class Http:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def get(self, url, params):
+            class R:
+                def json(self_):
+                    return {"status": "OK", "results": [{
+                        "types": ["street_address"], "place_id": "x", "formatted_address": "1 A St, Palo Alto",
+                        "geometry": {"location": {"lat": 37.425, "lng": -122.085}, "location_type": "ROOFTOP"},
+                        "address_components": [
+                            {"long_name": "1", "types": ["street_number"]},
+                            {"long_name": "A Street", "types": ["route"]},
+                            {"long_name": "Palo Alto", "types": ["locality"]}]}]}
+            return R()
+
+    import httpx
+    monkeypatch.setattr(httpx, "Client", Http)
+    monkeypatch.setattr(settings, "secret", lambda name: "k")
+    assert addresses.positions(conn)["calls"] == 1
+    assert addresses.positions_todo(conn) == []  # kept: never asked twice
+    assert conn.execute("SELECT COUNT(*) FROM api_calls WHERE provider = 'geocoding'").fetchone()[0] == 1
+    assert tuple(_place(conn, "p_a")) == (37.425, -122.085)

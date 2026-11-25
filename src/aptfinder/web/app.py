@@ -446,9 +446,10 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             "(SELECT MAX(id) FROM links WHERE author <> 'user'), "
             "(SELECT MAX(id) FROM observations), (SELECT MAX(id) FROM trips), (SELECT MAX(id) FROM runs), "
             "(SELECT finished_at FROM runs ORDER BY id DESC LIMIT 1), (SELECT MAX(id) FROM media), "
+            "(SELECT MAX(id) FROM geocodes), "  # a geocoded address can move a place (places view)
             "(SELECT MAX(id) FROM annotations WHERE entity_type = 'goal')").fetchone()
         cfg = tuple(f.stat().st_mtime_ns for f in sorted(settings.CONFIG_DIR.rglob("*")) if f.is_file())
-        return tuple(row[:3]) + cfg, tuple(row[3:9]), row[9]
+        return tuple(row[:3]) + cfg, tuple(row[3:10]), row[10]
 
     def version_of(name: str, raw: tuple[tuple, tuple, Any]) -> tuple[tuple, tuple]:
         """(edits, scrapes) of one result: a goal-dependent one's edits end with ("goal", the goal version)."""

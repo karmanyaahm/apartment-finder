@@ -1,6 +1,7 @@
 """Building identity from addresses: Google's geocoder reads each address string, the parser is the fallback.
 
   aptf-identity geocode [--limit N] [--dry-run]
+  aptf-identity positions [--limit N] [--dry-run]
   aptf-identity duplicates
 
 Sources write one building's address many ways ('234 Escuela Avenue Mountain View, CA' without a comma, 'Infinity Wy',
@@ -8,8 +9,10 @@ a unit in its own comma slot, a city that is really the search area). Google's G
 address string once; its answer counts only if it is street-level and its house number is the one written in the
 address, and then the place key uses Google's street and city with the same formula as the parser
 (`store.keys.place_key`: 'street|city'), so clean addresses keep their keys. Answers are cached by address string in
-`data/geocode_cache.json`; every call is metered in `api_calls` and capped (config/google.toml). Anything Google
-cannot place precisely keeps the parser's reading. `suspected_duplicates` is the standing check on the result.
+`data/geocode_cache.json`; every call is metered in `api_calls` and capped (config/google.toml), and its position is
+logged in the `geocodes` table (the `places` view places a Craigslist-only place there). Anything Google
+cannot place precisely keeps the parser's reading. `positions` geocodes again the Craigslist addresses cached before
+positions were kept. `suspected_duplicates` is the standing check on the result.
 """
 
 from __future__ import annotations
@@ -82,23 +85,57 @@ def geocode_parts(result: dict[str, Any], address: str) -> dict[str, Any] | None
 
 
 
+def _usage(conn) -> tuple[int, int]:
+    """(geocoding calls this month, `geocoding_monthly_call_cap` in config/google.toml, default 4,900)."""
+    from ..trips import load_google_caps
+
+    used = conn.execute("SELECT COUNT(*) FROM api_calls WHERE provider = 'geocoding' AND ts LIKE ?",
+                        (f"{datetime_month()}%",)).fetchone()[0]
+    return used, int(load_google_caps().get("geocoding_monthly_call_cap", 4900))
+
+
+def _ask(conn, http, key: str, addr: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """One Geocoding API call for `addr`, metered in `api_calls` and logged in `geocodes` (the first result whose
+    street and house number are the written ones, `precise` 1, else the first result): (parts or None, body)."""
+    from ..store import now_iso
+
+    ok, body = 0, {}
+    try:
+        r = http.get(GEOCODE_URL, params={"address": addr, "components": "country:US", "key": key})
+        body = r.json()
+        status = body.get("status")
+        if status in ("REQUEST_DENIED", "OVER_DAILY_LIMIT", "OVER_QUERY_LIMIT"):
+            raise SystemExit(f"BLOCKED: Geocoding API answered {status}: {body.get('error_message', '')}")
+        ok = 1
+    finally:
+        conn.execute("INSERT INTO api_calls (ts, provider, mode, ok) VALUES (?, 'geocoding', 'geocode', ?)",
+                     (now_iso(), ok))
+        conn.commit()
+    results = body.get("results") or []
+    hit = next(((res, p) for res in results if (p := geocode_parts(res, addr))), None)
+    res = hit[0] if hit else (results[0] if results else {})
+    geo = (res.get("geometry") or {})
+    loc = geo.get("location") or {}
+    conn.execute("INSERT INTO geocodes (ts, address, status, precise, lat, lon, location_type, types, place_id, "
+                 "formatted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 (now_iso(), addr, body.get("status"), 1 if hit else 0, loc.get("lat"), loc.get("lng"),
+                  geo.get("location_type"), json.dumps(res.get("types") or []), res.get("place_id"),
+                  res.get("formatted_address")))
+    conn.commit()
+    return (hit[1] if hit else None), body
+
+
 def geocode(conn, *, limit: int = 5000, run_cap: int = 2000, dry_run: bool = False) -> dict[str, Any]:
     """Geocode each address string not geocoded yet. Every call is logged in `api_calls` (provider 'geocoding')
-    and checked against `geocoding_monthly_call_cap` in config/google.toml (default 4,900, under the 10,000 free
-    calls a month) and this run's cap."""
+    and `geocodes` (its position), and checked against `geocoding_monthly_call_cap` in config/google.toml (default
+    4,900, under the 10,000 free calls a month) and this run's cap."""
     import httpx
-
-    from ..store import now_iso
-    from ..trips import load_google_caps
 
     cache = load_geocodes()
     todo = [r[0] for r in conn.execute(
         "SELECT DISTINCT address FROM listings WHERE address IS NOT NULL AND address != '' ORDER BY address")
             if r[0] not in cache and _lead_number(r[0])][:limit]
-    month = datetime_month()
-    used = conn.execute("SELECT COUNT(*) FROM api_calls WHERE provider = 'geocoding' AND ts LIKE ?",
-                        (f"{month}%",)).fetchone()[0]
-    cap = int(load_google_caps().get("geocoding_monthly_call_cap", 4900))
+    used, cap = _usage(conn)
     if dry_run:
         return {"to_geocode": len(todo), "cached": len(cache), "used_this_month": used, "monthly_cap": cap}
     key = settings.secret("GOOGLE_MAPS_API_KEY")
@@ -109,21 +146,9 @@ def geocode(conn, *, limit: int = 5000, run_cap: int = 2000, dry_run: bool = Fal
         for addr in todo:
             if calls >= run_cap or used + calls >= cap:
                 break
-            ok = 0
-            try:
-                r = http.get(GEOCODE_URL, params={"address": addr, "components": "country:US", "key": key})
-                body = r.json()
-                status = body.get("status")
-                if status in ("REQUEST_DENIED", "OVER_DAILY_LIMIT", "OVER_QUERY_LIMIT"):
-                    raise SystemExit(f"BLOCKED: Geocoding API answered {status}: {body.get('error_message', '')}")
-                ok = 1
-            finally:
-                conn.execute("INSERT INTO api_calls (ts, provider, mode, ok) VALUES (?, 'geocoding', 'geocode', ?)",
-                             (now_iso(), ok))
-                conn.commit()
-                calls += 1
-            parts = next((p for res in body.get("results") or [] if (p := geocode_parts(res, addr))), None)
-            cache[addr] = parts or {"fallback": True, "status": status,
+            calls += 1
+            parts, body = _ask(conn, http, key, addr)
+            cache[addr] = parts or {"fallback": True, "status": body.get("status"),
                                     "first": ((body.get("results") or [{}])[0]).get("formatted_address")}
             if parts:
                 kept += 1
@@ -134,6 +159,46 @@ def geocode(conn, *, limit: int = 5000, run_cap: int = 2000, dry_run: bool = Fal
     geo_cache_path().write_text(json.dumps(cache, indent=0, sort_keys=True))
     return {"calls": calls, "kept": kept, "kept_other_reading": len(vague), "examples_not_kept": vague[:10],
             "used_this_month": used + calls, "monthly_cap": cap}
+
+
+def positions_todo(conn) -> list[str]:
+    """Addresses of Craigslist rows at places no other source places (store.keys.APPROX_PIN_SOURCES only) that
+    Google placed precisely in the cache but whose position was never kept (no `geocodes` row): geocoded before
+    2026-11-25, when only the street and city were cached."""
+    from ..store.keys import APPROX_PIN_SOURCES
+
+    approx = ", ".join(f"'{s}'" for s in APPROX_PIN_SOURCES)
+    cache = load_geocodes()
+    have = {r[0] for r in conn.execute("SELECT DISTINCT address FROM geocodes")}
+    rows = conn.execute(f"""
+        SELECT DISTINCT address FROM listings WHERE source IN ({approx}) AND address IS NOT NULL AND place_key IN (
+            SELECT place_key FROM listings WHERE place_key IS NOT NULL
+            GROUP BY place_key HAVING SUM(source NOT IN ({approx}) AND lat IS NOT NULL) = 0)
+        ORDER BY address""")
+    return [a for (a,) in rows if a not in have and (cache.get(a) or {}).get("street")]
+
+
+def positions(conn, *, limit: int = 1000, dry_run: bool = False) -> dict[str, Any]:
+    """Geocode again, for its position, each address `positions_todo` names (the cache's street and city stay as
+    they are). Metered and capped like `geocode`."""
+    import httpx
+
+    todo = positions_todo(conn)[:limit]
+    used, cap = _usage(conn)
+    if dry_run or not todo:
+        return {"to_geocode": len(todo), "used_this_month": used, "monthly_cap": cap, "examples": todo[:5]}
+    if used + len(todo) > cap:
+        raise SystemExit(f"BLOCKED: {len(todo)} positions would pass the monthly geocoding cap ({used} of {cap} used)")
+    key = settings.secret("GOOGLE_MAPS_API_KEY")
+    if not key:
+        raise SystemExit("GOOGLE_MAPS_API_KEY is not set in .env")
+    calls, precise = 0, 0
+    with httpx.Client(timeout=30) as http:
+        for addr in todo:
+            calls += 1
+            parts, _ = _ask(conn, http, key, addr)
+            precise += bool(parts)
+    return {"calls": calls, "precise": precise, "used_this_month": used + calls, "monthly_cap": cap}
 
 
 
