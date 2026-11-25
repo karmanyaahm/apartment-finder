@@ -159,11 +159,12 @@ def append_check(conn: sqlite3.Connection, author: str, queue: str, field: str, 
 
 def append_annotation(conn: sqlite3.Connection, author: str, entity_type: str, entity_key: str,
                       attribute: str, *, goal_id: str | None = None, rating: int | None = None,
-                      comment: str | None = None) -> int:
+                      comment: str | None = None, commit: bool = True) -> int:
     cur = conn.execute(
         "INSERT INTO annotations (ts, author, entity_type, entity_key, attribute, goal_id, rating, comment) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (now_iso(), author, entity_type, entity_key, attribute, goal_id, rating, comment),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return cur.lastrowid

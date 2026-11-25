@@ -207,3 +207,9 @@ input[type=number] { padding-right: 2px; }
 .vconf.gone { opacity: .5; }
 /* the net commute's trips under a goal in the drawer: a plain line, not a section heading */
 .net-trips > summary { margin: 2px 0; font-size: inherit; text-transform: none; letter-spacing: 0; }
+
+/* duplicate buildings: a checkbox per pair and a sticky bar that answers the ticked ones */
+.dup-bar { position: sticky; top: -24px; z-index: 2; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; padding: 6px 10px; margin: 8px 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.dup-bar label, .dup-pick { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.dup-bar input[type=checkbox], .dup-pick input { width: 20px; height: 20px; margin: 0; }

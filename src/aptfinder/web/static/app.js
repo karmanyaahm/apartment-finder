@@ -1323,8 +1323,8 @@ async function renderDuplicates() {
     a.l = "A"; b.l = "B";
     const [big, small] = b.n_listings > a.n_listings ? [b, a] : [a, b];  // merge into the bigger place by default
     const btn = (from, into, accent) => `<button class="${accent ? "accent " : ""}dup-merge" data-from="${esc(from.place_key)}" data-into="${esc(into.place_key)}" title="every listing of ${esc(from.label)} moves to ${esc(into.label)}">Merge ${from.l} into ${into.l}</button>`;
-    return `<div class="vconf" data-pair="${esc(e.pair_key)}">
-      <div class="vconf-head">${e.reasons.map((r) => `<span class="chip" title="${esc(r.detail)}">${esc(r.label)}</span>`).join(" ")}
+    return `<div class="vconf" data-pair="${esc(e.pair_key)}" data-a="${esc(a.place_key)}" data-b="${esc(b.place_key)}">
+      <div class="vconf-head"><label class="dup-pick" title="select for the bar above"><input type="checkbox" class="dup-sel"></label> ${e.reasons.map((r) => `<span class="chip" title="${esc(r.detail)}">${esc(r.label)}</span>`).join(" ")}
         <span class="muted small">${e.metres} m apart</span></div>
       <div style="display:flex;gap:12px;flex-wrap:wrap">${side(a, "A")}${side(b, "B")}</div>
       <p class="small muted" style="word-break:break-word">${e.reasons.map((r) => `${esc(r.label)}: ${esc(r.detail)}`).join("<br>")}</p>
@@ -1334,6 +1334,11 @@ async function renderDuplicates() {
   body.innerHTML = `<h2>Possible duplicate buildings (${d.total})</h2>
     <p class="small">${counts || "none"}. Pairs of places that look like one building, strongest evidence first. A merge moves every listing of one place to the other (each keeps its unit; undo per listing with split in the drawer).</p>
     <p class="muted small"><a href="#" id="v-back">back to the conflicts</a></p>
+    ${d.items.length ? `<div class="dup-bar"><label><input type="checkbox" id="dup-all"> select all on this page</label>
+      <span><b id="dup-n">0</b> selected:</span>
+      <button id="dup-bm" class="accent" disabled>Merge each smaller into bigger</button>
+      <button id="dup-bn" disabled>Not the same building</button> <button id="dup-bc" disabled>Clear</button>
+      <span id="dup-prog" class="small muted"></span></div>` : ""}
     ${d.items.map(block).join("") || "<p>Nothing here.</p>"}
     <p style="margin-top:14px"><button id="d-prev" ${S.dupSkip ? "" : "disabled"}>Previous ${DUP_PAGE}</button>
       ${more ? `<button id="d-more" class="accent">Next ${DUP_PAGE}</button>` : ""}
@@ -1344,11 +1349,7 @@ async function renderDuplicates() {
     $$(".dup-merge", box).forEach((b) => b.addEventListener("click", () => {
       const from = b.dataset.from;
       vAnswer(box, `${esc(b.textContent)}: merging…`, () => post(`api/places/${encodeURIComponent(from)}/merge`, { into: b.dataset.into }), {
-        then: (r, s) => {
-          s.textContent = `${b.textContent}: merged ${r.merged} listing(s)`;
-          $$(".vconf", body).filter((x) => x !== box && !x.classList.contains("answered") && $$("[data-goto]", x).some((a) => a.dataset.goto === from))
-            .forEach((x) => vAnswer(x, "One of these two places was just merged into another; Refresh shows this pair again if it still applies", () => Promise.resolve()));
-        },
+        then: (r, s) => { s.textContent = `${b.textContent}: merged ${r.merged} listing(s)`; dupFoldMerged(body, box, from); },
       });
     }));
     $(".dup-no", box).addEventListener("click", () => vAnswer(box, "Recorded: not the same building",
@@ -1356,10 +1357,64 @@ async function renderDuplicates() {
   });
   $$("[data-goto]", body).forEach((a) => a.addEventListener("click", (ev) => { ev.preventDefault(); gotoPlace(a.dataset.goto); }));
   $("#v-back").addEventListener("click", backToConflicts);
+  wireDupBatch(body);
   $("#d-prev").addEventListener("click", () => vPage(() => { S.dupSkip = Math.max(0, S.dupSkip - DUP_PAGE); return renderDuplicates(); }));
   // answered pairs have left the queue, so the next page starts that much earlier
   $("#d-more")?.addEventListener("click", () => vPage(() => { S.dupSkip += d.items.length - vLeft(body); return renderDuplicates(); }));
   $("#d-rest").addEventListener("click", () => vPage(() => { S.verifyMode = "own"; S.ownSkip = 0; return renderVerify(); }));
+}
+
+// after a merge, the other open pairs on this page with the merged-away place fold too (that place is gone;
+// Refresh shows what is left)
+function dupFoldMerged(body, box, from) {
+  $$(".vconf", body).filter((x) => x !== box && !x.classList.contains("answered") && $$("[data-goto]", x).some((a) => a.dataset.goto === from))
+    .forEach((x) => vAnswer(x, "One of these two places was just merged into another; Refresh shows this pair again if it still applies", () => Promise.resolve()));
+}
+/* the duplicate screen's bulk bar: tick pairs, then merge each (the highlighted direction: smaller into bigger) or
+   say 'not the same building' for each, one pair per request in order, with progress. Each pair folds in place like
+   a single answer; a failure unfolds with its error and stays ticked for another try */
+function wireDupBatch(body) {
+  const all = $("#dup-all", body);
+  if (!all) return;
+  const open = () => $$(".vconf", body).filter((b) => !b.classList.contains("answered"));
+  const sel = () => open().filter((b) => $(".dup-sel", b).checked);
+  const bar = ["#dup-bm", "#dup-bn", "#dup-bc"].map((s) => $(s, body));
+  const sync = () => {
+    const n = sel().length, total = open().length;
+    $("#dup-n", body).textContent = n;
+    bar.forEach((b) => { b.disabled = !n; });
+    all.checked = n > 0 && n === total;
+    all.indeterminate = n > 0 && n < total;
+  };
+  $$(".dup-sel", body).forEach((c) => c.addEventListener("change", sync));
+  all.addEventListener("change", () => { open().forEach((b) => { $(".dup-sel", b).checked = all.checked; }); sync(); });
+  bar[2].addEventListener("click", () => { $$(".dup-sel", body).forEach((c) => { c.checked = false; }); sync(); });
+  const run = async (merge) => {
+    const boxes = sel();
+    if (!boxes.length) return;
+    [all, ...bar].forEach((x) => { x.disabled = true; });
+    const prog = $("#dup-prog", body);
+    let ok = 0, failed = 0, skipped = 0;
+    for (const [i, box] of boxes.entries()) {
+      if (box.classList.contains("answered")) { $(".dup-sel", box).checked = false; skipped++; continue; }  // folded by an earlier merge
+      prog.textContent = `${merge ? "merging" : "recording"} ${i + 1}/${boxes.length}…`;
+      const acc = $(".dup-merge.accent", box);  // the highlighted button's direction: smaller into bigger
+      const item = { a: box.dataset.a, b: box.dataset.b, into: merge ? acc.dataset.into : null };
+      await new Promise((settled) => vAnswer(box, merge ? `${esc(acc.textContent)}: merging…` : "Recorded: not the same building", () => {
+        const p = post("api/verify/duplicates/batch", { items: [item] })
+          .then(({ results: [r] }) => { if (!r.ok) throw new Error(r.error); return r; });
+        p.then(() => { ok++; $(".dup-sel", box).checked = false; if (merge) dupFoldMerged(body, box, acc.dataset.from); },
+          () => { failed++; }).finally(settled);
+        return p;
+      }, { then: (r, s) => { if (merge) s.textContent = `${acc.textContent}: merged ${r.merged} listing(s)`; } }));
+    }
+    prog.textContent = `${ok} done${failed ? `, ${failed} failed (error shown on each, still ticked)` : ""}${skipped ? `, ${skipped} skipped (a place already merged away)` : ""}`;
+    [all, ...bar].forEach((x) => { x.disabled = false; });
+    sync();
+  };
+  bar[0].addEventListener("click", () => run(true));
+  bar[1].addEventListener("click", () => run(false));
+  sync();
 }
 
 /* buildings whose own site gave no usable offer: one list, a reason and every URL tried; add a URL or dismiss */

@@ -273,6 +273,18 @@ class MergeIn(BaseModel):
     into: str  # the place this one's listings join
 
 
+class DupAnswerIn(BaseModel):
+    """One answer to a possible-duplicate pair: `into` one of the two places merges the other into it; no `into`
+    records 'not the same building'."""
+    a: str
+    b: str
+    into: str | None = None
+
+
+class DupBatchIn(BaseModel):
+    items: list[DupAnswerIn]
+
+
 class LinkIn(BaseModel):
     source: str
     source_id: str
@@ -899,13 +911,12 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                             "metres": round(d), "n_listings": p.get("n_listings")})
         return sorted(out, key=lambda x: x["metres"])[:n]
 
-    @app.post("/api/places/{place_key}/merge")
-    def merge_place(place_key: str, body: MergeIn) -> dict[str, Any]:
-        """Every listing of this place becomes the other place's, as user links (append-only; each listing keeps
-        its own unit: '<this place>/<unit>' -> '<other place>/<unit>'). Undo a listing with 'split'."""
-        if body.into == place_key:
+    def merge_links(place_key: str, into: str) -> int:
+        """Append the user links that move every listing of place_key to `into`, each keeping its own unit
+        ('<this place>/<unit>' -> '<other place>/<unit>'); no commit. Raises HTTPException when it cannot."""
+        if into == place_key:
             raise HTTPException(400, "a place cannot merge into itself")
-        if not q("SELECT 1 FROM places WHERE place_key = ?", (body.into,)):
+        if not q("SELECT 1 FROM places WHERE place_key = ?", (into,)):
             raise HTTPException(404, "no such place to merge into")
         rows = q("SELECT source, source_id, unit_key FROM listings WHERE place_key = ?", (place_key,))
         if not rows:
@@ -913,11 +924,52 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         with lock:
             for r in rows:
                 uk = r["unit_key"] or place_key
-                unit = body.into + uk[len(place_key):] if uk.startswith(place_key) else body.into
-                append_link(conn, AUTHOR, r["source"], r["source_id"], body.into, unit,
+                unit = into + uk[len(place_key):] if uk.startswith(place_key) else into
+                append_link(conn, AUTHOR, r["source"], r["source_id"], into, unit,
                             f"manual merge of {place_key}", commit=False)
+        return len(rows)
+
+    @app.post("/api/places/{place_key}/merge")
+    def merge_place(place_key: str, body: MergeIn) -> dict[str, Any]:
+        """Every listing of this place becomes the other place's, as user links (append-only; each listing keeps
+        its own unit: '<this place>/<unit>' -> '<other place>/<unit>'). Undo a listing with 'split'."""
+        with lock:
+            n = merge_links(place_key, body.into)
             conn.commit()
-        return {"merged": len(rows), "into": body.into}
+        return {"merged": n, "into": body.into}
+
+    @app.post("/api/verify/duplicates/batch")
+    def answer_duplicates(body: DupBatchIn) -> dict[str, Any]:
+        """Answer several possible-duplicate pairs in order, in one transaction: each item a merge (the same links
+        as POST /api/places/{key}/merge) or 'not the same building' (the same annotation as the single button:
+        place_pair / pair_key / same_building = no). Later items see earlier ones (a place merged away earlier
+        cannot merge again). An item that cannot be done writes nothing and comes back with its error; the rest
+        commit together."""
+        out = []
+        with lock:
+            try:
+                for it in body.items:
+                    pair = verify.pair_key(it.a, it.b)
+                    try:
+                        if it.a == it.b:
+                            raise HTTPException(400, "a pair needs two places")
+                        if it.into is None:
+                            append_annotation(conn, AUTHOR, "place_pair", pair, "same_building", comment="no",
+                                              commit=False)
+                            out.append({"pair": pair, "ok": True, "same_building": "no"})
+                        elif it.into in (it.a, it.b):
+                            src = it.b if it.into == it.a else it.a
+                            out.append({"pair": pair, "ok": True, "merged": merge_links(src, it.into),
+                                        "from": src, "into": it.into})
+                        else:
+                            raise HTTPException(400, "into must be one of the pair")
+                    except HTTPException as e:
+                        out.append({"pair": pair, "ok": False, "error": e.detail})
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return {"results": out, "done": sum(r["ok"] for r in out), "failed": sum(not r["ok"] for r in out)}
 
     @app.post("/api/links")
     def post_link(link: LinkIn) -> dict[str, Any]:

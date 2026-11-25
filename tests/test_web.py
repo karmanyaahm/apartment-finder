@@ -407,3 +407,35 @@ def test_verify_batch_filters_by_goal_and_zone_and_counts_cheap(client):
     assert z["total"] + z["hidden"]["zone"] == z["all_total"]
     assert c.get("/api/verify/batch?kind=conflict&goal=nope").status_code == 400
     assert c.get("/api/verify/batch?kind=conflict&zone=far").status_code == 400
+
+
+def test_duplicates_batch_answers_pairs_in_order(client):
+    """The batch endpoint writes the same links and annotations as the single buttons, in order: a place merged
+    away earlier in the batch cannot merge again (reported, nothing written for it); a 'not the same building'
+    pair leaves the duplicate list."""
+    c, db = client
+    places = c.get("/api/places").json()
+    showers = next(p for p in places if "Showers" in p["label"])
+    other = next(p for p in places if p["place_key"] != showers["place_key"] and "~" not in p["place_key"])
+    pk = c.post("/api/links", json={"source": "apartments_com", "source_id": "ac-55102", "place_key": None}).json()["place_key"]
+    n = len(c.get("/api/places").json())
+    r = c.post("/api/verify/duplicates/batch", json={"items": [
+        {"a": pk, "b": showers["place_key"], "into": showers["place_key"]},
+        {"a": pk, "b": other["place_key"], "into": other["place_key"]},  # pk has no listings left
+        {"a": pk, "b": other["place_key"], "into": "nowhere"},
+        {"a": showers["place_key"], "b": other["place_key"]},
+    ]}).json()
+    assert [x["ok"] for x in r["results"]] == [True, False, False, True]
+    assert r["results"][0]["merged"] == 1 and r["results"][1]["error"] == "no listings at this place"
+    assert (r["done"], r["failed"]) == (2, 2)
+    assert len(c.get("/api/places").json()) == n - 1
+    det = c.get(f"/api/places/{showers['place_key']}").json()
+    assert "apartments_com" in {l["source"] for l in det["listings"]}
+    import sqlite3
+    con = sqlite3.connect(db)
+    assert con.execute("SELECT place_key, reason FROM links WHERE author = 'user' ORDER BY id DESC LIMIT 1").fetchone() \
+        == (showers["place_key"], f"manual merge of {pk}")
+    pair = "|".join(sorted((showers["place_key"], other["place_key"])))
+    assert con.execute("SELECT comment FROM annotations WHERE entity_type = 'place_pair' AND entity_key = ? "
+                       "AND attribute = 'same_building'", (pair,)).fetchall() == [("no",)]
+    assert pair not in {e["pair_key"] for e in c.get("/api/verify/duplicates?n=500").json()["items"]}
