@@ -9,6 +9,13 @@ monthly_cap_by_mode = { bike = 900 }
 price_per_1000_usd = 5.0
 free_calls_per_month = 10000
 
+# Compute Route Matrix (the dashboard's Google sampling, `aptf-commute sample`): its own Essentials SKU, billed per
+# element (origin x destination), $5 / 1,000, first 10,000 elements a month free (read 2026-11-25). Metered per element
+# in `api_calls` (provider google_matrix). No cap set: no matrix calls.
+matrix_monthly_element_cap = 9000
+matrix_price_per_1000_usd = 5.0
+matrix_free_elements_per_month = 10000
+
 # Google Places API (New) Text Search (`aptf-intake run google_places`), metered separately from Routes in
 # `api_calls` (provider `places`), one row per request (each page of results is a request).
 # Pricing read 2026-11-24 from developers.google.com/maps/billing-and-pricing/pricing and .../places/web-service/data-fields:

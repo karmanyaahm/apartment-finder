@@ -69,23 +69,12 @@
         '';
       };
 
-      # Self-hosted OSRM (drive, bike, walk legs): `nix run .#osrm -- build` once, then the systemd user service
-      # deploy/aptf-osrm.service runs `nix run .#osrm -- serve` (three osrm-routed on 127.0.0.1:5000-5002).
-      osrm = pkgs.writeShellApplication {
-        name = "aptf-osrm";
-        runtimeInputs = [ pkgs.osrm-backend pkgs.osmium-tool pkgs.curl pkgs.coreutils ];
-        text = ''
-          export OSRM_PROFILES=${pkgs.osrm-backend}/share/osrm/profiles
-          ${builtins.readFile ./scripts/osrm.sh}
-        '';
-      };
-
       app = bin: { type = "app"; program = "${aptfinder}/bin/${bin}"; };
     in
     {
       packages.${system} = {
         default = aptfinder;
-        inherit aptfinder tunnel osrm;
+        inherit aptfinder tunnel;
         cloudflared = pkgs.cloudflared;
       };
       # nix run .#<name> -- <args>: one app per aptf-* command, plus the tunnel.
@@ -101,7 +90,6 @@
         eval = app "aptf-eval";
         media = app "aptf-media";
         tunnel = { type = "app"; program = "${tunnel}/bin/aptf-tunnel"; };
-        osrm = { type = "app"; program = "${osrm}/bin/aptf-osrm"; };
       };
       devShells.${system}.default = pkgs.mkShell {
         packages = [ pkgs.uv pkgs.python312 pkgs.cloudflared pkgs.claude-code ];

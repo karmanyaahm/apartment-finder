@@ -10,6 +10,5 @@ from .sources import (  # noqa: F401
     GoogleRoutesLegSource,
     LegResult,
     LegSource,
-    OsrmLegSource,
     StraightLineLegSource,
 )

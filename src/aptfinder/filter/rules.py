@@ -12,6 +12,12 @@ RANK = {PASS: 0, CHECK: 1, FAIL: 2}
 # A straight-line estimate decides a commute rule only when clearly on one side of the threshold.
 EST_PASS_RATIO = 0.67
 EST_FAIL_RATIO = 1.5
+# A KNN range (min..max of up to 3 nearby places' Google times, filter.knn), padded by KNN_PAD_MIN on each side (the
+# true time is often just outside it), passes when its padded max is within the limit and fails only when
+# KNN_FAIL_MARGIN x its padded min is over it; anything between is needs_check (user, 2026-11-25: on a boundary take
+# the version that keeps more places).
+KNN_FAIL_MARGIN = 0.9
+KNN_PAD_MIN = 0.5
 
 
 @dataclass
@@ -42,7 +48,7 @@ def commute_terms(rules: list[dict[str, Any]], trips: dict[tuple[str, str], dict
         else:
             continue
         best = min(ts, key=lambda t: t["minutes"]) if ts else None
-        out.append((best["minutes"], best["provider"] == "estimate") if best else (None, False))
+        out.append((best["minutes"], best["provider"] in ("estimate", "knn")) if best else (None, False))
     return out
 
 
@@ -98,6 +104,16 @@ def _untrusted(ctx: Ctx, *fields: str) -> str | None:
 def _minutes_status(trip: dict[str, Any] | None, limit: float) -> tuple[str, str]:
     if not trip or trip.get("minutes") is None:
         return CHECK, "not computed"
+    if trip["provider"] == "knn":
+        lo, hi = trip["min"], trip["max"]
+        n = len(trip.get("neighbors") or []) or 1
+        span = f"{lo:.0f} min" if round(lo) == round(hi) else f"{lo:.0f}-{hi:.0f} min"
+        src = f"{n} nearby Google route{'s' if n > 1 else ''}"
+        if hi + KNN_PAD_MIN <= limit:
+            return PASS, f"{span} ({src})"
+        if KNN_FAIL_MARGIN * (lo - KNN_PAD_MIN) > limit:
+            return FAIL, f"{span} ({src})"
+        return CHECK, f"{src} span {span}, too close to call"
     m, est = trip["minutes"], trip["provider"] == "estimate"
     tag = f"{m:.0f} min{' (estimate)' if est else ''}"
     if not est:

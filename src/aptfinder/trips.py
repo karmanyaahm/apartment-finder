@@ -11,7 +11,7 @@ import sqlite3
 from typing import Any
 
 from . import settings
-from .commute import Commute, GoogleRoutesLegSource, OsrmLegSource, Station, StraightLineLegSource
+from .commute import Commute, GoogleRoutesLegSource, LegResult, Station, StraightLineLegSource
 from .commute.geo import haversine_m
 from .config import Point, load_caltrain, load_point_sets, load_points
 from .store import append_trip, connect, init_db
@@ -19,11 +19,6 @@ from .store import append_trip, connect, init_db
 
 class SpendCapReached(RuntimeError):
     pass
-
-
-# free, unmetered providers: no prefilter_km / max_km / `auto` limits, every mode they can answer for every place
-FREE_PROVIDERS = ("estimate", "osrm")
-PROVIDERS = ("estimate", "osrm", "google")
 
 
 def load_google_caps() -> dict[str, Any]:
@@ -44,9 +39,15 @@ def google_usage(conn: sqlite3.Connection, month: str | None = None) -> dict[str
     total = sum(by_mode.values())
     caps = load_google_caps()
     billable = max(0, total - caps.get("free_calls_per_month", 0))
+    # Compute Route Matrix: its own SKU and free tier, one api_calls row per element (provider google_matrix)
+    elements = conn.execute("SELECT COUNT(*) FROM api_calls WHERE provider = 'google_matrix' AND ts LIKE ?",
+                            (f"{month}%",)).fetchone()[0]
+    m_billable = max(0, elements - caps.get("matrix_free_elements_per_month", 0))
     return {"month": month, "calls": total, "by_mode": by_mode, "cap": caps["monthly_call_cap"],
             "cap_by_mode": caps.get("monthly_cap_by_mode", {}),
-            "est_cost_usd": round(billable * caps.get("price_per_1000_usd", 5.0) / 1000, 2)}
+            "est_cost_usd": round(billable * caps.get("price_per_1000_usd", 5.0) / 1000
+                                  + m_billable * caps.get("matrix_price_per_1000_usd", 5.0) / 1000, 2),
+            "matrix_elements": elements, "matrix_cap": caps.get("matrix_monthly_element_cap", 0)}
 
 
 class MeteredSource:
@@ -84,18 +85,60 @@ class MeteredSource:
             self.meter.commit()
 
 
+class MeteredMatrix:
+    """Google's Compute Route Matrix for `Commute.prefetch`, metered per element: before each request, the per-run
+    cap and `matrix_monthly_element_cap` in config/google.toml (none set: no matrix calls) against the `api_calls`
+    log (provider `google_matrix`, one row per element), then logged. Paced under the API's 3,000 elements a
+    minute. Cache rows are written under provider `google` (the same router as computeRoutes)."""
+
+    name = "google"
+    PER_MINUTE = 2500
+
+    def __init__(self, inner: GoogleRoutesLegSource, max_elements: int, meter_db: str | None = None):
+        self.inner, self.max_elements, self.elements = inner, max_elements, 0
+        self.meter = connect(meter_db or settings.DB_PATH)
+        init_db(self.meter)
+        self.cap = load_google_caps().get("matrix_monthly_element_cap", 0)
+        self._last = 0.0
+
+    def leg(self, o, d, mode, depart):
+        raise SpendCapReached("matrix source: single legs go through computeRoutes (MeteredSource)")
+
+    def matrix(self, origins, dests, mode, depart):
+        import time
+
+        from .store import now_iso
+
+        n = len(origins) * len(dests)
+        if self.elements + n > self.max_elements:
+            raise SpendCapReached(f"google_matrix: this run's cap of {self.max_elements} elements reached")
+        used = google_usage(self.meter)["matrix_elements"]
+        if used + n > self.cap:
+            raise SpendCapReached(f"google_matrix: monthly cap of {self.cap} elements (config/google.toml "
+                                  f"matrix_monthly_element_cap; {used} used)")
+        wait = self._last + 60 * n / self.PER_MINUTE - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        self._last = time.monotonic()
+        self.elements += n
+        ok = 0
+        try:
+            res = self.inner.matrix(origins, dests, mode, depart)
+            ok = 1
+            return res
+        finally:
+            ts = now_iso()
+            self.meter.executemany("INSERT INTO api_calls (ts, provider, mode, ok, note) VALUES (?, ?, ?, ?, ?)",
+                                   [(ts, "google_matrix", mode, ok, None)] * n)
+            self.meter.commit()
+
+
 def make_source(provider: str, max_calls: int = 200, meter_db: str | None = None):
     if provider == "google":
         key = settings.secret("GOOGLE_MAPS_API_KEY")
         if not key:
             raise SystemExit("GOOGLE_MAPS_API_KEY is not set in .env")
         return MeteredSource(GoogleRoutesLegSource(key), max_calls, meter_db)
-    if provider == "osrm":
-        src = OsrmLegSource()
-        if not src.up():
-            raise SystemExit("the OSRM service is not answering on 127.0.0.1:5000-5002 "
-                             "(systemctl --user status aptf-osrm; build with: nix run .#osrm -- build)")
-        return src
     return StraightLineLegSource()
 
 
@@ -144,7 +187,7 @@ def compute_for_place(conn: sqlite3.Connection, commute: Commute, place: sqlite3
     origin = (place["lat"], place["lon"])
     if origin[0] is None or origin[1] is None:
         return 0
-    paid = commute.source.name not in FREE_PROVIDERS
+    paid = commute.source.name != "estimate"
     points = load_points()
     pending = []  # written after all routing: the commute cache writes via its own connection
     for set_name, cfg in load_point_sets().items():
@@ -171,8 +214,6 @@ def compute_for_place(conn: sqlite3.Connection, commute: Commute, place: sqlite3
             if paid and not on_demand and cfg.prefilter_km is not None and km > cfg.prefilter_km:
                 continue
             for mode in modes:
-                if not commute.supports(mode):  # e.g. OSRM has no transit: left to the other providers
-                    continue
                 if paid and not on_demand and cfg.auto is not None and mode not in cfg.auto.get(p.name, []):
                     continue
                 limit = cfg.max_km.get(mode)
@@ -214,26 +255,59 @@ def compute_all(conn: sqlite3.Connection, commute: Commute, place_keys: list[str
     return {"places": len(places), "places_done": done, "new_trips": total, "error": error}
 
 
-def estimate_missing(conn: sqlite3.Connection, db_path: str, provider: str = "estimate") -> dict[str, Any]:
-    """Free trips (straight-line `estimate`, or `osrm` routes) for the places that have none yet from that provider
-    under the current point ids (the Pipeline panel's rule, stay places routed as their building), logged as a
-    `commute`/<provider> run. Places that already have them are not routed again (`compute_all` would walk every
-    place)."""
+def estimate_missing(conn: sqlite3.Connection, db_path: str) -> dict[str, Any]:
+    """Free straight-line trips for the places that have none yet under the current point ids (the Pipeline
+    panel's rule, stay places routed as their building), logged as a `commute`/`estimate` run. Places that
+    already have estimates are not routed again (`compute_all` would walk every place)."""
     from .store import finish_run, start_run
 
     located = {r[0] for r in conn.execute("SELECT place_key FROM places WHERE lat IS NOT NULL")}
     routable = {pk for pk in located if pk.split("~", 1)[0] == pk or pk.split("~", 1)[0] not in located}
     current = {p.id for pts in load_points().values() for p in pts}
-    have = {pk for pk, pt in conn.execute("SELECT DISTINCT place_key, point_id FROM trips WHERE provider = ?",
-                                          (provider,)) if pt in current}
+    have = {pk for pk, pt in conn.execute("SELECT DISTINCT place_key, point_id FROM trips WHERE provider = 'estimate'")
+            if pt in current}
     todo = sorted(routable - have)
     if not todo:
         return {"places": 0, "places_done": 0, "new_trips": 0, "error": None}
-    source = make_source(provider)
-    run = start_run(conn, "commute", provider, {"places": len(todo), "after": "intake"})
-    res = compute_all(conn, build_commute(db_path, source), todo)
+    run = start_run(conn, "commute", "estimate", {"places": len(todo), "after": "intake"})
+    res = compute_all(conn, build_commute(db_path, make_source("estimate")), todo)
     finish_run(conn, run, "error" if res["error"] else "ok", {**res, "api_calls": 0}, est_cost=0.0, error=res["error"])
     return res
+
+
+def planned_legs(db_path: str, place_keys: list[str], only: tuple[str, str]) -> list[tuple]:
+    """The single legs (origin, destination, mode) that `compute_all(place_keys, on_demand=True, only=only)` with
+    Google would route and are not in the cache yet. Walks the same code with a recording source over an in-memory
+    copy of just these places (composed modes ask for their legs the same way); reads the real cache read-only,
+    routes and writes nothing."""
+    legs: list[tuple] = []
+    real = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    has_cache = real.execute("SELECT 1 FROM sqlite_master WHERE name = 'commute_legs'").fetchone()
+
+    class Recording(StraightLineLegSource):
+        name = "google"
+
+        def leg(self, o, d, mode, depart):
+            row = has_cache and real.execute(
+                "SELECT found, minutes, distance_m FROM commute_legs WHERE o_lat=? AND o_lon=? AND d_lat=? AND "
+                "d_lon=? AND mode=? AND depart=? AND provider='google'", (*o, *d, mode, depart)).fetchone()
+            if row:
+                return LegResult(row[1], row[2]) if row[0] else None
+            legs.append((o, d, mode))
+            return StraightLineLegSource.leg(self, o, d, mode if mode != "transit" else "bike", depart)
+
+    mem = sqlite3.connect(":memory:")
+    mem.row_factory = sqlite3.Row
+    mem.execute("CREATE TABLE places (place_key TEXT, lat REAL, lon REAL)")
+    mem.execute("CREATE TABLE trips (id INTEGER PRIMARY KEY, computed_at TEXT, place_key TEXT, point_id TEXT, "
+                "mode TEXT, minutes REAL, distance_m REAL, legs TEXT, depart_assumption TEXT, provider TEXT)")
+    want = set(place_keys)
+    mem.executemany("INSERT INTO places VALUES (?, ?, ?)",
+                    [r for r in real.execute("SELECT place_key, lat, lon FROM places WHERE lat IS NOT NULL")
+                     if r[0] in want])
+    compute_all(mem, build_commute(":memory:", Recording()), list(place_keys), on_demand=True, only=only)
+    real.close()
+    return legs
 
 
 def dry_run(db_path: str, provider: str, place_keys: list[str] | None = None, on_demand: bool = False,
@@ -283,6 +357,76 @@ def dry_run(db_path: str, provider: str, place_keys: list[str] | None = None, on
             "est_cost_usd": round(billable * price / 1000, 2), "over_caps": over, "google_usage_now": usage}
 
 
+def route_plan(conn: sqlite3.Connection, db_path: str, plan: dict[tuple[str, str], list[str]], label: str,
+               max_elements: int, max_calls: int = 20, progress=None) -> dict[str, Any]:
+    """Route a sampling plan (pair -> places) with Google: per pair, the uncached legs go through Compute Route
+    Matrix (`MeteredMatrix`, per-element cap) into the leg cache, then `compute_all` appends the trips from it; a leg
+    the matrix left out goes to computeRoutes under `max_calls`. One `commute` run row per pair."""
+    from .store import finish_run, start_run
+
+    key = settings.secret("GOOGLE_MAPS_API_KEY")
+    if not key:
+        raise SystemExit("GOOGLE_MAPS_API_KEY is not set in .env")
+    matrix = MeteredMatrix(GoogleRoutesLegSource(key), max_elements, meter_db=db_path)
+    prefetch = build_commute(db_path, matrix)
+    source = make_source("google", max_calls, meter_db=db_path)
+    commute = build_commute(db_path, source)
+    out: dict[str, Any] = {"pairs": {}, "error": None, "new_trips": 0}
+    done_places = 0
+    for p, keys in plan.items():
+        if not keys:
+            continue
+        before_e, before_c = matrix.elements, source.calls
+        run = start_run(conn, "commute", "google", {"sample": label, "only": list(p), "places": len(keys)})
+        pre: dict[str, int] = {}
+        try:
+            pre = prefetch.prefetch(planned_legs(db_path, keys, p))
+            res = compute_all(conn, commute, keys, on_demand=True, only=p,
+                              progress=(lambda d, n, t: progress(done_places + d, t)) if progress else None)
+        except (SpendCapReached, RuntimeError) as e:
+            res = {"places": len(keys), "places_done": 0, "new_trips": 0, "error": str(e)}
+        done_places += res["places_done"]
+        counts = {**res, **pre, "matrix_elements": matrix.elements - before_e, "api_calls": source.calls - before_c}
+        finish_run(conn, run, "error" if res["error"] else "ok", counts,
+                   est_cost=round((counts["matrix_elements"] + counts["api_calls"]) * 0.005, 3), error=res["error"])
+        out["pairs"]["|".join(p)] = counts
+        out["new_trips"] += res["new_trips"]
+        if res["error"]:
+            out["error"] = res["error"]
+            break
+    out["matrix_elements"], out["api_calls"] = matrix.elements, source.calls
+    return out
+
+
+def sample(conn: sqlite3.Connection, args) -> dict[str, Any]:
+    """`aptf-commute sample`: plan per pair over the walk-zone candidates (cover, random % or refine), then a dry run
+    (places, matrix elements, coverage) or the Google run (`route_plan`)."""
+    from . import sampling
+    from .filter import best_trips
+    from .filter.goals import effective_goals
+
+    pairs = [tuple(p.split("|", 1)) for p in args.pair]
+    for p in pairs:
+        if len(p) != 2:
+            raise SystemExit(f"--pair must be POINT|MODE, got {p!r}")
+    cands = sampling.walk_zone_candidates(conn)
+    keys = sorted(cands)
+    trips = best_trips(conn)
+    if args.refine:
+        plan = sampling.refine_plan(trips, pairs, keys, effective_goals(conn), cands, args.frac)
+        label = "refine"
+    elif args.pct:
+        plan = sampling.random_plan(trips, pairs, keys, args.pct, args.seed)
+        label = f"random {args.pct:g}%"
+    else:
+        plan = sampling.cover_plan(trips, pairs, keys, sampling.located(conn), args.radius_m)
+        label = f"cover within {args.radius_m:g} m"
+    out = {"plan": label, **sampling.summary(conn, args.db, plan, keys, trips), "google_usage_now": google_usage(conn)}
+    if args.dry_run:
+        return out
+    return {**out, "run": route_plan(conn, args.db, plan, label, args.max_elements, args.max_calls)}
+
+
 def _ll(text: str) -> tuple[float, float]:
     a, b = text.split(",")
     return (float(a), float(b))
@@ -291,7 +435,7 @@ def _ll(text: str) -> tuple[float, float]:
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="aptf-commute")
     ap.add_argument("--db", default=str(settings.DB_PATH))
-    ap.add_argument("--provider", choices=list(PROVIDERS), default="estimate")
+    ap.add_argument("--provider", choices=["estimate", "google"], default="estimate")
     ap.add_argument("--max-calls", type=int, default=200, help="cap on paid API calls this run")
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("route", help="ad-hoc trip between two coordinates")
@@ -309,6 +453,20 @@ def main(argv: list[str] | None = None) -> None:
                    help="only places in a station walk zone that can still pass a goal apart from commute rules")
     c.add_argument("--dry-run", action="store_true",
                    help="count the uncached paid calls this would make, using estimates in a scratch cache copy")
+    sm = sub.add_parser("sample", help="route a covering set (default), a random sample (or, with --refine, the ambiguous places) of the "
+                                       "walk-zone candidates with Google Route Matrix so KNN ranges cover the rest "
+                                       "(aptfinder/sampling.py); the dashboard's Pipeline panel does the same")
+    sm.add_argument("--pair", action="append", required=True,
+                    help="POINT|MODE, e.g. 'commute_targets:Meta HQ|drive' or 'set:caltrain_stations|walk' (repeatable)")
+    sm.add_argument("--radius-m", type=float, default=400,
+                    help="cover: route places until every candidate has a routed place within this distance")
+    sm.add_argument("--pct", type=float, help="a random sample of this many percent of the candidates")
+    sm.add_argument("--seed", type=int)
+    sm.add_argument("--refine", action="store_true",
+                    help="route needs_check places and the widest --frac of KNN ranges instead of the cover")
+    sm.add_argument("--frac", type=float, default=0.1)
+    sm.add_argument("--dry-run", action="store_true", help="count the uncached matrix elements per pair; no calls")
+    sm.add_argument("--max-elements", type=int, default=1000, help="cap on Route Matrix elements this run")
     args = ap.parse_args(argv)
 
     if args.cmd == "usage":
@@ -320,6 +478,9 @@ def main(argv: list[str] | None = None) -> None:
     init_db(conn)
     if args.cmd == "anchors":
         print(json.dumps(route_anchors(conn, args.db, args.provider, args.max_calls, args.dry_run), indent=1))
+        return
+    if args.cmd == "sample":
+        print(json.dumps(sample(conn, args), indent=1))
         return
     if args.cmd == "compute" and args.candidates:
         from .areas import in_walk_zone

@@ -45,46 +45,6 @@ class StraightLineLegSource:
         return LegResult(minutes=round(d / self.SPEED_M_PER_MIN[mode], 1), distance_m=round(d))
 
 
-class OsrmLegSource:
-    """Self-hosted OSRM: one `osrm-routed` per profile on this machine (car, bicycle, foot). A real route over the
-    OpenStreetMap road network, free and unmetered. Drive is free-flow (no traffic). No transit: returns None."""
-
-    name = "osrm"
-    DEFAULT_URLS = {"drive": "http://127.0.0.1:5000", "bike": "http://127.0.0.1:5001", "walk": "http://127.0.0.1:5002"}
-
-    def __init__(self, urls: dict[str, str] | None = None, client: httpx.Client | None = None):
-        self.urls = urls or dict(self.DEFAULT_URLS)
-        self.modes = tuple(self.urls)
-        self.client = client or httpx.Client(timeout=30)
-        self.calls = 0
-
-    def up(self) -> bool:
-        """Every profile's server answers (a route of zero length)."""
-        try:
-            return all(self.client.get(f"{u}/route/v1/x/-122.08,37.39;-122.08,37.39",
-                                       params={"overview": "false"}, timeout=3).status_code == 200
-                       for u in self.urls.values())
-        except httpx.HTTPError:
-            return False
-
-    def leg(self, origin: LatLon, dest: LatLon, mode: str, depart: str) -> LegResult | None:
-        if mode not in self.urls:
-            return None
-        self.calls += 1
-        coords = f"{origin[1]},{origin[0]};{dest[1]},{dest[0]}"
-        resp = self.client.get(f"{self.urls[mode]}/route/v1/x/{coords}", params={"overview": "false"})
-        try:
-            body = resp.json()
-        except ValueError:
-            raise RuntimeError(f"OSRM HTTP {resp.status_code} ({resp.text[:300]})") from None
-        if body.get("code") in ("NoRoute", "NoSegment"):
-            return None
-        if resp.status_code != 200 or body.get("code") != "Ok":
-            raise RuntimeError(f"OSRM HTTP {resp.status_code} ({body.get('code')}: {body.get('message')})")
-        r = body["routes"][0]
-        return LegResult(minutes=round(r["duration"] / 60, 1), distance_m=round(r["distance"]))
-
-
 def next_departure(depart: str, tz: str = "America/Los_Angeles") -> datetime:
     """'weekday_0830' -> next Tuesday 08:30 local (a representative weekday, always in the future)."""
     kind, hhmm = depart.split("_")
@@ -107,6 +67,10 @@ class GoogleRoutesLegSource:
               "routes.legs.steps.transitDetails.transitLine.nameShort,"
               "routes.legs.steps.transitDetails.transitLine.name,"
               "routes.legs.steps.transitDetails.transitLine.vehicle.type")
+
+    MATRIX_URL = "https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix"
+    MATRIX_MAX = 625  # elements per request (origins x destinations) for walk, bike and drive without traffic
+    MATRIX_FIELDS = "originIndex,destinationIndex,duration,distanceMeters,status,condition"
 
     def __init__(self, api_key: str, client: httpx.Client | None = None):
         self.api_key = api_key
@@ -154,6 +118,41 @@ class GoogleRoutesLegSource:
             steps = _merge_walks(steps)
         return LegResult(minutes=round(_secs(r.get("duration")) / 60, 1),
                          distance_m=r.get("distanceMeters"), steps=steps)
+
+    def matrix(self, origins: list[LatLon], dests: list[LatLon], mode: str,
+               depart: str) -> dict[tuple[int, int], LegResult | None]:
+        """computeRouteMatrix (its own Essentials SKU, billed per element): (origin index, destination index) ->
+        LegResult, None when no route exists. An element that failed is left out (not cached as 'no route')."""
+        if mode not in ("walk", "bike", "drive"):
+            raise ValueError(f"matrix: mode {mode!r} not supported (walk, bike, drive)")
+        if len(origins) * len(dests) > self.MATRIX_MAX:
+            raise ValueError(f"matrix: {len(origins) * len(dests)} elements, at most {self.MATRIX_MAX}")
+        wp = lambda p: {"waypoint": {"location": {"latLng": {"latitude": p[0], "longitude": p[1]}}}}  # noqa: E731
+        body: dict[str, Any] = {"origins": [wp(o) for o in origins], "destinations": [wp(d) for d in dests],
+                                "travelMode": self.TRAVEL_MODE[mode]}
+        if mode == "drive":
+            body["routingPreference"] = "TRAFFIC_UNAWARE"
+        self.calls += 1
+        resp = self.client.post(self.MATRIX_URL, json=body, headers={
+            "X-Goog-Api-Key": self.api_key, "X-Goog-FieldMask": self.MATRIX_FIELDS}, timeout=120)
+        if resp.status_code != 200:
+            try:
+                err = (resp.json()[0] if isinstance(resp.json(), list) else resp.json()).get("error", {})
+                detail = f"{err.get('status')}: {err.get('message')}"
+            except (ValueError, IndexError, AttributeError):
+                detail = resp.text[:300]
+            raise RuntimeError(f"Google Route Matrix HTTP {resp.status_code} ({detail})")
+        out: dict[tuple[int, int], LegResult | None] = {}
+        for e in resp.json():
+            key = (e.get("originIndex", 0), e.get("destinationIndex", 0))  # proto3 JSON leaves out zeros
+            if (e.get("status") or {}).get("code"):
+                continue
+            if e.get("condition") == "ROUTE_EXISTS":
+                out[key] = LegResult(minutes=round(_secs(e.get("duration")) / 60, 1), distance_m=e.get("distanceMeters"))
+            elif e.get("condition") == "ROUTE_NOT_FOUND":
+                out[key] = None
+        return out
+
 
 
 def _secs(d: str | None) -> float:

@@ -13,7 +13,7 @@ from ..plans import inherit_prices, is_own_priced
 from ..verify import accuracy, low_accuracy
 from .rules import CHECK, FAIL, PASS, RANK, Ctx, combine, commute_terms, evaluate, fact
 
-PROVIDER_PREF = {"google": 0, "osrm": 1, "estimate": 9}
+PROVIDER_PREF = {"google": 0, "knn": 1, "estimate": 9}
 
 
 class _Trips(defaultdict):
@@ -29,7 +29,10 @@ class _Trips(defaultdict):
 
 
 def best_trips(conn: sqlite3.Connection) -> dict[str, dict[tuple[str, str], dict[str, Any]]]:
-    """place_key -> (point_id, mode) -> latest trip from the most trusted provider."""
+    """place_key -> (point_id, mode) -> latest trip from the most trusted provider: the place's own Google trip, else
+    a KNN range from nearby places' Google trips (filter.knn), else the straight-line estimate."""
+    from .knn import add_knn, cells
+
     out: dict[str, dict[tuple[str, str], dict[str, Any]]] = _Trips(dict)
     rows = conn.execute("""
         SELECT * FROM (SELECT t.*, ROW_NUMBER() OVER (
@@ -40,6 +43,10 @@ def best_trips(conn: sqlite3.Connection) -> dict[str, dict[tuple[str, str], dict
         cur = out[r["place_key"]].get(key)
         if cur is None or PROVIDER_PREF.get(r["provider"], 5) < PROVIDER_PREF.get(cur["provider"], 5):
             out[r["place_key"]][key] = dict(r)
+    sel = cells(conn)
+    if sel:
+        located = {pk: (la, lo) for pk, la, lo in conn.execute("SELECT place_key, lat, lon FROM places WHERE lat IS NOT NULL")}
+        add_knn(out, located, sel)
     return out
 
 

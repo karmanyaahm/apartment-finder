@@ -212,11 +212,18 @@ function limitValue(p, pt, mode) {
   return pt.startsWith("set:") ? (p.nearest || {})[`${pt.slice(4)}|${mode}`] : p.minutes[`${pt}|${mode}`];
 }
 // a commute time coloured by the provider that computed it, the provider named on hover ("~" marks an estimate)
-const SRC = { google: ["src-google", "Google Maps"], osrm: ["src-osrm", "OSRM (self-hosted road route; drive without traffic)"],
+const SRC = { google: ["src-google", "Google Maps"], knn: ["src-knn", "from 3 nearby Google routes"],
   estimate: ["src-estimate", "straight-line estimate (not routed)"] };
 const srcOf = (prov) => SRC[prov] || ["", prov || "unknown source"];
-const srcMin = (v) => `<b class="${srcOf(v.provider)[0]}" title="${esc(srcOf(v.provider)[1])}">${v.provider === "estimate" ? "~" : ""}${num(v.minutes)}</b>`;
-const SRC_LEGEND = `<span class="src-key"><b class="src-google">■</b> Google Maps · <b class="src-osrm">■</b> OSRM (self-hosted, drive without traffic) · <b class="src-estimate">■ ~</b> straight-line estimate</span>`;
+// the text of a time: a KNN range "17-19" (one number when both ends round alike), "~27" for an estimate
+const srcText = (v) => v.provider === "knn" && v.min != null
+  ? (Math.round(v.min) === Math.round(v.max) ? num(v.min) : `${Math.round(v.min)}–${Math.round(v.max)}`)
+  : `${v.provider === "estimate" ? "~" : ""}${num(v.minutes)}`;
+const srcTitle = (v) => v.provider === "knn" && v.neighbors
+  ? `from 3 nearby Google routes: ${v.neighbors.map((n) => num(n.minutes)).join(", ")} min (${v.neighbors.map((n) => n.km).join(", ")} km away)`
+  : srcOf(v.provider)[1];
+const srcMin = (v) => `<b class="${srcOf(v.provider)[0]}" title="${esc(srcTitle(v))}">${srcText(v)}</b>`;
+const SRC_LEGEND = `<span class="src-key"><b class="src-google">■</b> Google Maps · <b class="src-knn">■ a–b</b> range of the 3 nearest places' Google routes · <b class="src-estimate">■ ~</b> straight-line estimate</span>`;
 
 // the selected goal's commute rules as (point, mode) facts on each card, so the requirement is visible:
 // "walk to nearest Google bus 6 min (stop name, est.)"; the goal's fails colour them
@@ -783,8 +790,7 @@ function matrixTable(d) {
       const v = d.matrix[`${t}|${m}`];
       if (!v || v.minutes == null) return `<td class="muted">–</td>`;
       const legs = (v.legs || []).map((l) => `${l.mode}${l.from || l.to ? ` ${l.from || ""}${l.to ? "→" + l.to : ""}` : ""}: ${num(l.minutes)}m`).join("\n");
-      const [cls, src] = srcOf(v.provider);
-      return `<td class="${cls}" title="${esc(src)}\n${esc(legs)}">${v.provider === "estimate" ? "~" : ""}${num(v.minutes)}</td>`;
+      return `<td class="${srcOf(v.provider)[0]}" title="${esc(srcTitle(v))}${legs ? "\n" + esc(legs) : ""}">${srcText(v)}</td>`;
     }).join("");
     return `<tr><th>${esc(t.split(":")[1])}</th>${cells}</tr>`;
   }).join("");
@@ -900,7 +906,7 @@ async function openPlace(pk) {
     <h3>${isStay ? "Furnished stays" : "Floor plans"}</h3>${planTable}
     ${listingTable}
     <h3>Price history (per month)</h3>${historyChart([...d.listings].sort((a, b) => b.history.length - a.history.length).slice(0, 8))}
-    <h3>Commute ${S.meta.osrm ? '<button id="osrm-btn" class="small" title="self-hosted OSRM: drive (no traffic), bike, walk and bike+train; free">Route (free)</button> ' : ""}<button id="route-btn" class="small">${S.meta.google ? "Route with Google" : "Recompute (estimate)"}</button></h3>
+    <h3>Commute <button id="route-btn" class="small">${S.meta.google ? "Route with Google" : "Recompute (estimate)"}</button></h3>
     <p id="route-status" class="small">${esc(S.routeMsg?.[pk] || "")}</p>
     ${S.meta.google ? "" : '<p class="muted small">No GOOGLE_MAPS_API_KEY on the server: only straight-line estimates can be computed here.</p>'}
     ${S.meta.google ? `<p class="muted small">Routes every target by every mode (about 20 Google calls). Google is metered and capped per month (config/google.toml); when the cap is reached routing stops and the straight-line estimates stay.</p>` : ""}${matrixTable(d)}
@@ -963,19 +969,6 @@ function wireDrawer(pk) {
     const r = await post("api/links", { source, source_id, place_key: null });
     toast("Split recorded"); await loadPlaces(); openPlace(r.place_key);
   }));
-  $("#osrm-btn")?.addEventListener("click", async (e) => {
-    const btn = e.target;
-    btn.disabled = true; btn.textContent = "Routing…";
-    try {
-      const r = await post(`api/trips/${encodeURIComponent(pk)}?provider=osrm`);
-      (S.routeMsg ||= {})[pk] = `Routed with OSRM: ${r.new_trips} new trips.`;
-      toast(S.routeMsg[pk]);
-      await refreshAfterWrite(pk);
-    } catch (err) {
-      toast("OSRM routing failed: " + err.message, 6000);
-      btn.disabled = false; btn.textContent = "Route (free)";
-    }
-  });
   // the outcome stays on the drawer (S.routeMsg) across its re-render; the button always leaves "Routing…"
   $("#route-btn")?.addEventListener("click", async (e) => {
     const btn = e.target, label = btn.textContent;
@@ -1316,7 +1309,7 @@ async function openPipeline() {
     <p class="muted small">Computed now from the logs (${esc(d.now.slice(0, 16).replace("T", " "))} UTC). Website, own-site and Google counts are over places inside a station walk zone. Stale = older than ${d.stale_days} days.
       ${["done", "partial", "stale", "todo", "blocked"].map((s) => stChip(s)).join(" ")}</p>
     ${stuck}${statusBlock(S.status)}
-    <h3>Compute an attribute</h3>${computeBlock()}
+    <h3>Commute times: Google samples, KNN for the rest</h3>${computeBlock()}
     <h3>Search areas</h3><div id="areas-map" class="areas-map"></div><div id="areas-legend" class="small"></div>
     <h3>Stages</h3>${stages}
     <h3>Intake coverage (aggregators)</h3>${matrix}
@@ -1335,67 +1328,103 @@ async function openPipeline() {
 // Pick a point or set, a mode, a provider and which places; a dry run shows the places, the uncached Google calls
 // and their cost against the monthly caps; only then does Run appear. Google never starts without that click, and
 // the run is capped at the dry run's call count.
+// The KNN grid: destinations x modes, the checked cells saved on the server (shared). Checked cells get KNN ranges
+// from nearby Google routes; the sampling buttons route a covering set, a random % or the ambiguous places of the
+// chosen scope for every checked cell with Google Route Matrix (dry run first, then a typed confirm for big runs).
 function computeBlock() {
-  const pOpts = limitOptions().map(([v, label]) => `<option value="${esc(v)}">${esc(label)}</option>`).join("");
-  const mOpts = S.meta.modes.map((m) => `<option value="${esc(m)}">${esc(MODE_LABEL[m])}</option>`).join("");
   const n = filtered().length;
   return `<div class="compute small" id="compute">
-    <select id="c-point">${pOpts}</select> <select id="c-mode">${mOpts}</select>
-    <select id="c-provider"><option value="estimate">estimate (free)</option>${S.meta.osrm ? '<option value="osrm" selected>OSRM (free, self-hosted)</option>' : ""}<option value="google">Google (paid)</option></select>
-    <label><input type="radio" name="c-scope" value="list" checked> the ${n} places the list shows</label>
-    <label><input type="radio" name="c-scope" value="zone"> every place in a walk zone</label>
-    <label><input type="radio" name="c-scope" value="candidates"> search candidates (in a walk zone, can still pass a goal)</label>
+    <div id="k-grid" class="scroll-x">loading cells…</div>
+    <p class="muted">A checked cell gets KNN times: a place without its own Google route reads the routes of up to 3 places
+      within <span id="k-radius">400</span> m (shown as a range, <b class="src-knn">violet</b>); with none that close it keeps the straight-line estimate.</p>
+    <div>Sample: <label><input type="radio" name="s-method" value="cover" checked> cover: every place within
+      <select id="s-radius"><option>100</option><option>250</option><option selected>400</option></select> m of a routed place</label>
+      <label><input type="radio" name="s-method" value="random"> random <input id="s-pct" type="number" value="10" min="1" max="100" class="num-count">%</label>
+      <label><input type="radio" name="s-method" value="refine"> refine: places too close to call, and the widest 10% of ranges</label></div>
+    <div>Of: <label><input type="radio" name="s-scope" value="list" checked> current search results (${n})</label>
+      <label><input type="radio" name="s-scope" value="zone"> every place in a walk zone</label>
+      <label><input type="radio" name="s-scope" value="candidates"> search candidates (in a walk zone, can still pass a goal)</label></div>
     <button id="c-dry">Dry run</button>
-    <span id="c-confirm" class="hidden">to run, type the Google calls (<b id="c-n-want"></b>) <input id="c-n" type="number" class="num-count">
-      and the calls left this month (<b id="c-left-want"></b>) <input id="c-left" type="number" class="num-count"></span>
+    <span id="c-confirm" class="hidden">to run, type the elements (<b id="c-n-want"></b>) <input id="c-n" type="number" class="num-count">
+      and the elements left this month (<b id="c-left-want"></b>) <input id="c-left" type="number" class="num-count"></span>
     <button id="c-run" class="accent hidden">Run</button> <span id="c-hint" class="muted hidden">type both numbers to unlock</span>
     <div id="c-out" class="muted"></div>
     <div id="c-job" class="muted"></div>
-    <details id="c-log-box"><summary>Recent computations (each Google call is also logged)</summary><div id="c-log">…</div></details></div>`;
+    <details id="c-log-box"><summary>Recent computations (each Google call and matrix element is also logged)</summary><div id="c-log">…</div></details></div>`;
+}
+const cellParts = (k) => { const i = k.lastIndexOf("|"); return [k.slice(0, i), k.slice(i + 1)]; };
+async function drawKnnGrid() {
+  const box = $("#k-grid");
+  const d = await api("api/knn/cells").catch((e) => { box.textContent = "Cells failed to load: " + e.message; return null; });
+  if (!d) return;
+  $("#k-radius").textContent = d.radius_m;
+  const on = new Set(d.cells.map(([p, m]) => `${p}|${m}`));
+  box.innerHTML = `<table class="knn-grid"><tr><th></th>${d.modes.map((m) => `<th>${esc(MODE_LABEL[m] || m)}</th>`).join("")}</tr>
+    ${d.rows.map((r) => `<tr><th>${esc(r.label)}</th>${d.modes.map((m) => {
+      if (m === "bike_train_bike" && r.kind === "set") return "<td></td>";
+      const why = r.paid ? "" : "paid = false in point_sets.toml: no Google routing for this set";
+      return `<td title="${esc(why)}"><input type="checkbox" data-cell="${esc(r.id)}|${esc(m)}"
+        ${on.has(`${r.id}|${m}`) ? "checked" : ""} ${r.paid ? "" : "disabled"}></td>`;
+    }).join("")}</tr>`).join("")}</table>`;
+  $$("#k-grid input[data-cell]").forEach((cb) => cb.addEventListener("change", async () => {
+    const cells = $$("#k-grid input[data-cell]:checked").map((x) => cellParts(x.dataset.cell));
+    try { await post("api/knn/cells", { cells }); toast(`${cells.length} cell${cells.length === 1 ? "" : "s"} saved`); await loadPlaces(); }
+    catch (e) { toast("Saving cells failed: " + e.message, 6000); cb.checked = !cb.checked; }
+  }));
 }
 function computeSpec() {
-  const scope = $("input[name=c-scope]:checked").value;
-  return { point: $("#c-point").value, mode: $("#c-mode").value, provider: $("#c-provider").value, scope,
-    place_keys: scope === "list" ? filtered().map((p) => p.place_key) : null };
+  const scope = $("input[name=s-scope]:checked").value;
+  return { method: $("input[name=s-method]:checked").value, pct: +$("#s-pct").value, radius_m: +$("#s-radius").value,
+    scope, place_keys: scope === "list" ? filtered().map((p) => p.place_key) : null };
 }
 function wireCompute() {
   let dry = null;
   const out = $("#c-out");
   const reset = () => { dry = null; ["#c-run", "#c-confirm", "#c-hint"].forEach((id) => $(id).classList.add("hidden")); };
-  // a Google run of more than 20 calls unlocks only when both numbers are typed exactly
-  const typedOk = () => !dry?.typed || (+$("#c-n").value === dry.calls && +$("#c-left").value === dry.left);
+  // a run of more than 20 elements unlocks only when both numbers are typed exactly
+  const typedOk = () => !dry?.typed || (+$("#c-n").value === dry.elements && +$("#c-left").value === dry.left);
   const lock = () => {
     $("#c-run").disabled = !typedOk();
     $("#c-hint").classList.toggle("hidden", !$("#c-run").disabled || $("#c-run").classList.contains("hidden"));
   };
   ["#c-n", "#c-left"].forEach((id) => $(id).addEventListener("input", lock));
+  drawKnnGrid();
   loadComputeLog();
-  ["#c-point", "#c-mode", "#c-provider", ...$$("input[name=c-scope]")].forEach((el) =>
+  ["#s-radius", "#s-pct", ...$$("input[name=s-method]"), ...$$("input[name=s-scope]")].forEach((el) =>
     (typeof el === "string" ? $(el) : el).addEventListener("input", () => { reset(); out.textContent = ""; }));
+  $("#k-grid").addEventListener("change", () => { reset(); out.textContent = ""; });
   $("#c-dry").addEventListener("click", async () => {
     reset();
     const spec = computeSpec();
-    out.textContent = spec.provider === "google" ? "Counting uncached Google calls (no calls are made)…" : "Counting…";
+    out.textContent = "Planning and counting uncached Route Matrix elements (no calls are made)…";
     try {
-      const d = await post("api/compute/dry_run", spec);
-      const u = d.google_usage_now;
-      out.innerHTML = d.provider === "estimate" || d.provider === "osrm"
-        ? `${d.places} places · ${d.provider === "osrm" ? "self-hosted OSRM routes" : "straight-line estimates"}, free.`
-        : `${d.places} places · <b>${d.would_call}</b> uncached Google calls (${esc(Object.entries(d.by_mode).map(([m, k]) => `${m} ${k}`).join(", ") || "none")})
-           · est. <b>$${d.est_cost_usd.toFixed(2)}</b> · this month ${u.calls}/${u.cap} calls used
-           ${d.over_caps.length ? `<br><span class="reason fail">Would pass ${esc(d.over_caps.join("; "))}: the run stops at the cap.</span>` : ""}
-           ${d.note ? `<br><span class="reason fail">${esc(d.note)}</span>` : ""}`;
-      if (d.provider === "estimate" || d.provider === "osrm" || d.would_call > 0) {
-        const left = u ? u.cap - u.calls : null;
-        dry = { spec, calls: d.would_call, left, typed: d.provider === "google" && d.would_call > 20 && left < 5000 };
-        $("#c-run").textContent = d.provider === "google" ? `Run: up to ${d.would_call} Google calls` : "Run";
+      const d = await post("api/sample/dry_run", spec);
+      const u = d.usage;
+      const lens = Object.values(d.plan).map((v) => v.length);
+      const places = lens.reduce((a, b) => a + b, 0);
+      const head = spec.method === "random" ? `${spec.pct}% of ${d.scope} places = ${Math.round(d.scope * spec.pct / 100)} places (${places} not yet routed, over all cells)`
+        : spec.method === "cover" ? `cover within ${spec.radius_m} m of ${d.scope} places: ${places} picks`
+        : `refine over ${d.scope} places: ${places} places`;
+      const rows = Object.entries(d.pairs).map(([k, v]) => {
+        const [p, m] = cellParts(k);
+        return `<tr><td>${esc(p.replace(/^commute_targets:/, "").replace(/^set:/, "nearest "))} × ${esc(MODE_LABEL[m] || m)}</td>
+          <td>${v.places}</td><td>${v.elements}</td><td>${v.covered_before} → ${v.covered_after} of ${d.scope}</td></tr>`;
+      }).join("");
+      out.innerHTML = `${esc(head)}, <b>${d.elements}</b> Route Matrix elements (${esc(d.modes.join(", ") || "none")})
+        · this month ${u.matrix_elements}/${u.matrix_cap} elements used
+        <div class="scroll-x"><table><tr><th>cell</th><th>places</th><th>elements</th><th>with a routed place within ${d.radius_m} m</th></tr>${rows}</table></div>
+        ${d.skipped.length ? `<span class="reason needs_check">Skipped: ${esc(d.skipped.join("; "))}</span>` : ""}
+        ${d.elements > d.left ? `<br><span class="reason fail">Over the monthly matrix cap (${d.left} left): the run stops at the cap.</span>` : ""}`;
+      if (d.elements > 0) {
+        dry = { plan: d.plan, label: d.label, elements: d.elements, left: d.left, typed: d.typed };
+        $("#c-run").textContent = `Run: up to ${d.elements} Route Matrix elements`;
         $("#c-run").classList.remove("hidden");
         $("#c-n").value = ""; $("#c-left").value = "";
-        $("#c-n-want").textContent = d.would_call; $("#c-left-want").textContent = left;
+        $("#c-n-want").textContent = d.elements; $("#c-left-want").textContent = d.left;
         $("#c-confirm").classList.toggle("hidden", !dry.typed);
         lock();
-        if (dry.typed) out.innerHTML += `<br>More than 20 calls: type <b>${d.would_call}</b> and <b>${left}</b> below to unlock Run.`;
-      } else out.innerHTML += "<br>Nothing to route: every pair is cached.";
+        if (dry.typed) out.innerHTML += `<br>More than 20 elements: type <b>${d.elements}</b> and <b>${d.left}</b> above to unlock Run.`;
+      } else out.innerHTML += "<br>Nothing to route: every leg is cached.";
     } catch (e) { out.textContent = "Dry run failed: " + e.message; }
   });
   $("#c-run").addEventListener("click", async () => {
@@ -1403,7 +1432,7 @@ function wireCompute() {
     $("#c-run").classList.add("hidden"); $("#c-hint").classList.add("hidden");
     try {
       if (!typedOk()) { $("#c-run").classList.remove("hidden"); return; }
-      await post("api/compute/run", { ...dry.spec, confirm_calls: dry.spec.provider === "google" ? dry.calls : null,
+      await post("api/sample/run", { plan: dry.plan, label: dry.label, confirm_elements: dry.elements,
         confirm_left: dry.typed ? +$("#c-left").value : null });
       dry = null;
       pollCompute();
@@ -1424,7 +1453,7 @@ async function pollCompute() {
   }
   const r = s.result || {};
   out.innerHTML = s.state === "done"
-    ? `Done ${esc(what)}: ${r.places_done}/${r.places} places, ${r.new_trips} new trips${r.api_calls ? `, ${r.api_calls} Google calls` : ""}.`
+    ? `Done ${esc(what)}: ${r.places_done}/${r.places} places, ${r.new_trips} new trips${r.matrix_elements ? `, ${r.matrix_elements} matrix elements` : ""}${r.api_calls ? `, ${r.api_calls} Google calls` : ""}.`
     : `<span class="reason fail">Stopped ${esc(what)}: ${esc(r.error || "unknown error")}${r.new_trips ? ` (${r.new_trips} new trips kept)` : ""}</span>`;
   await loadPlaces().catch(() => {});
   loadComputeLog();
@@ -1434,10 +1463,10 @@ async function loadComputeLog() {
   if (!box) return;
   const rows = await api("api/compute/log").catch(() => []);
   box.innerHTML = rows.length ? `<div class="scroll-x"><table><tr><th>run</th><th>started</th><th>what</th><th>provider</th>
-      <th>places</th><th>new trips</th><th>Google calls</th><th>status</th></tr>
+      <th>places</th><th>new trips</th><th>Google calls / elements</th><th>status</th></tr>
     ${rows.map((r) => `<tr><td>${r.id}</td><td class="nowrap">${esc((r.started_at || "").slice(0, 16).replace("T", " "))}</td>
-      <td>${esc(r.params.only ? r.params.only.join(" · ") : r.params.from || "full table")}</td><td>${esc(r.source || "")}</td>
-      <td>${r.params.places ?? r.counts.places ?? ""}</td><td>${r.counts.new_trips ?? ""}</td><td>${r.counts.api_calls ?? ""}</td>
+      <td>${esc((r.params.sample ? r.params.sample + ": " : "") + (r.params.only ? r.params.only.join(" · ") : r.params.from || "full table"))}</td><td>${esc(r.source || "")}</td>
+      <td>${r.params.places ?? r.counts.places ?? ""}</td><td>${r.counts.new_trips ?? ""}</td><td>${r.counts.api_calls ?? ""}${r.counts.matrix_elements ? ` / ${r.counts.matrix_elements}` : ""}</td>
       <td>${esc(r.status)}${r.error ? `: ${esc(r.error.slice(0, 80))}` : ""}</td></tr>`).join("")}</table></div>`
     : '<span class="muted">none yet</span>';
 }

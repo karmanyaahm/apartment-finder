@@ -384,32 +384,23 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
           "done" if est == len(routable) else "todo" if not est else "partial",
           f"{est} of {len(routable)} places have straight-line estimates (added after each intake run)",
           [] if est == len(routable) else [f"{COMMUTE} compute"], **_run_info(runs, "commute", "estimate"))
-    from .commute import OsrmLegSource
-
-    osrm_up = OsrmLegSource().up()
-    n_osrm = sum(1 for pk in routable if "osrm" in provs.get(pk, ()))
-    stage("osrm", "Commute routes (self-hosted OSRM: drive without traffic, bike, walk, bike+train; free)",
-          "done" if n_osrm == len(routable) else "blocked" if not osrm_up else "todo" if not n_osrm else "partial",
-          f"{n_osrm} of {len(routable)} places have OSRM routes (added after each intake run while the service is up)"
-          + ("" if osrm_up else "; the OSRM service is not running (systemctl --user status aptf-osrm)"),
-          [] if n_osrm == len(routable) else [f"{COMMUTE} --provider osrm compute"], **_run_info(runs, "commute", "osrm"))
 
     pts = load_points()
     stations, targets = pts.get("caltrain_stations", []), pts.get("commute_targets", [])
-    routed_legs: dict[tuple, str] = {}  # leg -> provider that routed it (Google over OSRM)
+    routed_legs: set[tuple] = set()
     if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'commute_legs'").fetchone():
-        for *ll, prov in conn.execute(
-                "SELECT o_lat, o_lon, d_lat, d_lon, provider FROM commute_legs WHERE mode = 'bike' "
-                "AND provider != 'estimate' AND found = 1 ORDER BY provider = 'google'"):
-            routed_legs[tuple(ll)] = "Google" if prov == "google" else prov.upper()
+        routed_legs = {tuple(r) for r in conn.execute(
+            "SELECT o_lat, o_lon, d_lat, d_lon FROM commute_legs WHERE mode = 'bike' AND provider != 'estimate' "
+            "AND found = 1")}
     anchors = [{"station": s.name, "target": t.name,
-                "routed": routed_legs.get((round(s.lat, 4), round(s.lon, 4), round(t.lat, 4), round(t.lon, 4)), False)}
+                "routed": (round(s.lat, 4), round(s.lon, 4), round(t.lat, 4), round(t.lon, 4)) in routed_legs}
                for s in stations for t in targets]
-    na = sum(bool(a["routed"]) for a in anchors)
-    stage("anchors", "Station -> target bike legs (routed once)",
+    na = sum(a["routed"] for a in anchors)
+    stage("anchors", "Station -> target bike legs (Google, once)",
           "done" if anchors and na == len(anchors) else "todo" if not na else "partial",
           f"{na} of {len(anchors)} station x target legs routed",
-          [] if na == len(anchors) else [f"{COMMUTE} --provider osrm anchors"], anchors=anchors)
+          [] if na == len(anchors) else [f"{COMMUTE} --provider google anchors --dry-run",
+                                          f"{COMMUTE} --provider google anchors"], anchors=anchors)
 
     res = evaluate_all(conn)
     cands: set[str] = set()

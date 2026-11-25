@@ -97,16 +97,40 @@ class Commute:
         self._db.commit()
         return res
 
-    # ---- public API ------------------------------------------------------------
-    def supports(self, mode: str) -> bool:
-        """Whether the source can answer this mode at all (a source without `modes` answers every one).
-        Composed modes need their routed part: bike+train its bike legs, bike+bus a transit route."""
-        modes = getattr(self.source, "modes", None)
-        if modes is None:
-            return True
-        need = {"bike_train_bike": "bike", "bike_bus_bike": "transit"}.get(mode, mode)
-        return need in modes
+    def prefetch(self, legs: list[tuple[LatLon, LatLon, str]], batch: int = 625) -> dict[str, int]:
+        """Fill the cache for many single legs with the source's `matrix` (one request per destination and mode, up
+        to `batch` origins each), so later `leg` / `trip` calls are cache hits. Legs already cached are skipped; an
+        element the source left out stays uncached."""
+        todo: dict[tuple[LatLon, str], set[LatLon]] = {}
+        for origin, dest, mode in legs:
+            o, d = round_ll(origin), round_ll(dest)
+            if o == d or self._db.execute(
+                    "SELECT 1 FROM commute_legs WHERE o_lat=? AND o_lon=? AND d_lat=? AND d_lon=? AND mode=? "
+                    "AND depart=? AND provider=?", (*o, *d, mode, self.depart, self.source.name)).fetchone():
+                continue
+            todo.setdefault((d, mode), set()).add(o)
+        requests = elements = cached = 0
+        for (d, mode), origins in sorted(todo.items()):
+            olist = sorted(origins)
+            for i in range(0, len(olist), batch):
+                chunk = olist[i:i + batch]
+                res = self.source.matrix(chunk, [d], mode, self.depart)
+                requests += 1
+                elements += len(chunk)
+                now = datetime.now(timezone.utc).isoformat()
+                for k, o in enumerate(chunk):
+                    if (k, 0) not in res:
+                        continue
+                    r = res[(k, 0)]
+                    self._db.execute(
+                        "INSERT OR REPLACE INTO commute_legs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (*o, *d, mode, self.depart, self.source.name, 1 if r else 0, r.minutes if r else None,
+                         r.distance_m if r else None, "[]", now))
+                    cached += 1
+                self._db.commit()
+        return {"requests": requests, "elements": elements, "cached": cached}
 
+    # ---- public API ------------------------------------------------------------
     def trip(self, origin: LatLon, dest: LatLon, mode: str) -> Trip:
         if mode in BASIC_MODES:
             r = self.leg(origin, dest, mode)

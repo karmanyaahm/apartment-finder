@@ -17,7 +17,6 @@ from pydantic import BaseModel
 
 from .. import pipeline, settings, verify
 from ..areas import in_walk_zone
-from ..commute import OsrmLegSource
 from ..areas import zones as area_zones
 from ..config import Goal, load_goals, load_point_sets, load_points
 from ..filter import (AMENITY_FLAGS, amenity_flags, place_restriction, best_trips, evaluate_all, evaluate_goal, goal_inputs, nearest_by_set,
@@ -37,6 +36,12 @@ DEFAULT_ATTRIBUTES = ["overall", "status", "gym", "walk_to_caltrain", "living_ro
 LISTING_FIELDS = ["price", "price_basis", "price_month", "price_per_bed", "beds", "baths", "sqft", "kind",
                   "term", "furnished", "private_bath", "available_from", "available_to", "address", "unit",
                   "property_name", "operator", "title", "amenities", "floor_plan"]
+
+def _tv(t: dict[str, Any]) -> dict[str, Any]:
+    """A trip as the list shows it: minutes and provider, plus the range of a KNN trip (filter.knn)."""
+    return {"minutes": t["minutes"], "provider": t["provider"],
+            **({"min": t["min"], "max": t["max"]} if t["provider"] == "knn" else {})}
+
 
 SCRAPE_REFRESH_S = 120  # how stale the dashboard may be while an intake run is writing
 
@@ -213,6 +218,30 @@ class CheckIn(BaseModel):
     note: str | None = None
 
 
+class CellsIn(BaseModel):
+    cells: list[tuple[str, str]]  # (point id or `set:<name>`, mode): the KNN grid's checked cells
+
+
+class SampleIn(BaseModel):
+    # cover: greedy set cover within radius_m; random: pct % of the scope; refine: needs_check + widest KNN ranges
+    method: str = "cover"
+    pct: float = 10
+    radius_m: float = 400
+    scope: str = "list"  # list (place_keys: the places the list shows) | zone | candidates, as ComputeIn
+    place_keys: list[str] | None = None
+    seed: int | None = None
+
+
+class SampleRunIn(BaseModel):
+    plan: dict[str, list[str]]  # "point|mode" -> place keys, from the dry run
+    label: str = ""
+    confirm_elements: int  # the dry run's element count: this run's cap
+    confirm_left: int | None = None  # more than TYPED_CONFIRM_OVER elements: the elements left this month, typed
+
+
+KNN_MODES = ["drive", "bike", "walk", "bike_train_bike"]  # the KNN grid's columns (bike+train: commute targets only)
+
+
 class ComputeIn(BaseModel):
     point: str  # a point id (`commute_targets:Meta HQ`) or `set:<name>`
     mode: str
@@ -356,7 +385,6 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             "point_sets": {k: {"label": v.label or k} for k, v in load_point_sets().items()},
             "attributes": DEFAULT_ATTRIBUTES,
             "google": bool(settings.secret("GOOGLE_MAPS_API_KEY")),
-            "osrm": OsrmLegSource().up(),  # the self-hosted router (drive, bike, walk) answers
             "readonly": redact is not None,  # the redacted view refuses every write: the goal editor is read-only
             "areas": area_zones(),
         }
@@ -379,7 +407,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         # per place, the fastest trip to any point of each set and mode ("walk to the nearest Google bus stop"),
         # for the list's requirement rows; commute targets are in `minutes` one by one
         nearest_all = cached("nearest_sets", lambda: {
-            pk: {f"{s}|{m}": {"minutes": t["minutes"], "provider": t["provider"], "point": t["point_id"].split(":", 1)[1]}
+            pk: {f"{s}|{m}": {**_tv(t), "point": t["point_id"].split(":", 1)[1]}
                  for (s, m), t in nearest_by_set(tr).items() if s != "commute_targets"}
             for pk, tr in trips.items()})
         files = media_files()
@@ -405,7 +433,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 "beds": sorted({x["beds"] for x in rows if x["beds"] is not None}),
                 "baths": sorted({x["baths"] for x in rows if x["baths"] is not None}),
                 "goals": goals,
-                "minutes": {f"{pt}|{m}": {"minutes": t["minutes"], "provider": t["provider"]}
+                "minutes": {f"{pt}|{m}": _tv(t)
                             for (pt, m), t in trips.get(pk, {}).items()},
                 "nearest": nearest_all.get(pk, {}),
                 # amenity flags (filter.amenity_flags over every listing's list here): true / false, null when nothing listed
@@ -476,7 +504,8 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                              if m == mode and pt.startswith(set_name + ":") and v["minutes"] is not None],
                             key=lambda x: x["minutes"])
             nearest[f"{set_name}|{mode}"] = ranked[:3]
-        matrix = {f"{pt}|{m}": {k: v[k] for k in ("id", "minutes", "provider", "legs", "distance_m")}
+        matrix = {f"{pt}|{m}": {k: v[k] for k in ("id", "minutes", "provider", "legs", "distance_m", "min", "max", "neighbors")
+                                if k in v}
                   for (pt, m), v in trips.items() if pt.startswith("commute_targets:")}
         for v in matrix.values():
             v["legs"] = json.loads(v["legs"]) if isinstance(v["legs"], str) else v["legs"]
@@ -854,19 +883,17 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
 
     @app.post("/api/trips/{place_key}")
     def route_place(place_key: str, provider: str | None = None) -> dict[str, Any]:
-        from ..trips import PROVIDERS, SpendCapReached, build_commute, compute_for_place, make_source
+        from ..trips import SpendCapReached, build_commute, compute_for_place, make_source
 
         rows = q("SELECT place_key, lat, lon FROM places WHERE place_key = ?", (place_key,))
         if not rows:
             raise HTTPException(404, "no such place")
         # never a silent fallback to estimates: without a key, Google routing is an error the button shows
         provider = provider or "google"
-        if provider not in PROVIDERS:
-            raise HTTPException(400, f"provider must be one of {', '.join(PROVIDERS)}")
+        if provider not in ("google", "estimate"):
+            raise HTTPException(400, "provider must be google or estimate")
         if provider == "google" and not settings.secret("GOOGLE_MAPS_API_KEY"):
             raise HTTPException(400, "GOOGLE_MAPS_API_KEY is not set on the server; nothing was routed")
-        if provider == "osrm" and not OsrmLegSource().up():
-            raise HTTPException(400, "the OSRM service is not running on the server; nothing was routed")
         source = make_source(provider, max_calls=60)
         commute = build_commute(db_path, source)
         try:
@@ -906,10 +933,8 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         return sorted(pk for pk in out if pk in located)
 
     def _check_spec(body: ComputeIn) -> tuple[str, str]:
-        if body.provider not in ("estimate", "osrm", "google"):
-            raise HTTPException(400, "provider must be estimate, osrm or google")
-        if body.provider == "osrm" and not OsrmLegSource().up():
-            raise HTTPException(400, "the OSRM service is not running on the server")
+        if body.provider not in ("estimate", "google"):
+            raise HTTPException(400, "provider must be estimate or google")
         if body.mode not in MODES:
             raise HTTPException(400, f"unknown mode {body.mode!r}")
         sets = load_point_sets()
@@ -928,11 +953,11 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         keys = _compute_places(body)
         if not keys:
             raise HTTPException(400, "no located places in that scope")
-        if body.provider in ("estimate", "osrm"):  # free: no calls to count
+        if body.provider == "estimate":  # free: no calls to count
             with lock:
                 use = google_usage(conn)
             return {"places": len(keys), "would_call": 0, "est_cost_usd": 0.0, "over_caps": [],
-                    "google_usage_now": use, "provider": body.provider}
+                    "google_usage_now": use, "provider": "estimate"}
         res = dry_run(db_path, "google", keys, on_demand=True, only=only)
         cfg = load_point_sets().get(only[0][4:] if only[0].startswith("set:") else only[0].split(":", 1)[0])
         if cfg is not None and not cfg.paid:
@@ -1021,6 +1046,119 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             r["params"] = json.loads(r["params"] or "{}")
             r["counts"] = json.loads(r["counts"] or "{}")
         return rows
+
+    # ------------------------------------------------------------------ KNN cells and Google sampling (Pipeline panel)
+    # The checked cells (destination x mode) decide which pairs get KNN ranges (filter.knn) and which pairs a sample
+    # routes; they are an annotations row like a goal edit (latest wins), shared by everyone.
+    @app.get("/api/knn/cells")
+    def knn_cells_get() -> dict[str, Any]:
+        from ..filter.knn import RADIUS_M, cells
+
+        sets = load_point_sets()
+        rows = [{"id": p.id, "label": p.name, "kind": "target", "paid": True}
+                for p in load_points().get("commute_targets", [])]
+        rows += [{"id": f"set:{k}", "label": v.label or k, "kind": "set", "paid": v.paid}
+                 for k, v in sets.items() if k != "commute_targets"]
+        return {"cells": [list(c) for c in cells(conn)], "rows": rows, "modes": KNN_MODES, "radius_m": RADIUS_M}
+
+    @app.post("/api/knn/cells")
+    def knn_cells_set(body: CellsIn) -> dict[str, Any]:
+        from ..filter.knn import CELLS_KEY
+
+        ids = {r["id"] for r in knn_cells_get()["rows"]}
+        for p, m in body.cells:
+            if p not in ids or m not in KNN_MODES or (m == "bike_train_bike" and p.startswith("set:")):
+                raise HTTPException(400, f"no such cell {p} x {m}")
+        with lock:
+            append_annotation(conn, AUTHOR, *CELLS_KEY, comment=json.dumps(sorted(set(map(tuple, body.cells)))))
+            memo.clear()
+        return {"cells": sorted(set(map(tuple, body.cells)))}
+
+    @app.post("/api/sample/dry_run")
+    def sample_dry_run(body: SampleIn) -> dict[str, Any]:
+        """A sampling plan for the checked cells over the scope, with places, uncached Route Matrix elements and
+        coverage (places with a routed place within the KNN radius) before -> after per cell. Nothing is routed."""
+        from .. import sampling
+        from ..filter.knn import cells
+        from ..trips import google_usage
+
+        pairs = [c for c in cells(conn) if load_point_sets().get(c[0][4:] if c[0].startswith("set:")
+                                                                     else c[0].split(":", 1)[0]) is not None]
+        if not pairs:
+            raise HTTPException(400, "check at least one cell (destination x mode) first")
+        skipped = [c for c in pairs if c[0].startswith("set:") and not load_point_sets()[c[0][4:]].paid]
+        pairs = [c for c in pairs if c not in skipped]
+        keys = _compute_places(body)
+        if not keys:
+            raise HTTPException(400, "no located places in that scope")
+        with lock:
+            trips = cached("best_trips", lambda: best_trips(conn))
+            if body.method == "random":
+                plan = sampling.random_plan(trips, pairs, keys, body.pct, body.seed)
+                label = f"random {body.pct:g}%"
+            elif body.method == "cover":
+                plan = sampling.cover_plan(trips, pairs, keys, sampling.located(conn), body.radius_m)
+                label = f"cover within {body.radius_m:g} m"
+            elif body.method == "refine":
+                goals_of = sampling.walk_zone_candidates(conn) if body.scope == "candidates" else None
+                plan = sampling.refine_plan(trips, pairs, keys, goalstore.effective_goals(conn), goals_of)
+                label = "refine"
+            else:
+                raise HTTPException(400, "method must be cover, random or refine")
+            summ = sampling.summary(conn, db_path, plan, keys, trips)
+            use = google_usage(conn)
+        left = use["matrix_cap"] - use["matrix_elements"]
+        return {**summ, "label": label, "plan": {"|".join(p): v for p, v in plan.items()}, "usage": use,
+                "left": left, "typed": summ["elements"] > TYPED_CONFIRM_OVER and left < 5000,
+                "skipped": [f"{p} x {m}: paid = false in point_sets.toml" for p, m in skipped]}
+
+    @app.post("/api/sample/run")
+    def sample_run(body: SampleRunIn) -> dict[str, Any]:
+        from ..store import begin_write
+        from ..trips import google_usage, route_plan
+
+        if not settings.secret("GOOGLE_MAPS_API_KEY"):
+            raise HTTPException(400, "GOOGLE_MAPS_API_KEY is not set")
+        if body.confirm_elements < 1:
+            raise HTTPException(400, "nothing to route")
+        with lock:
+            u = google_usage(conn)
+        left = u["matrix_cap"] - u["matrix_elements"]
+        if body.confirm_elements > TYPED_CONFIRM_OVER and left < 5000 and body.confirm_left != left:
+            raise HTTPException(400, f"more than {TYPED_CONFIRM_OVER} Route Matrix elements: type the elements left "
+                                     f"this month ({left}) to confirm")
+        plan = {tuple(k.split("|", 1)): v for k, v in body.plan.items() if v}
+        n = sum(len(v) for v in plan.values())
+        with lock:
+            if job["state"] == "running":
+                raise HTTPException(409, "a computation is already running")
+            job.clear()
+            job.update(state="running", spec={"point": ", ".join(" x ".join(p) for p in plan), "mode": body.label,
+                                              "provider": "google matrix"},
+                       places=n, done=0, new_trips=0, started=time.time())
+
+        def work() -> None:
+            wconn = connect(db_path)
+            try:
+                begin_write(wconn, on_wait=lambda: job.update(note="waiting for the database (another job is writing)"))
+                job.pop("note", None)
+                res = route_plan(wconn, db_path, plan, body.label, body.confirm_elements,
+                                 progress=lambda d, t: job.update(done=d, new_trips=t))
+                final = {"state": "error" if res["error"] else "done",
+                         "result": {"places": n, "places_done": n if not res["error"] else job.get("done", 0),
+                                    "new_trips": res["new_trips"], "api_calls": res["api_calls"],
+                                    "matrix_elements": res["matrix_elements"], "error": res["error"]}}
+            except BaseException as e:  # noqa: BLE001  (SystemExit from a missing key included)
+                final = {"state": "error", "result": {"error": str(e) or repr(e)}}
+            finally:
+                wconn.close()
+            with lock:
+                memo.clear()
+                job.pop("note", None)
+                job.update(final, finished=time.time())
+
+        threading.Thread(target=work, daemon=True).start()
+        return {"started": True, "places": n}
 
     # ------------------------------------------------------------------ static
     settings.MEDIA_DIR.mkdir(parents=True, exist_ok=True)
