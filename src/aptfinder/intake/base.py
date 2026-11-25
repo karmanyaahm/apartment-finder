@@ -281,7 +281,7 @@ def coverage(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
                           "AND status = 'ok' ORDER BY id"):
         params = json.loads(r["params"])
         counts = json.loads(r["counts"] or "{}")
-        if params.get("reparse_of") or r["source"] not in intake.ADAPTERS:
+        if (params.get("reparse_of") and "areas" not in params) or r["source"] not in intake.ADAPTERS:
             continue
         kind = intake.ADAPTERS[r["source"]].area_kind
         base = {"run_id": r["id"], "date": r["started_at"][:10]}
@@ -312,14 +312,27 @@ def done(cov: dict, source: str, area_id: str) -> bool:
     return bool(c) and c["state"] in ("complete", "empty")
 
 
-def reparse(conn: sqlite3.Connection, adapter: Adapter, raw_file: str) -> dict[str, Any]:
-    """Parse a saved raw file again as a new (targeted) run. Costs nothing; appends observations."""
+def reparse(conn: sqlite3.Connection, adapter: Adapter, raw_file: str, covers: str | None = None) -> dict[str, Any]:
+    """Parse a saved raw file again as a new (targeted) run. Costs nothing; appends observations.
+
+    `covers` ('complete' or 'partial') credits the file's areas in the coverage ledger: for a scrape made outside
+    this database (a trial on a copy) whose areas were never recorded here. Without it a reparse is never coverage
+    (the original run already is)."""
     from pathlib import Path
 
     blob = json.loads(Path(raw_file).read_text())
     cfg = load_sources().get(adapter.name, {})  # parsers read little config; a reparse must not need the section
-    run_id = start_run(conn, "intake", adapter.name, {"reparse_of": raw_file, "scope": "targeted",
-                                                     "actor": blob.get("actor"), "cities": [blob.get("city")]})
+    params: dict[str, Any] = {"reparse_of": raw_file, "scope": "targeted", "actor": blob.get("actor"),
+                              "cities": [blob.get("city")]}
+    area_ids: list[str] = []
+    if covers:
+        _, areas = load_areas()
+        named = set(blob.get("areas") or [blob.get("city")])
+        area_ids = [a.id for a in areas if a.kind == adapter.area_kind and (a.id in named or a.city in named)]
+        if not area_ids:
+            raise ValueError(f"{raw_file} names no {adapter.area_kind} area of config/areas.toml: {sorted(named)}")
+        params["areas"] = area_ids
+    run_id = start_run(conn, "intake", adapter.name, params)
     counts = {"items": len(blob["items"]), "observations": 0, "unparsed": 0, "skipped": 0}
     seen: set[str] = set()
     for item in blob["items"]:
@@ -339,6 +352,8 @@ def reparse(conn: sqlite3.Connection, adapter: Adapter, raw_file: str) -> dict[s
                                query_checkout=q.query_checkout, raw_path=raw_file, commit=False)
             counts["observations"] += 1
     conn.commit()
+    if covers:
+        counts["areas"] = {aid: {"state": covers, "items": counts["items"]} for aid in area_ids}
     finish_run(conn, run_id, "ok", counts, est_cost=0.0)
     identity.run(conn)
     return {"run_id": run_id, **counts}

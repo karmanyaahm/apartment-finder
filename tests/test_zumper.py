@@ -94,3 +94,16 @@ def test_reparse_and_samples_are_reproducible(conn, tmp_path):
     assert a == samples(conn, "zumper", 2, seed=7) and len(a) == 2
     assert all(s["open"].startswith("https://www.zumper.com/") for s in a)
     assert {"price", "beds", "available_from", "extra.website"} <= set(a[0]["fields"])
+
+
+def test_reparse_covers_credits_the_trial_areas(conn, tmp_path):
+    from aptfinder.intake.base import coverage
+
+    raw = tmp_path / "trial_zumper_mountain_view.json"
+    raw.write_text(json.dumps({"actor": "scrapemind/zumperCom-Scraper", "areas": ["Mountain View"],
+                               "items": [ZUMPER_BUILDING]}))
+    reparse(conn, ADAPTERS["zumper"], str(raw))
+    assert not [k for k in coverage(conn) if k[0] == "zumper"]  # a plain reparse is never coverage
+    reparse(conn, ADAPTERS["zumper"], str(raw), covers="partial")
+    cov = {k: v["state"] for k, v in coverage(conn).items() if k[0] == "zumper"}
+    assert len(cov) == 1 and list(cov.values()) == ["partial"]

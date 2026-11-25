@@ -3,7 +3,7 @@
   aptf-intake coverage                         # what's done and what's left, per chunk, area and source
   aptf-intake run zillow --chunk palo_alto     # every not-yet-covered area of that chunk, one batched run
   aptf-intake run zillow --area 94301 --area 94025 [--reload]
-  aptf-intake reparse <source> <raw file>      # re-ingest saved output with the current parser (free)
+  aptf-intake reparse <source> <raw file> [--covers complete|partial]   # re-ingest saved output (free)
   aptf-intake discover-sites --chunk mountain_view [--limit 5] [--dry-run]   # find community websites
 """
 
@@ -73,6 +73,8 @@ def main(argv: list[str] | None = None) -> None:
     rp = sub.add_parser("reparse", help="re-ingest a saved raw file with the current parser (no new scrape)")
     rp.add_argument("source", choices=sorted(ADAPTERS))
     rp.add_argument("raw_file")
+    rp.add_argument("--covers", choices=["complete", "partial"],
+                    help="credit the file's areas in the coverage ledger (a trial scraped on another copy)")
     ds = sub.add_parser("discover-sites", help="find community websites with a local headless Claude (web search "
                                                "only), then fetch and address-check them through Apify")
     ds.add_argument("--chunk", action="append", required=True)
@@ -113,7 +115,7 @@ def main(argv: list[str] | None = None) -> None:
         print_coverage(conn)
         return
     if args.cmd == "reparse":
-        print(json.dumps(reparse(conn, ADAPTERS[args.source], args.raw_file), indent=1))
+        print(json.dumps(reparse(conn, ADAPTERS[args.source], args.raw_file, args.covers), indent=1))
         return
 
     if args.cmd == "render":
