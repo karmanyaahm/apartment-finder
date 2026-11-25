@@ -166,6 +166,7 @@ def amenity_flags(amenities: list[str] | None) -> dict[str, bool | None]:
 
 
 COMMUTE_RULES = {"commute_any", "near"}
+ROUTING_RULES = COMMUTE_RULES | {"net_commute"}  # rules a paid route can still change
 
 
 def routing_candidates(conn: sqlite3.Connection, cfg: GoalsConfig | None = None,
@@ -180,7 +181,7 @@ def routing_candidates(conn: sqlite3.Connection, cfg: GoalsConfig | None = None,
         for r in listings.values():
             pk = r.get("place_key")
             if pk and r.get("decides", True) and not any(
-                    s == FAIL and t not in COMMUTE_RULES for s, _, t in r["reasons"]):
+                    s == FAIL and t not in ROUTING_RULES for s, _, t in r["reasons"]):
                 out.setdefault(pk, set()).add(gid)
     return out
 

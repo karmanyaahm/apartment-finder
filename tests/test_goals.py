@@ -209,3 +209,17 @@ def test_places_carry_the_goals_commute_terms(client):
     prev = c.post("/api/goals/preview", json=body).json()["places"]
     assert all(prev[p["place_key"]]["commute"] == p["goals"]["roommates"]["commute"] for p in places)
     assert {p["goals"]["roommates"]["status"] for p in places} <= {"pass", "needs_check", "fail"}
+
+
+def test_a_net_commute_fail_still_nominates_for_routing(client):
+    from aptfinder.filter import routing_candidates
+    c, db = client
+    body = {"label": "net only", "rules": [
+        {"type": "commute_any", "target": "commute_targets:Downtown Palo Alto", "options": [{"mode": "bike", "max": 60}]},
+        {"type": "net_commute", "agg": "total", "max": 0.001}], "nice": []}
+    assert c.post("/api/goals", json=body).status_code == 200
+    conn = connect(db)
+    res = evaluate_all(conn)
+    assert any(r["status"] == "fail" for r in res["places"]["net_only"].values())
+    cands = routing_candidates(conn, res=res)
+    assert all("net_only" in cands.get(pk, set()) for pk in res["places"]["net_only"])

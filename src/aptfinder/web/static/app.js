@@ -265,9 +265,9 @@ function netFact(p, fails) {
   const mk = markFor(fails, (x) => x.f === "net_commute");
   const trips = `${n.n} trip${n.n > 1 ? "s" : ""}${n.est ? ", est." : ""}`;
   if (n.v == null) return `<span${mk || ' data-ff="needs_check"'}>net commute: no times yet (${trips})</span>`;
-  const main = agg === "spread" ? `spread ±<b>${num(n.v)}</b> min` : `${agg} <b>${num(n.v)}</b> min${n.known > 1 ? ` · spread ±${num(n.sd)}` : ""}`;
   const unk = n.known < n.n ? (agg === "total" ? ` + ? (${n.n - n.known} unknown)` : ` of ${n.known} known (${n.n - n.known} unknown)`) : "";
-  return `<span${mk}>net commute ${main}${unk} (${trips})</span>`;
+  const main = agg === "spread" ? `spread ±<b>${num(n.v)}</b> min${unk}` : `${agg} <b>${num(n.v)}</b> min${unk}${n.known > 1 ? ` · spread ±${num(n.sd)}` : ""}`;
+  return `<span${mk}>net commute ${main} (${trips})</span>`;
 }
 
 /* ---------------------------------------------------------------- goals: the filter panel edits the selected goal */
@@ -394,7 +394,8 @@ function renderGoalEditor() {
     </details>${imp}`;
     $("#g-details").addEventListener("toggle", (e) => { S.editorOpen = e.target.open; });
     if (ro) $$("#goal-editor input, #goal-editor select").forEach((el) => { el.disabled = true; });
-    $("#g-label").addEventListener("change", (e) => { g.label = e.target.value; draftChanged(); });
+    // no re-render on a typed change: it fires on blur, e.g. while the Save button is being clicked
+    $("#g-label").addEventListener("change", (e) => { g.label = e.target.value; draftChanged(false); });
     $$("#goal-editor .rule").forEach(wireRule);
     $$("#goal-editor .g-add").forEach((s) => s.addEventListener("change", () => {
       if (s.value === "") return;
@@ -467,6 +468,7 @@ function refreshEditorState() {
   const m = $("#g-msg");
   if (m) { m.textContent = S.previewMsg.replace(/^!/, ""); m.className = `small ${S.previewMsg.startsWith("!") ? "err" : "muted"}`; }
   const sum = $("#g-details summary .small");
+  if (S.draft && $("#g-details summary b")) $("#g-details summary b").textContent = S.draft.label;
   if (sum && S.draft) sum.textContent = `${S.draft.rules.length} must, ${S.draft.nice.length} nice${dirty ? " · unsaved draft" : ""}`;
 }
 // every place's result for the draft replaces its saved result for that goal (p.saved keeps the server's)
@@ -596,7 +598,11 @@ async function importLegacy() {
   const base = S.draft;
   const label = prompt("Name of the goal made from the old saved filters", base ? `${base.label} + saved filters` : "Saved filters");
   if (!label) return;
-  await createGoal({ id: "saved_filters", label, rules: [...(base?.rules || []), ...S.legacyFilters], nice: base?.nice || [] });
+  // a $/bed or beds limit the goal already has at least as strictly is not added twice
+  const covered = (r) => (base?.rules || []).some((b) => b.type === r.type && b.field === r.field && r.field
+    && (r.type === "max" ? b.value <= r.value : b.value >= r.value));
+  const rules = [...(base?.rules || []), ...S.legacyFilters.filter((r) => !covered(r))];
+  await createGoal({ id: "saved_filters", label, rules, nice: base?.nice || [] });
   lsSet(OLD_FILTERS_KEY, null);
 }
 
