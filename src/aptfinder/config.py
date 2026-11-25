@@ -273,7 +273,9 @@ def load_sites(config_dir: Path | None = None, *, duplicates: bool = False) -> d
         places = {s.get("place_key") for s in out.values()} - {None}
         for s in latest_found(raw):
             # a URL you added in Verify is kept beside the place's other sites (a place can have several)
-            same_place = s.get("place_key") in places and not str(s.get("found_by", "")).startswith("you")
+            # ... and a page find-plans read priced plans on (intake/findplans.py) is kept beside a hand entry too
+            same_place = s.get("place_key") in places and not str(s.get("found_by", "")).startswith(("you",
+                                                                                                    "find-plans"))
             if s["id"] in failed or s["id"] in out or same_place:
                 continue
             m = moved.get(s["id"])  # a redirect link that landed on the building's page: use where it landed

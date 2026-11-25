@@ -1039,7 +1039,7 @@ async function openPlace(pk) {
       <td>${esc(pl.name || "")}${pl.offer !== "lease" ? `<br><span class="chip">${esc(pl.offer)}</span>` : ""}</td>
       <td>${pl.beds === 0 ? "studio" : esc(pl.beds ?? "?")} / ${esc(pl.baths ?? "?")}${bathsMark(pl.baths_from)}</td>
       <td>${rng(pl.sqft, (v) => num(v))}</td>
-      <td>${rng(pl.price_month, money)}</td>
+      <td${pl.total_month ? ` title="base rent; with required monthly fees ${rng(pl.total_month, money)}"` : ""}>${rng(pl.price_month, money)}${pl.total_month ? '<sup class="muted">+fees</sup>' : ""}</td>
       <td>${ppl ? rng(pl.price_month && pl.price_month.map((v) => v / ppl), money) : pl.price_per_bed != null ? money(pl.price_per_bed) : ""}</td>
       <td>${pl.plan_only ? '<span class="muted" title="Listed in the community\'s own plan data, with no price: no unit in this plan is known to be offered. Not counted for goals.">plan exists, no unit offered</span>'
         : pl.n_units ? `${pl.n_units} unit${pl.n_units > 1 ? "s" : ""}` : `${pl.n_active} listing${pl.n_active === 1 ? "" : "s"}`}</td>

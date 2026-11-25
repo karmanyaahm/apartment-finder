@@ -120,6 +120,10 @@ def group_plans(listings: list[dict[str, Any]], files: dict[str, dict[str, Any]]
             "baths_from": next((x.get("baths_from") for x in f if x.get("baths") is not None), None),
             "sqft": [min(sqft), max(sqft)] if sqft else None,
             "price_month": [min(prices), max(prices)] if prices else None,
+            # the own site's fee-inclusive monthly total, when it shows one beside the base rent (the price)
+            "total_month": (lambda t: [min(t), max(t)] if t else None)(
+                [((l.get("data") or {}).get("extra") or {}).get("total_monthly") for l in direct
+                 if ((l.get("data") or {}).get("extra") or {}).get("total_monthly")]),
             "price_per_bed": (min(prices) / max(f[0]["beds"], 1)) if prices and f[0].get("beds") is not None else None,
             "n_listings": len(ls), "n_active": len(active),
             "n_units": len({x.get("unit") for x in fb if x.get("unit")}),

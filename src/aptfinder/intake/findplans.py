@@ -373,25 +373,31 @@ def _read_page(name: str, page: dict[str, Any], model: str = "haiku") -> tuple[d
 class Pager:
     """Renders pages through Apify in rounds, caching by (URL, click); tracks the real charge and the cap."""
 
-    def __init__(self, max_usd: float):
-        self.max_usd, self.spent, self.cache, self.runs = max_usd, 0.0, {}, []
+    CHUNK = 40  # pages per actor run (a 117-page run would outlast the poll timeout)
+
+    def __init__(self, max_usd: float, shots: bool = False):
+        self.max_usd, self.spent, self.cache, self.runs, self.shots = max_usd, 0.0, {}, [], shots
 
     def fetch(self, reqs: list[tuple[str, str | None]]) -> None:
         todo = [r for r in dict.fromkeys(reqs) if r not in self.cache]
+        for i in range(0, len(todo), self.CHUNK):
+            self._fetch(todo[i:i + self.CHUNK])
+
+    def _fetch(self, todo: list[tuple[str, str | None]]) -> None:
         if not todo:
             return
         est = USD_PER_PAGE * len(todo)
         if self.spent + est > self.max_usd:
             raise Blocker(f"pilot Apify cap: spent ${self.spent:.3f} + estimated ${est:.3f} > ${self.max_usd:.2f}")
         keys = {f"r{i}": r for i, r in enumerate(todo)}
-        res = run_actor(ACTOR, {"startUrls": [{"url": u, "userData": {"key": k, "click": c, "shot": True}}
+        res = run_actor(ACTOR, {"startUrls": [{"url": u, "userData": {"key": k, "click": c, "shot": self.shots}}
                                               for k, (u, c) in keys.items()],
                                 "pageFunction": AGENT_PAGE, **browser_proxy(False),
                                 "maxRequestsPerCrawl": len(todo), "maxRequestRetries": 1, "headless": True,
                                 "pageLoadTimeoutSecs": 90, "pageFunctionTimeoutSecs": 150,
                                 "waitUntil": "domcontentloaded"},
                         max_items=2 * len(todo), max_charge_usd=max(0.05, self.max_usd - self.spent),
-                        timeout_s=1500, memory_mb=2048, clean=False)
+                        timeout_s=2400, memory_mb=4096, clean=False)
         rec = run_record(res)
         self.runs.append(rec)
         self.spent += res.usage_usd or 0.0
@@ -413,14 +419,17 @@ def _priced(res: dict[str, Any] | None) -> bool:
 
 
 def pilot(targets: list[dict[str, Any]], *, max_apify_usd: float = 0.6, max_claude_usd: float = 2.0,
-          model: str = "haiku", search: bool = True) -> dict[str, Any]:
+          model: str = "haiku", search: str = "both", shots: bool = False, conn=None) -> dict[str, Any]:
     """targets: [{key, name, city, start (known own-site URL or None), own_hosts}]. Returns the per-site report;
     writes data/raw/findplans/pilot<ts>.json with every page's text, links, hops and readings (no screenshots)."""
-    pager, claude = Pager(max_apify_usd), 0.0
+    # search: 'both' (Claude and Google), 'google', or 'none' (the click agent from the known site). shots: take
+    # screenshots for the vision fallback (off by default: 0 right and 2 wrong readings in the pilots). conn: store
+    # the priced readings (`store`)
+    pager, claude = Pager(max_apify_usd, shots), 0.0
     out: dict[str, dict[str, Any]] = {t["key"]: {"name": t["name"], "start": t.get("start"), "search": {},
                                                  "google": {}, "click": {"hops": []}} for t in targets}
     # 1. search (no Apify); `search=False`: the click agent from the known site only
-    for t in (targets if search else []):
+    for t in (targets if search == "both" else []):
         q = f"{t['name']} {t['city']} floor plans"
         try:
             results, c = web_search(q, model)
@@ -433,7 +442,7 @@ def pilot(targets: list[dict[str, Any]], *, max_apify_usd: float = 0.6, max_clau
     # 1b. the same queries through Google (Apify), one run for all
     queries = {t["key"]: f"{t['name']} {t['city']} floor plans" for t in targets}
     try:
-        if not search:
+        if search == "none":
             raise Blocker("search off (--no-search)")
         g, grec = google_search(list(queries.values()))
         pager.runs.append(grec)
@@ -560,7 +569,9 @@ def pilot(targets: list[dict[str, Any]], *, max_apify_usd: float = 0.6, max_clau
              for (u, c), p in pager.cache.items()]
     path.write_text(json.dumps({"actor": ACTOR, "apify_runs": pager.runs, "apify_usd": apify, "claude_usd": claude,
                                 "sites": out, "pages": pages}, default=str))
+    stored = store(conn, targets, out, str(path), model, pager.runs, apify, claude) if conn is not None else None
     return {"raw": str(path), "apify_usd": apify, "claude_usd": round(claude, 4), "pages": len(pager.cache),
+            "stored": stored,
             "sites": out, "found": {k: {a: _priced(o[a].get("read")) for a in ("search", "google", "click")}
                                     for k, o in out.items()}}
 
@@ -571,7 +582,7 @@ START_RANK = {"no_plans": 1, "failed": 1, "pending": 2, "rejected": 3}
 
 
 def targets(conn, *, places: list[str] | None = None, names: list[str] | None = None,
-            limit: int | None = None) -> list[dict[str, Any]]:
+            limit: int | None = None, reasons: list[str] | None = None) -> list[dict[str, Any]]:
     """Items of Verify's own-site list as pilot targets: the start page is a URL you added, else a site that
     loaded, else one not fetched yet, else one whose address check failed (never a listing's short-link host or a
     form); own hosts are the hosts of every URL known for it except rejected ones."""
@@ -580,6 +591,8 @@ def targets(conn, *, places: list[str] | None = None, names: list[str] | None = 
     out = []
     for i in own_site_queue(conn):
         if (places or names) and i["place_key"] not in (places or []) and i["name"] not in (names or []):
+            continue
+        if reasons and i["reason"] not in reasons:
             continue
         host = lambda u: _host(u["url"])  # noqa: E731
         urls = [u for u in i["urls"] if u["status"] != "form" and not is_aggregator(u["url"])
@@ -593,3 +606,109 @@ def targets(conn, *, places: list[str] | None = None, names: list[str] | None = 
         if limit and len(out) >= limit:
             break
     return out
+
+
+ARM_ORDER = ("click", "google", "search")
+
+
+def best_reading(o: dict[str, Any]) -> tuple[str, dict[str, Any], str] | None:
+    """(arm, reading, page URL) of the first arm whose reading has a priced plan: the click agent, then Google's
+    pick, then Claude's."""
+    for arm in ARM_ORDER:
+        r = (o.get(arm) or {}).get("read")
+        if _priced(r) and (o[arm].get("final_url")):
+            return arm, r, o[arm]["final_url"].split("#")[0]
+    return None
+
+
+def store(conn, targets: list[dict[str, Any]], out: dict[str, Any], raw_path: str, model: str,
+          apify_runs: list[dict[str, Any]], apify_usd: float, claude_usd: float) -> dict[str, Any]:
+    """Store each building's priced reading the way render does: one intake run (source `direct`, `params.render`,
+    reader 'find_plans'), plan rows `<site>:r:<plan or unit>` with area `<site>#render` (a complete area retires
+    that site's older render rows), the page's restriction and fees in extra. The site is the one in the site
+    list whose URL is the page read (`config.site_key`), else a new `[[found]]` site with that page's URL
+    (found_by 'find-plans', with an ok `[[check]]`), so the next render reads that page directly; a manager's
+    homepage or a missing site is replaced that way, and nothing in the site records is edited. Buildings with
+    no priced reading are not touched."""
+    from datetime import date, datetime, timezone
+
+    from .. import identity
+    from ..config import load_sites, site_key
+    from ..store import append_observation, finish_run, start_run
+    from ..store.models import ObservationData
+    from .discover import _records, _slug, append, platform_of
+    from .lease import _avail
+    from .render import _slug as plan_slug
+    from .render import fee_extra
+
+    tmap = {t["key"]: t for t in targets}
+    picks = {k: b for k, o in out.items() if (b := best_reading(o))}
+    if not picks:
+        return {"sites": {}, "observations": 0}
+    sites = load_sites(duplicates=True)
+    by_key = {site_key(s["url"]): sid for sid, s in sites.items()}
+    rec = _records()
+    taken = set(sites) | {r["id"] for r in rec.get("found", [])}
+    for r in rec.get("found", []):  # a found site the list drops (rejected before) is still that URL's id
+        by_key.setdefault(site_key(r["url"]), r["id"])
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    new_found, new_checks, site_of = [], [], {}
+    for k, (arm, r, url) in picks.items():
+        t = tmap[k]
+        sid = by_key.get(site_key(url))
+        if not sid or (sid in sites and sites[sid].get("place_key") not in (None, k)):
+            sid = _slug(t["name"] + " plans", taken)
+            taken.add(sid)
+            by_key[site_key(url)] = sid
+            new_found.append({"id": sid, "place_key": k, "name": t["name"], "address": t.get("address"),
+                              "found_at": now, "platform": platform_of(url), "url": url, "found_by": "find-plans",
+                              "note": f"floor plans read here by find-plans ({arm})"})
+        if sid not in sites or sites[sid].get("verify_address"):
+            new_checks.append({"id": sid, "ok": True, "at": now, "outcome": "ok",
+                               "reason": f"find-plans read priced plans on this page ({arm})"})
+        site_of[k] = sid
+    run = start_run(conn, "intake", "direct", {"areas": [f"{sid}#render" for sid in site_of.values()],
+                                               "render": True, "scope": "partial", "actor": ACTOR, "model": model,
+                                               "reader": "find_plans", "raw": raw_path})
+    for c in new_checks:
+        c["run_id"] = run
+    if new_found:
+        append("found", new_found)
+    if new_checks:
+        append("check", new_checks)
+    per_area, report, n_obs = {}, {}, 0
+    try:
+        for k, sid in site_of.items():
+            arm, r, url = picks[k]
+            t = tmap[k]
+            prx = r.get("restriction")
+            plans = [p for p in r["plans"] if p.get("price")]
+            for p in plans:
+                avail = _avail(p["available"], date.today()) if p.get("available") else None
+                data = ObservationData(address=t.get("address"), kind="apartment", term="long",
+                                       property_name=t["name"], floor_plan=p["name"], unit=p.get("unit"),
+                                       beds=p.get("beds"), baths=p.get("baths"), sqft=p.get("sqft"),
+                                       available_from=avail, furnished=p.get("furnished"),
+                                       extra={"site": sid, "platform": "render", "area": f"{sid}#render",
+                                              "reader": "find_plans", "arm": arm,
+                                              "available_label": p.get("available"), "model": model,
+                                              **fee_extra(p),
+                                              **({"from_screenshot": True} if p.get("from_screenshot") else {}),
+                                              **({"page_restriction": prx} if prx else {})})
+                append_observation(conn, run, "direct", f"{sid}:r:{plan_slug(p.get('unit') or p['name'])}", data,
+                                   url=url, price=p["price"], price_basis="month", raw_path=raw_path, commit=False)
+                n_obs += 1
+            conn.commit()
+            per_area[f"{sid}#render"] = {"state": "complete", "items": len(plans), "outcome": "ok",
+                                         "http_status": None, "error": None, "reader": "find_plans", "arm": arm,
+                                         "pages": len(out[k]["click"].get("hops") or [])}
+            report[k] = {"site": sid, "url": url, "arm": arm, "plans": len(plans)}
+    except Exception as e:
+        conn.commit()
+        finish_run(conn, run, "error", {"areas": per_area, "observations": n_obs}, error=repr(e)[:500])
+        raise
+    finish_run(conn, run, "ok", {"areas": per_area, "observations": n_obs, "apify_usd": apify_usd,
+                                 "apify_runs": apify_runs, "claude_usd": round(claude_usd, 4)},
+               est_cost=round(apify_usd + claude_usd, 4))
+    identity.run(conn)
+    return {"run_id": run, "observations": n_obs, "new_sites": [f["id"] for f in new_found], "sites": report}

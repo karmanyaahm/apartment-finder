@@ -182,7 +182,11 @@ SCHEMA = {"type": "object", "required": ["plans", "restriction"], "properties": 
         "beds": {"type": ["number", "null"], "description": "0 for a studio"},
         "baths": {"type": ["number", "null"]},
         "sqft": {"type": ["number", "null"]},
-        "price": {"type": ["number", "null"], "description": "monthly rent, the lowest shown ('starting at')"},
+        "price": {"type": ["number", "null"], "description": "monthly BASE rent, the lowest shown ('starting at'); "
+                  "when the page shows both a base rent and a monthly total with required fees, the base rent"},
+        "total_monthly": {"type": ["number", "null"], "description": "the monthly total with required fees, only "
+                          "when the page shows one beside the base rent (e.g. '$3,857.80 /mo*' next to '$3,851 Base "
+                          "Rent')"},
         "available": {**_S, "description": "as written, e.g. 'Available Now', 'Available Dec 6'"},
         "furnished": {"type": ["boolean", "null"]},
     }}}}}
@@ -224,6 +228,9 @@ def check_plans(answer: list[dict[str, Any]], text: str) -> list[dict[str, Any]]
             q["available"] = p["available"]
         if isinstance(p.get("furnished"), bool):
             q["furnished"] = p["furnished"]
+        tm = p.get("total_monthly")  # the fee-inclusive total, kept beside the base rent (user, 2026-11-25)
+        if isinstance(tm, (int, float)) and 300 <= tm <= 50000 and _num_on_page(tm, text) and tm != q.get("price"):
+            q["total_monthly"] = float(tm)
         out.append(q)
     return out
 
@@ -286,6 +293,16 @@ def page_parking(pk: Any, text: str, url: str) -> dict[str, Any] | None:
     """The page's parking, checked like extract's (`check_parking`: every value backed by a quote on the page)."""
     got = check_parking(pk, text)
     return {**got, "url": url} if got else None
+
+
+def fee_extra(p: dict[str, Any]) -> dict[str, float]:
+    """extra.total_monthly and extra.required_monthly_fees of a plan whose page shows a fee-inclusive total beside
+    the base rent (the price stays the base rent)."""
+    t = p.get("total_monthly")
+    if not t:
+        return {}
+    return {"total_monthly": t, **({"required_monthly_fees": round(t - p["price"], 2)}
+                                   if p.get("price") and t > p["price"] else {})}
 
 
 def _line(p: dict[str, Any]) -> str:
@@ -534,6 +551,7 @@ def render(conn, *, sites: list[str] | None = None, model: str = "haiku",
                                        furnished=p.get("furnished"),
                                        extra={"site": sid, "platform": "render", "area": f"{sid}#render",
                                               "available_label": p.get("available"), "model": model,
+                                              **fee_extra(p),
                                               "clicked": sorted({c for i in its for c in i.get("clicked") or []}),
                                               **({"floorplan_image": drawing} if drawing else {}),
                                               **({"page_restriction": prx} if prx else {}),

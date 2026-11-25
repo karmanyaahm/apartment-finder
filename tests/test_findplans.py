@@ -124,3 +124,45 @@ def test_a_city_named_only_in_page_json_does_not_count():
     it = {"url": "https://www.rentvillaoaks.com/", "title": "Santa Rosa Townhomes & Apartments for Rent",
           "text": TEXT + ' Villa Oaks, Santa Rosa {"display_name":"Birchwood","city":"Sunnyvale"}'}
     assert vouched(s, it) is None
+
+
+def test_store_writes_render_style_rows_and_a_found_site(conn, tmp_path, monkeypatch):
+    import json
+    import shutil
+
+    from aptfinder import settings
+    from aptfinder.config import load_sites
+    from aptfinder.intake import findplans
+
+    shutil.copytree(settings.ROOT / "config.example", tmp_path / "cfg")
+    monkeypatch.setattr(settings, "CONFIG_DIR", tmp_path / "cfg")
+    t = {"key": "p_noel", "name": "Camille North", "city": "Mountain View",
+         "address": "2685 California St, Mountain View, CA 94040", "start": "https://www.caprop.com/",
+         "own_hosts": {"caprop.com"}}
+    read = {"plans": [{"name": "2685 California Street, #202", "beds": 1.0, "sqft": 595.0, "price": 2995.0,
+                       "available": "Available NOW", "total_monthly": 3045.0}],
+            "restriction": {"value": "none", "url": "https://www.caprop.com/camille-north-apartments"}}
+    out = {"p_noel": {"name": "Camille North", "search": {}, "google": {},
+                      "click": {"hops": [{}, {}], "read": read,
+                                "final_url": "https://www.caprop.com/camille-north-apartments#x"}}}
+    res = findplans.store(conn, [t], out, "raw.json", "haiku", [], 0.01, 0.02)
+    sid = res["sites"]["p_noel"]["site"]
+    assert res["observations"] == 1 and res["new_sites"] == [sid]
+    s = load_sites()[sid]  # a new found site with the page read, kept and checked ok
+    assert s["url"] == "https://www.caprop.com/camille-north-apartments" and s["found_by"] == "find-plans"
+    row = conn.execute("SELECT * FROM listings WHERE source = 'direct' AND source_id LIKE ?", (f"{sid}:r:%",)).fetchone()
+    extra = json.loads(row["data"])["extra"]
+    assert row["price"] == 2995 and extra["area"] == f"{sid}#render" and extra["reader"] == "find_plans"
+    assert extra["total_monthly"] == 3045 and extra["required_monthly_fees"] == 50
+    run = conn.execute("SELECT params, counts FROM runs ORDER BY id DESC LIMIT 1").fetchone()
+    assert json.loads(run["counts"])["areas"][f"{sid}#render"]["outcome"] == "ok"
+    # nothing priced: nothing stored
+    assert findplans.store(conn, [t], {"p_noel": {"click": {"hops": []}, "google": {}, "search": {}}}, "r", "h",
+                           [], 0, 0)["observations"] == 0
+
+
+def test_base_rent_is_the_price_and_the_fee_total_is_kept():
+    text = "A7 | 796 sq. ft. | $3,857.80 /mo* | $3,851 Base Rent"
+    got = check_plans([{"name": "A7", "price": 3851, "sqft": 796, "total_monthly": 3857.8}], text)[0]
+    assert got["price"] == 3851 and got["total_monthly"] == 3857.8
+    assert "total_monthly" not in check_plans([{"name": "A7", "price": 3851, "total_monthly": 4999}], text)[0]

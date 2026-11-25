@@ -174,6 +174,11 @@ def main(argv: list[str] | None = None) -> None:
     fp.add_argument("--max-apify-usd", type=float, default=0.6)
     fp.add_argument("--max-claude-usd", type=float, default=2.0)
     fp.add_argument("--no-search", action="store_true", help="no web search: the click agent from the known site")
+    fp.add_argument("--google-only", action="store_true", help="search with Google only (no Claude web search)")
+    fp.add_argument("--reason", action="append", default=[], help="only own-site items with this reason "
+                                                                  "(no_website, no_plans, ...; repeatable)")
+    fp.add_argument("--store", action="store_true", help="store priced readings like render (plan rows, sites)")
+    fp.add_argument("--shots", action="store_true", help="screenshots + Haiku vision when the text has no price")
     fp.add_argument("--dry-run", action="store_true", help="print the targets and start URLs only")
     pm = sub.add_parser("prometheus", help="Prometheus own sites: units and prices from Prometheus's availability "
                                            "JSON, one direct request per site (no Apify, no page scraping)")
@@ -225,16 +230,18 @@ def main(argv: list[str] | None = None) -> None:
         from .discover import Blocker
         from .findplans import pilot, targets
 
-        ts = targets(conn, places=args.place, names=args.name, limit=args.limit)
+        ts = targets(conn, places=args.place, names=args.name, limit=args.limit, reasons=args.reason)
         if args.dry_run:
             print(json.dumps([{**t, "own_hosts": sorted(t["own_hosts"])} for t in ts], indent=1))
             return
         try:
             res = pilot(ts, max_apify_usd=args.max_apify_usd, max_claude_usd=args.max_claude_usd,
-                        search=not args.no_search)
+                    search="none" if args.no_search else "google" if args.google_only else "both",
+                    shots=args.shots, conn=conn if args.store else None)
         except Blocker as e:
             raise SystemExit(f"BLOCKED: {e}")
-        print(json.dumps({k: res[k] for k in ("raw", "apify_usd", "claude_usd", "pages", "found")}, indent=1))
+        print(json.dumps({k: res[k] for k in ("raw", "apify_usd", "claude_usd", "pages", "found", "stored")},
+                         indent=1, default=str))
         return
 
     if args.cmd == "render-restriction":
