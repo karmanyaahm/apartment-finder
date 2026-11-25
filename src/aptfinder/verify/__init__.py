@@ -227,8 +227,30 @@ OWN_SITE_REASONS = {  # reason -> label, in the order an item takes the first th
 }
 
 
+SCRAPED_SQL = ("SELECT place_key, substr(source_id, 1, instr(source_id, ':') - 1) AS site, MAX(last_seen) AS seen, "
+               "MIN(url) AS url, SUM(active AND price IS NOT NULL AND kind IS NOT 'site_info') AS priced "
+               "FROM listings WHERE source = 'direct' {where} GROUP BY 1, 2")
+LISTING_SITES_SQL = ("SELECT DISTINCT place_key, json_extract(data, '$.extra.website') AS w, source FROM listings "
+                     "WHERE source <> 'direct' AND json_extract(data, '$.extra.website') IS NOT NULL {where}")
+
+
+def _by_place(rows) -> dict[str, list[dict[str, Any]]]:
+    out: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        out.setdefault(r["place_key"], []).append(dict(r))
+    return out
+
+
+def own_site_inputs(conn: sqlite3.Connection, place_key: str | None = None) -> dict[str, Any]:
+    """The two `listings` reads own_site_urls needs, for one place or for all at once (`listings` is a view, so
+    one query per place costs a full view build each: 282 places took 90 s)."""
+    where, args = ("AND place_key = ?", (place_key,)) if place_key else ("", ())
+    return {"scraped": _by_place(conn.execute(SCRAPED_SQL.format(where=where), args)),
+            "listing_sites": _by_place(conn.execute(LISTING_SITES_SQL.format(where=where), args))}
+
+
 def own_site_urls(conn: sqlite3.Connection, place_key: str, *, sites: dict | None = None, rec: dict | None = None,
-                  renders: dict | None = None) -> list[dict[str, Any]]:
+                  renders: dict | None = None, inputs: dict | None = None) -> list[dict[str, Any]]:
     """Every URL tried or known for a building's own site, each with its last outcome: `status` is form, rejected,
     no_plans, priced, failed or pending, `label` says what happened and when. Several URLs per place are normal:
     the hand list, sites found by search or named by listings, and any you added in Verify."""
@@ -240,10 +262,8 @@ def own_site_urls(conn: sqlite3.Connection, place_key: str, *, sites: dict | Non
     rec = _records() if rec is None else rec
     renders = last_outcomes(conn) if renders is None else renders
     checks = last_checks(rec)
-    scraped = {r["site"]: dict(r) for r in conn.execute(
-        "SELECT substr(source_id, 1, instr(source_id, ':') - 1) AS site, MAX(last_seen) AS seen, MIN(url) AS url, "
-        "SUM(active AND price IS NOT NULL AND kind IS NOT 'site_info') AS priced FROM listings "
-        "WHERE source = 'direct' AND place_key = ? GROUP BY 1", (place_key,))}
+    inputs = own_site_inputs(conn, place_key) if inputs is None else inputs
+    scraped = {r["site"]: r for r in inputs["scraped"].get(place_key, [])}
     out: list[dict[str, Any]] = []
     seen_urls: set[str] = set()
     listing_hosts: dict[str, dict[str, Any]] = {}
@@ -300,9 +320,7 @@ def own_site_urls(conn: sqlite3.Connection, place_key: str, *, sites: dict | Non
     for r in conn.execute("SELECT comment, ts FROM annotations WHERE entity_type = 'place' AND attribute = 'website' "
                           "AND entity_key = ? AND comment LIKE 'http%' ORDER BY id", (place_key,)):
         add(r["comment"], f"you, {r['ts'][5:10]}")
-    for r in conn.execute("SELECT DISTINCT json_extract(data, '$.extra.website') AS w, source FROM listings "
-                          "WHERE place_key = ? AND source <> 'direct' AND json_extract(data, '$.extra.website') "
-                          "IS NOT NULL", (place_key,)):
+    for r in inputs["listing_sites"].get(place_key, []):
         add(r["w"], f"{r['source']} listing")
     return out
 
@@ -324,7 +342,7 @@ def own_site_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     for r in conn.execute("SELECT entity_key, attribute, comment, id FROM annotations WHERE entity_type = 'place' "
                           "AND attribute IN ('website', 'own_site') ORDER BY id"):
         last_ann[(r["entity_key"], r["attribute"])] = dict(r)
-    sites, rec, renders = load_sites(), _records(), last_outcomes(conn)
+    sites, rec, renders, inputs = load_sites(), _records(), last_outcomes(conn), own_site_inputs(conn)
     out = []
     for r in conn.execute("SELECT place_key, property_name, address, lat, lon, n_listings FROM places "
                           "WHERE property_name IS NOT NULL AND address IS NOT NULL ORDER BY n_listings DESC"):
@@ -334,7 +352,7 @@ def own_site_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         web, dis = last_ann.get((pk, "website")), last_ann.get((pk, "own_site"))
         if dis and (not web or dis["id"] > web["id"]):
             continue  # you dismissed it, and added no URL since
-        urls = own_site_urls(conn, pk, sites=sites, rec=rec, renders=renders)
+        urls = own_site_urls(conn, pk, sites=sites, rec=rec, renders=renders, inputs=inputs)
         st = {u["status"] for u in urls}
         if not urls:
             if web and (web["comment"] or "").strip().lower() == "none":

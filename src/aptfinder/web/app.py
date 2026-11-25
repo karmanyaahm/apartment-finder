@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,8 @@ DEFAULT_ATTRIBUTES = ["overall", "status", "gym", "walk_to_caltrain", "living_ro
 LISTING_FIELDS = ["price", "price_basis", "price_month", "price_per_bed", "beds", "baths", "sqft", "kind",
                   "term", "furnished", "private_bath", "available_from", "available_to", "address", "unit",
                   "property_name", "operator", "title", "amenities", "floor_plan"]
+
+SCRAPE_REFRESH_S = 120  # how stale the dashboard may be while an intake run is writing
 
 
 def _group_listings(conn) -> dict[str, list[dict[str, Any]]]:
@@ -207,7 +210,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
     db_path = str(db_path or settings.DB_PATH)
     conn = connect(db_path)
     init_db(conn)
-    lock = threading.Lock()
+    lock = threading.RLock()  # re-entrant: cached() takes it inside endpoints that already hold it
     app = FastAPI(title="apartment finder", openapi_url=None, docs_url=None, redoc_url=None)
 
     if redact is not None:
@@ -226,28 +229,35 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             headers = {k: v for k, v in resp.headers.items() if k.lower() != "content-length"}
             return Response(body, status_code=resp.status_code, headers=headers, media_type=resp.media_type)
 
-    memo: dict[str, tuple[Any, Any]] = {}
+    memo: dict[str, tuple[Any, ...]] = {}
 
-    def data_version() -> tuple:
-        """Changes whenever anything the pages show can change: a new row in any log, or an edited config file.
-        Cheap (max rowid per table, file mtimes), so whole-database results are reused until it moves."""
+    def data_version() -> tuple[tuple, tuple]:
+        """(edits, scrapes): what the pages show changes with a new row in any log or an edited config file.
+        Edits (links, checks, annotations, config) are the user's own and must show at once; scrapes (observations,
+        trips, runs) arrive in bursts while intake runs. Cheap (max rowid per table, file mtimes)."""
         row = conn.execute(
-            "SELECT (SELECT MAX(id) FROM observations), (SELECT MAX(id) FROM links), (SELECT MAX(id) FROM trips), "
-            "(SELECT MAX(id) FROM checks), (SELECT MAX(id) FROM annotations), (SELECT MAX(id) FROM runs), "
+            "SELECT (SELECT MAX(id) FROM links), (SELECT MAX(id) FROM checks), (SELECT MAX(id) FROM annotations), "
+            "(SELECT MAX(id) FROM observations), (SELECT MAX(id) FROM trips), (SELECT MAX(id) FROM runs), "
             "(SELECT finished_at FROM runs ORDER BY id DESC LIMIT 1)").fetchone()
         cfg = tuple(f.stat().st_mtime_ns for f in sorted(settings.CONFIG_DIR.rglob("*")) if f.is_file())
-        return tuple(row) + cfg
+        return tuple(row[:3]) + cfg, tuple(row[3:])
 
     def cached(name: str, fn):
-        """fn() under the lock, reused while data_version() is unchanged."""
+        """fn() under the lock, reused while nothing changed. A user edit recomputes at once; new scraped rows
+        recompute at most every SCRAPE_REFRESH_S seconds, so a running intake (a write every few seconds) does not
+        make every request rebuild every whole-database result."""
         with lock:
-            v = data_version()
+            edits, scrapes = data_version()
             hit = memo.get(name)
-            if hit and hit[0] == v:
-                return hit[1]
+            if hit and hit[0] == edits and (hit[1] == scrapes or time.monotonic() - hit[2] < SCRAPE_REFRESH_S):
+                return hit[3]
             val = fn()
-            memo[name] = (v, val)
+            memo[name] = (edits, scrapes, time.monotonic(), val)
             return val
+
+    def all_places() -> dict[str, dict[str, Any]]:
+        """The places view by key, read once per data version (the view is computed over everything)."""
+        return cached("places_by_key", lambda: {r["place_key"]: dict(r) for r in conn.execute("SELECT * FROM places")})
 
     def q(sql: str, args: tuple = ()) -> list[dict[str, Any]]:
         with lock:
@@ -343,8 +353,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
     @app.get("/api/places/{place_key}")
     def place_detail(place_key: str) -> dict[str, Any]:
         # the places and listings views are computed over everything; read them once per data version
-        places_by_key = cached("places_by_key", lambda: {
-            r["place_key"]: dict(r) for r in conn.execute("SELECT * FROM places")})
+        places_by_key = all_places()
         if place_key not in places_by_key:
             raise HTTPException(404, "no such place")
         place = dict(places_by_key[place_key])
@@ -420,11 +429,11 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                    "ORDER BY id DESC LIMIT 5")
         with lock:
             acc = verify.accuracy(conn)
-            agree = verify.agreement(conn)
-            conflicts = verify.all_conflicts(conn)
+            agree = cached("agreement", lambda: verify.agreement(conn))
+            conflicts = cached("all_conflicts", lambda: verify.all_conflicts(conn))
             n_pending = sum(c["pending_render"] for c in conflicts)
-            n_sample = len(verify.sample_queue(conn))
-            n_own = len(verify.own_site_queue(conn))
+            n_sample = cached("n_sample", lambda: len(verify.sample_queue(conn)))
+            n_own = len(cached("own_site_queue", lambda: verify.own_site_queue(conn)))
         from ..trips import google_usage
 
         with lock:
@@ -435,17 +444,16 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             "agreement": agree, "queues": {"conflict": len(conflicts) - n_pending, "conflict_pending": n_pending,
                                            "sample": n_sample,
                                            "own_site": n_own},
-            "counts": q("SELECT (SELECT COUNT(*) FROM places) AS places, "
-                        "(SELECT COUNT(*) FROM listings) AS listings, "
-                        "(SELECT COUNT(*) FROM listings WHERE active = 1) AS active")[0],
+            "counts": cached("counts", lambda: q("SELECT (SELECT COUNT(*) FROM places) AS places, "
+                                                 "(SELECT COUNT(*) FROM listings) AS listings, "
+                                                 "(SELECT COUNT(*) FROM listings WHERE active = 1) AS active")[0]),
         }
 
     @app.get("/api/pipeline")
     def pipeline_overview() -> dict[str, Any]:
         """Each pipeline stage's state from the logs: done / partial / todo / stale / blocked, and the commands
         that would run the rest (aptfinder.pipeline)."""
-        with lock:
-            return pipeline.overview(conn)
+        return cached("pipeline", lambda: pipeline.overview(conn))
 
     # ------------------------------------------------------------------ verify
     def _obs_fields(obs_id: int) -> dict[str, Any]:
@@ -465,10 +473,9 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             out["fields"] = sorted({verify.CHECK_FIELD.get(f, f) for f in item["fields"]})
         else:
             out["fields"] = load_goals().verify.sample_fields
-        p = q("SELECT place_key, address, property_name, operator FROM places WHERE place_key = ?",
-              (item["place_key"],))
-        out["place"] = {"address": p[0]["address"], "property_name": p[0]["property_name"]} if p else None
-        out["label"] = place_label(p[0]) if p else None
+        p = all_places().get(item["place_key"])
+        out["place"] = {"address": p["address"], "property_name": p["property_name"]} if p else None
+        out["label"] = place_label(p) if p else None
         return out
 
     @app.get("/api/verify/batch")
@@ -478,7 +485,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         if kind != "conflict":
             raise HTTPException(400, "batch is for conflicts; use /api/verify/next for the rest")
         with lock:
-            items = verify.all_conflicts(conn)
+            items = cached("all_conflicts", lambda: verify.all_conflicts(conn))
             checked = verify.current_checks(conn)
         n = max(1, min(n, 50))
         pending = sum(c["pending_render"] for c in items)
@@ -494,7 +501,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         """Named buildings whose own site gave no usable offer, n at a time, each with its reason and every URL
         tried (verify.own_site_queue), plus the count per reason."""
         with lock:
-            items = verify.own_site_queue(conn)
+            items = cached("own_site_queue", lambda: verify.own_site_queue(conn))
         from collections import Counter
 
         return {"total": len(items), "skip": skip, "n": n, "items": items[skip:skip + n],
@@ -505,7 +512,8 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         """One item at a time: conflicts (unless conflicts=false: the dashboard pages them with /batch), then the
         sample. Buildings whose own site gave nothing usable are a list of their own (/api/verify/own_sites)."""
         with lock:
-            items = (verify.all_conflicts(conn) if conflicts else []) + verify.sample_queue(conn, seed)
+            items = ((cached("all_conflicts", lambda: verify.all_conflicts(conn)) if conflicts else [])
+                     + verify.sample_queue(conn, seed))
         if skip >= len(items):
             return {"done": True, "remaining": 0}
         item = items[skip]
