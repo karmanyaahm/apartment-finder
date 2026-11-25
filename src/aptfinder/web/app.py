@@ -225,13 +225,6 @@ class GoneIn(BaseModel):
     queue: str = "adhoc"  # 'conflict' from a Verify stale item, 'adhoc' from the drawer
 
 
-class GoneIn(BaseModel):
-    source: str
-    source_id: str
-    gone: bool = True  # false: undo (the listing is still for rent)
-    queue: str = "adhoc"  # 'conflict' from a Verify stale item, 'adhoc' from the drawer
-
-
 class CellsIn(BaseModel):
     cells: list[tuple[str, str]]  # (point id or `set:<name>`, mode): the KNN grid's checked cells
 
@@ -269,18 +262,6 @@ class ComputeIn(BaseModel):
     confirm_calls: int | None = None  # Google: the dry run's call count, used as this run's cap
     # Google, more than TYPED_CONFIRM_OVER calls: the calls left this month, typed by hand from the dry run
     confirm_left: int | None = None
-
-
-class DupAnswerIn(BaseModel):
-    """One answer to a possible-duplicate pair: `into` one of the two places merges the other into it; no `into`
-    records 'not the same building'."""
-    a: str
-    b: str
-    into: str | None = None
-
-
-class DupBatchIn(BaseModel):
-    items: list[DupAnswerIn]
 
 
 TYPED_CONFIRM_OVER = 20  # a Google run above this many calls needs the counts typed in
@@ -511,8 +492,6 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 (l["source"], l["source_id"]))}
             history = q("SELECT observed_at, price, price_basis, query_checkin, query_checkout, "
                         "json_extract(data, '$.available_from') AS available_from, content_hash "
-                # off the market (view withdrawals): since when, by whom ('user' or 'zillow_detail'), the page's event
-                "gone_at": l.get("gone_at"), "gone_by": l.get("gone_by"), "gone_why": l.get("gone_why"),
                         "FROM observations WHERE source = ? AND source_id = ? ORDER BY observed_at, id",
                         (l["source"], l["source_id"]))
             goal_results = {gid: res["listings"][gid].get((l["source"], l["source_id"])) for gid in res["listings"]}
@@ -786,24 +765,6 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             rows = q("SELECT * FROM trips WHERE id = ?", (c.trip_id,))
             if not rows:
                 raise HTTPException(404, "no such trip")
-    @app.post("/api/listings/gone")
-    def post_gone(g: GoneIn) -> dict[str, Any]:
-        """The user's 'no longer for rent' mark on a listing (gone), or its undo: an appended checks row on field
-        `active` against the listing's newest observation. The listings view treats the listing as inactive while
-        this is its newest withdrawal evidence (view withdrawals); a later fresh scrape that sees it brings it back."""
-        if g.queue not in ("conflict", "adhoc"):
-            raise HTTPException(400, "queue must be 'conflict' or 'adhoc'")
-        rows = q("SELECT id FROM observations WHERE source = ? AND source_id = ? ORDER BY observed_at DESC, id DESC "
-                 "LIMIT 1", (g.source, g.source_id))
-        if not rows:
-            raise HTTPException(404, "no such listing")
-        with lock:
-            cid = append_check(conn, AUTHOR, g.queue, "active", "wrong", observation_id=rows[0]["id"],
-                               stored_value="offered" if g.gone else "gone",
-                               true_value="gone" if g.gone else "offered",
-                               note=None if g.gone else "undo: still for rent")
-        return {"id": cid}
-
             stored = rows[0]["minutes"]
         tv = _parse_value(c.true_value) if c.verdict == "wrong" else None
         if c.verdict == "wrong" and tv in (None, ""):
@@ -922,14 +883,6 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         allp = all_places()
         me = allp.get(place_key)
         if not me or me.get("lat") is None:
-        return len(rows)
-
-    @app.post("/api/places/{place_key}/merge")
-    def merge_place(place_key: str, body: MergeIn) -> dict[str, Any]:
-        """Every listing of this place becomes the other place's, as user links (append-only; each listing keeps
-        its own unit: '<this place>/<unit>' -> '<other place>/<unit>'). Undo a listing with 'split'."""
-        with lock:
-            n = merge_links(place_key, body.into)
             return []
         out = []
         for k, p in allp.items():
@@ -941,12 +894,13 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                             "metres": round(d), "n_listings": p.get("n_listings")})
         return sorted(out, key=lambda x: x["metres"])[:n]
 
-    def merge_links(place_key: str, into: str) -> int:
-        """Append the user links that move every listing of place_key to `into`, each keeping its own unit
-        ('<this place>/<unit>' -> '<other place>/<unit>'); no commit. Raises HTTPException when it cannot."""
-        if into == place_key:
+    @app.post("/api/places/{place_key}/merge")
+    def merge_place(place_key: str, body: MergeIn) -> dict[str, Any]:
+        """Every listing of this place becomes the other place's, as user links (append-only; each listing keeps
+        its own unit: '<this place>/<unit>' -> '<other place>/<unit>'). Undo a listing with 'split'."""
+        if body.into == place_key:
             raise HTTPException(400, "a place cannot merge into itself")
-        if not q("SELECT 1 FROM places WHERE place_key = ?", (into,)):
+        if not q("SELECT 1 FROM places WHERE place_key = ?", (body.into,)):
             raise HTTPException(404, "no such place to merge into")
         rows = q("SELECT source, source_id, unit_key FROM listings WHERE place_key = ?", (place_key,))
         if not rows:
@@ -954,44 +908,11 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         with lock:
             for r in rows:
                 uk = r["unit_key"] or place_key
-                unit = into + uk[len(place_key):] if uk.startswith(place_key) else into
-                append_link(conn, AUTHOR, r["source"], r["source_id"], into, unit,
+                unit = body.into + uk[len(place_key):] if uk.startswith(place_key) else body.into
+                append_link(conn, AUTHOR, r["source"], r["source_id"], body.into, unit,
                             f"manual merge of {place_key}", commit=False)
             conn.commit()
-        return {"merged": n, "into": body.into}
-
-    @app.post("/api/verify/duplicates/batch")
-    def answer_duplicates(body: DupBatchIn) -> dict[str, Any]:
-        """Answer several possible-duplicate pairs in order, in one transaction: each item a merge (the same links
-        as POST /api/places/{key}/merge) or 'not the same building' (the same annotation as the single button:
-        place_pair / pair_key / same_building = no). Later items see earlier ones (a place merged away earlier
-        cannot merge again). An item that cannot be done writes nothing and comes back with its error; the rest
-        commit together."""
-        out = []
-        with lock:
-            try:
-                for it in body.items:
-                    pair = verify.pair_key(it.a, it.b)
-                    try:
-                        if it.a == it.b:
-                            raise HTTPException(400, "a pair needs two places")
-                        if it.into is None:
-                            append_annotation(conn, AUTHOR, "place_pair", pair, "same_building", comment="no",
-                                              commit=False)
-                            out.append({"pair": pair, "ok": True, "same_building": "no"})
-                        elif it.into in (it.a, it.b):
-                            src = it.b if it.into == it.a else it.a
-                            out.append({"pair": pair, "ok": True, "merged": merge_links(src, it.into),
-                                        "from": src, "into": it.into})
-                        else:
-                            raise HTTPException(400, "into must be one of the pair")
-                    except HTTPException as e:
-                        out.append({"pair": pair, "ok": False, "error": e.detail})
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
-        return {"results": out, "done": sum(r["ok"] for r in out), "failed": sum(not r["ok"] for r in out)}
+        return {"merged": len(rows), "into": body.into}
 
     @app.post("/api/links")
     def post_link(link: LinkIn) -> dict[str, Any]:
@@ -1285,8 +1206,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             lambda p: cached(f"knn_loo_samples|{'|'.join(p)}",
                              lambda: loo_samples(trips, loc, sampling.cell_keys(trips, p))),
             lambda p: cached(f"est_errors|{'|'.join(p)}",
-                             lambda: sampling.estimate_errors(conn, sampling.cell_keys(trips, p))), cost,
-            sorted(sampling.hard_limits(cfg)))
+                             lambda: sampling.estimate_errors(conn, sampling.cell_keys(trips, p))), cost)
 
     @app.post("/api/knn/status")
     def knn_status(body: SampleIn) -> dict[str, Any]:

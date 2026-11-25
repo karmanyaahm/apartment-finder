@@ -1027,6 +1027,12 @@ async function openVerify() {
 const CONFLICT_PAGE = 10;
 const gotoPlace = (pk) => { $("#verify").classList.add("hidden"); openPlace(pk); };
 
+/* a too-cheap item's third answer: the rent is real because the place limits who may rent (annotation place /
+   restriction, read by the goals' `restriction` rule); the item leaves the queue */
+const rxAsk = (it) => (it.cheap && it.place_key ? `<div class="small">Or the place limits who may rent:
+  <button class="small" data-rx="${esc(it.place_key)}|income" title="Income-restricted / affordable housing (BMR, AMI limits, tax credit): sets this place's restriction to income">income-restricted</button>
+  <button class="small" data-rx="${esc(it.place_key)}|other" title="Another limit on who may rent (seniors, students, employees, ...): sets this place's restriction to other">other restriction</button></div>` : "");
+
 /* conflicts, ten to a screen: one block per conflict, a row per disagreeing field, a column per source */
 function conflictBlock(e) {
   const it = e.item, obs = e.observations;
@@ -1042,7 +1048,7 @@ function conflictBlock(e) {
   const textTd = (f) => (it.text ? `<td>${fmtField(f, it.text[f])}</td>` : "");
   return `<div class="vconf${it.pending_render ? " pending" : ""}">
     <div class="vconf-head"><a href="#" data-goto="${esc(it.place_key)}">${esc(e.label || it.place_key)}</a>
-      ${unit ? `<span class="muted small">unit ${esc(unit)}</span>` : ""} ${tags}</div>${cheap}
+      ${unit ? `<span class="muted small">unit ${esc(unit)}</span>` : ""} ${tags}</div>${cheap}${rxAsk(it)}
     <div class="scroll-x"><table class="vconf-t"><tr><th></th>${obs.map((o) => `<th><a href="${esc(o.url)}" target="_blank" rel="noopener noreferrer">${esc(o.source)} ↗</a> <span class="muted">${esc((o.observed_at || "").slice(0, 10))}</span></th>`).join("")}${textTh}</tr>
     ${e.fields.map((f) => `<tr><th>${esc(f)}</th>${obs.map((o) => `<td><b>${fmtField(f, o.fields[f])}</b> ${vbtns({ observation_id: o.obs_id, field: f, queue: "conflict" }, (o.checked || {})[f], it.cheap && f !== "price")}</td>`).join("")}${textTd(f)}</tr>`).join("")}
     </table></div></div>`;
@@ -1083,6 +1089,15 @@ async function renderConflicts() {
     <p style="margin-top:14px"><button id="v-prev" ${S.conflictSkip ? "" : "disabled"}>Previous ${CONFLICT_PAGE}</button>
       ${more ? `<button id="v-more" class="accent">Next ${CONFLICT_PAGE}</button>` : ""}
       <button id="v-rest" class="${more ? "" : "accent"}">${more ? "Skip to" : "Continue:"} possible duplicate buildings, then own sites and the sample</button></p>`;
+  $$("[data-rx]", body).forEach((b) => b.addEventListener("click", async () => {
+    const [pk, value] = b.dataset.rx.split("|");
+    try {
+      await post("api/annotations", { entity_type: "place", entity_key: pk, attribute: "restriction", comment: value });
+      $$("[data-rx]", body).filter((x) => x.dataset.rx.split("|")[0] === pk).forEach((x) => x.closest(".vconf").classList.add("gone"));
+      b.parentElement.replaceChildren(Object.assign(document.createElement("b"), { textContent: `marked ${value === "income" ? "income-restricted" : "restricted (other)"}: this place's restriction is now ${value}` }));
+      loadStatus();
+    } catch (err) { toast("Not saved: " + err.message, 6000); }
+  }));
   $$(".vbtns", body).forEach(wireVbtns);
   $$("[data-goto]", body).forEach((a) => a.addEventListener("click", (ev) => { ev.preventDefault(); gotoPlace(a.dataset.goto); }));
   // a stale item answered "it's gone": a user check on `active` (POST api/listings/gone); the item leaves the queue

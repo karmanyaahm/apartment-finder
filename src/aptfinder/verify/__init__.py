@@ -200,19 +200,22 @@ def cheap_queue(conn: sqlite3.Connection, min_per_bed: float | None = None) -> l
     """Active, priced monthly lease listings (not furnished short stays, not rooms in shared housing) whose price
     per bedroom is below `[verify] min_price_per_bed` (studios count as one bedroom): likely a per-room or misread
     price. One-listing conflicts on price (beds shown beside it, a wrong beds corrects $/bed). Drops out once the
-    price has a current check; a listing with unknown beds is never flagged."""
+    price has a current check, or once you said in Verify who may rent the place (annotation place / restriction,
+    e.g. income: an affordable building's real rent); a listing with unknown beds is never flagged."""
     if min_per_bed is None:
         from ..config import load_goals
 
         min_per_bed = load_goals().verify.min_price_per_bed
     checked = current_checks(conn)
+    marked = {r[0] for r in conn.execute("SELECT DISTINCT entity_key FROM annotations WHERE entity_type = 'place' "
+                                         "AND attribute = 'restriction'")}
     out = []
     for r in conn.execute("SELECT source, source_id, obs_id, place_key, price_month, beds, url FROM listings "
                           "WHERE active = 1 AND price_basis = 'month' AND price_month > 0 AND beds IS NOT NULL "
                           "AND term IS NOT 'short' AND kind IS NOT 'room' AND kind IS NOT 'site_info' "
                           "AND price_month < ? * MAX(beds, 1) ORDER BY price_month / MAX(beds, 1), source, source_id",
                           (min_per_bed,)):
-        if "price" in checked.get((r["source"], r["source_id"]), {}):
+        if "price" in checked.get((r["source"], r["source_id"]), {}) or r["place_key"] in marked:
             continue
         per_bed = math.floor(r["price_month"] / max(r["beds"], 1))  # floor: $999.50 reads $999, not $1,000
         out.append({"kind": "conflict", "cheap": True, "unit_key": None, "place_key": r["place_key"],
