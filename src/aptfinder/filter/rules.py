@@ -149,7 +149,9 @@ def evaluate(rule: dict[str, Any], row: dict[str, Any], ctx: Ctx) -> tuple[str, 
             am = json.loads(am)
         if am is None:
             return CHECK, f"{label}: amenities unknown"
-        return (PASS, label) if any(name in a.lower() for a in am) else (FAIL, f"{label}: not listed")
+        words = [w.lower() for w in rule.get("match") or [name]]  # e.g. gym: ["gym", "fitness"]
+        hit = next((a for a in am if any(w in a.lower() for w in words)), None)
+        return (PASS, f"{label}: {hit}") if hit else (FAIL, f"{label}: not listed")
 
     if t == "known":
         return (PASS, label) if row.get(rule["field"]) is not None else (CHECK, f"{rule['field']} unknown")

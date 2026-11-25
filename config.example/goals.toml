@@ -82,6 +82,7 @@ value = 2000
 [[goals.lease.nice]]
 type = "amenity"
 name = "gym"
+match = ["gym", "fitness"]   # "Fitness Center" counts
 
 [[goals.lease.nice]]
 type = "near"

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import sqlite3
 from collections import defaultdict
 from typing import Any
@@ -77,6 +79,16 @@ def evaluate_all(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> di
     # own website wins: where the building's own site prices an offer, only its active priced rows decide the
     # place's goals; other sources' listings there still get a result (shown in the drawer) but decide nothing
     own = {r["place_key"] for r in listings if r["place_key"] and is_own_priced(r)}
+    # amenities belong to the building: every listing at a place is judged on all its sources' amenity lists
+    # (an own-site plan row has none; Apartments.com lists the building's "Fitness Center")
+    pooled: dict[str, set[str]] = {}
+    for pk, am in conn.execute("SELECT place_key, amenities FROM listings WHERE place_key IS NOT NULL "
+                               "AND amenities IS NOT NULL AND amenities != '[]'"):
+        pooled.setdefault(pk, set()).update(json.loads(am) if isinstance(am, str) else am)
+    for r in listings:
+        if r["place_key"] in pooled:
+            own_am = json.loads(r["amenities"]) if isinstance(r.get("amenities"), str) else (r.get("amenities") or [])
+            r["amenities"] = sorted(pooled[r["place_key"]] | set(own_am))
     out: dict[str, Any] = {"listings": {}, "places": {}}
     for gid, goal in cfg.goals.items():
         lres, pres = {}, {}
