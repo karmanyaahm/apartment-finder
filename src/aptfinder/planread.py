@@ -66,7 +66,7 @@ def accept(ans: dict[str, Any] | None, beds: float | None) -> dict[str, Any] | N
         return None
     if not 1 <= full <= beds + 2 or not 0 <= half <= 2:
         return None
-    return {"baths": full + half / 2, "beds": b, "seen": str(ans.get("seen") or "")[:500]}
+    return {"baths": full + half / 2, "beds": b, "seen": str(ans.get("seen") or "")[:1200]}
 
 
 # ------------------------------------------------------------------------------------------------ what to read
