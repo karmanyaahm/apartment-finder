@@ -11,7 +11,7 @@ import queue
 import re
 import threading
 import time
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
@@ -26,7 +26,7 @@ from .. import pipeline, settings, verify
 from ..areas import in_walk_zone
 from ..areas import zones as area_zones
 from ..config import Goal, load_goals, load_point_sets, load_points
-from ..filter import (AMENITY_FLAGS, place_building_units, place_parking, place_restriction, best_trips, evaluate_all, evaluate_goal, goal_inputs, nearest_by_set,
+from ..filter import (AMENITY_FLAGS, place_building_units, place_parking, place_restriction, best_trips, evaluate_goal, goal_inputs, nearest_by_set,
                       place_commute_terms)
 from ..filter import goals as goalstore
 from ..filter.rules import AGGS, EQUALS_FIELDS, KNOWN_FIELDS, NUMERIC_FIELDS, RULE_TYPES
@@ -53,6 +53,13 @@ def _tv(t: dict[str, Any]) -> dict[str, Any]:
 SCRAPE_REFRESH_S = 120  # how stale the dashboard may be while an intake run is writing
 WATCH_EVERY_S = 3  # the background app checks the data version this often
 WATCH_RECENT_S = 600  # and rebuilds the results read within this long
+# the dashboard's whole-database results that read no goal (by name, before any '|'): a goal edit leaves them
+# current; every other result (the goal results, the list, Pipeline, sampling's goal-aware ones) is rebuilt with it
+GOAL_FREE = {"places_by_key", "best_trips", "goal_inputs", "goal_input_rows", "located", "listings_by_place",
+             "media_files", "nearest_sets", "place_rows", "current_checks", "website_status", "plan_readings",
+             "agreement", "all_conflicts", "n_sample", "sample_queue", "own_site_queue", "duplicate_queue", "counts",
+             "area_map", "knn_loo", "knn_loo_samples", "est_errors"}
+GOAL_WAIT_S = 20  # a goal save answers once its list is rebuilt (goal_refresh), or after this long regardless
 # results the background app keeps on disk (data/cache/<db name>/), served at once after a restart (a deploy) while
 # the worker rebuilds them: the list, the header counts and queues, the Pipeline panel, the KNN status table, and
 # every whole-database input of the drawer (so a click after a restart never waits for a rebuild)
@@ -414,22 +421,42 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
     jobs: queue.PriorityQueue = queue.PriorityQueue()
     order = itertools.count()
     persisted: dict[str, float] = {}
+    # a goal edit's own lane (goal_refresh): re-judging the goals must not wait behind a full rebuild on the worker
+    goal_lane = ThreadPoolExecutor(max_workers=1, thread_name_prefix="aptf-goals")
     in_worker = threading.local()
     updating: ContextVar[list | None] = ContextVar("updating", default=None)
 
-    def data_version() -> tuple[tuple, tuple]:
-        """(edits, scrapes): what the pages show changes with a new row in any log or an edited config file.
+    def raw_version() -> tuple[tuple, tuple, Any]:
+        """(edits, scrapes, goals): what the pages show changes with a new row in any log or an edited config file.
         Edits (links, checks, annotations, config) are the user's own and must show at once; scrapes (observations,
-        trips, runs) arrive in bursts while intake runs. Cheap (max rowid per table, file mtimes)."""
+        trips, runs) arrive in bursts while intake runs; goals (the goal editor's annotation rows) change only the
+        goal-dependent results (GOAL_FREE). Cheap (max rowid per table, file mtimes)."""
         # identity's rule links arrive with every intake run (130 a minute seen live), so only the user's own
         # links count as edits; rule links refresh with the scrapes
         row = conn.execute(
             "SELECT (SELECT MAX(id) FROM links WHERE author = 'user'), (SELECT MAX(id) FROM checks), "
-            "(SELECT MAX(id) FROM annotations), (SELECT MAX(id) FROM links WHERE author <> 'user'), "
+            "(SELECT MAX(id) FROM annotations WHERE entity_type <> 'goal'), "
+            "(SELECT MAX(id) FROM links WHERE author <> 'user'), "
             "(SELECT MAX(id) FROM observations), (SELECT MAX(id) FROM trips), (SELECT MAX(id) FROM runs), "
-            "(SELECT finished_at FROM runs ORDER BY id DESC LIMIT 1), (SELECT MAX(id) FROM media)").fetchone()
+            "(SELECT finished_at FROM runs ORDER BY id DESC LIMIT 1), (SELECT MAX(id) FROM media), "
+            "(SELECT MAX(id) FROM annotations WHERE entity_type = 'goal')").fetchone()
         cfg = tuple(f.stat().st_mtime_ns for f in sorted(settings.CONFIG_DIR.rglob("*")) if f.is_file())
-        return tuple(row[:3]) + cfg, tuple(row[3:])
+        return tuple(row[:3]) + cfg, tuple(row[3:9]), row[9]
+
+    def version_of(name: str, raw: tuple[tuple, tuple, Any]) -> tuple[tuple, tuple]:
+        """(edits, scrapes) of one result: a goal-dependent one's edits end with ("goal", the goal version)."""
+        edits, scrapes, goals = raw
+        return (edits if name.split("|", 1)[0] in GOAL_FREE else (*edits, ("goal", goals))), scrapes
+
+    def data_version(name: str) -> tuple[tuple, tuple]:
+        return version_of(name, raw_version())
+
+    def goal_tagged(edits: tuple | None) -> bool:
+        return bool(edits) and isinstance(edits[-1], tuple) and edits[-1][:1] == ("goal",)
+
+    def goal_v(edits: tuple | None) -> int:
+        """The goal version a goal-dependent snapshot was built at (-1: none, unknown or goal-free)."""
+        return edits[-1][1] if goal_tagged(edits) and edits[-1][1] is not None else -1
 
     def fresh(hit: tuple | None, version: tuple[tuple, tuple]) -> bool:
         """A snapshot is current while no user edit came after it; new scraped rows make it out of date at most
@@ -469,17 +496,26 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             t = time.monotonic() - max(0.0, time.time() - wall)
             memo[name] = (*(version if code == code_version else (None, None)), t, val, None)
 
+    def store(name: str, version: tuple[tuple, tuple], t: float, val: Any, fn) -> None:
+        """Keep a snapshot (and persist it), unless one built against a newer goal version is already there (a
+        full rebuild that started before a goal save must not put the old goals' results back over
+        goal_refresh's)."""
+        with memo_lock:
+            old = memo.get(name)
+            if old is not None and goal_v(old[0]) > goal_v(version[0]):
+                return
+            memo[name] = (*version, t, val, fn)
+        persist(name, version, val)
+
     def compute(name: str, fn) -> Any:
         """fn() over the data version read first, stored as the snapshot (unless already current)."""
-        version = data_version()
+        version = data_version(name)
         with memo_lock:
             hit = memo.get(name)
         if fresh(hit, version):
             return hit[3]
         val = fn()
-        with memo_lock:
-            memo[name] = (*version, time.monotonic(), val, fn)
-        persist(name, version, val)
+        store(name, version, time.monotonic(), val, fn)
         return val
 
     def work() -> None:
@@ -515,7 +551,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         never computes one: an out-of-date snapshot is returned at once and rebuilt by the worker (the response says
         so in `X-Updating` and `X-Snapshot-Age`); only before the first snapshot does a request wait for it. The
         worker itself, and the app without `background`, compute in place."""
-        version = data_version()
+        version = data_version(name)
         worker_side = getattr(in_worker, "on", False)
         with memo_lock:
             hit = memo.get(name)
@@ -550,8 +586,29 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         return cached("best_trips", lambda: best_trips(conn, located()))
 
     def results() -> dict[str, Any]:
-        """evaluate_all over the cached trips (it used to build its own best_trips, the slowest part)."""
-        return cached("evaluate_all", lambda: evaluate_all(conn, trips=all_trips()))
+        """Every goal judged over the cached goal_inputs (evaluate_all's work, reusing the cached trips and
+        inputs: a goal edit re-judges the goals without reading the database again)."""
+        return cached("evaluate_all", judge_all)
+
+    def judge_all() -> dict[str, Any]:
+        inp = inputs()
+        with memo_lock:
+            e = memo.get("goal_inputs")
+        return judge(inp, e[2] if e and e[3] is inp else None, effective().goals)
+
+    def judge(inp: dict[str, Any], basis: float | None, goal_defs: dict[str, Goal],
+              prev: dict[str, Any] | None = None) -> dict[str, Any]:
+        """{listings, places} per goal (evaluate_goal over `inp`), plus what was judged: `basis` (which goal_inputs
+        snapshot: its time computed) and each goal's definition. A goal `prev` judged on the same snapshot with the
+        same definition is reused (a goal edit re-judges only the goal edited)."""
+        out: dict[str, Any] = {"listings": {}, "places": {}, "basis": basis, "defs": {}}
+        for gid, goal in goal_defs.items():
+            d = out["defs"][gid] = json.dumps(goal.model_dump(), sort_keys=True)
+            if prev and basis is not None and prev.get("basis") == basis and prev["defs"].get(gid) == d:
+                out["listings"][gid], out["places"][gid] = prev["listings"][gid], prev["places"][gid]
+            else:
+                out["listings"][gid], out["places"][gid] = evaluate_goal(inp, goal)
+        return out
 
     def inputs() -> dict[str, Any]:
         """goal_inputs over the cached trips, for the draft preview and Verify's goal relevance."""
@@ -623,14 +680,39 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         return Response(body, media_type="application/json")
 
     def encode_places() -> tuple[bytes, bytes | None]:
-        body = json.dumps(cached("places_list", build_places), separators=(",", ":"), ensure_ascii=False).encode()
+        return encode_list(cached("places_list", build_places))
+
+    def encode_list(lst: list[dict[str, Any]]) -> tuple[bytes, bytes | None]:
+        body = json.dumps(lst, separators=(",", ":"), ensure_ascii=False).encode()
         # the redacted view rewrites the plain text in its middleware: no pre-gzipped copy there
         return body, (gzip.compress(body, 5) if redact is None else None)
 
     def build_places() -> list[dict[str, Any]]:
-        res = results()
+        return with_goals(cached("place_rows", place_rows), results(), all_trips(), effective().goals)
+
+    def with_goals(rows: list[dict[str, Any]], res: dict[str, Any], trips: dict[str, Any],
+                   goal_defs: dict[str, Goal]) -> list[dict[str, Any]]:
+        """The list: each place's goal-free row (place_rows) with its goal results and the commute times shown."""
+        # `minutes` feeds the cards' commute rows (app.js limitValue): commute targets one by one, sets through
+        # `nearest`. Times to other sets' single points (stations, bus stops, groceries: about a fifth of all keys)
+        # are left out unless a goal's commute rule names that point.
+        shown = {r.get("target") for g in goal_defs.values() for r in [*g.rules, *g.nice] if r.get("type") == "commute_any"}
+        out = []
+        for b in rows:
+            pk = b["place_key"]
+            goals = {}
+            for gid, pres in res["places"].items():
+                r = pres.get(pk)
+                if r:
+                    goals[gid] = goal_view(r, place_commute_terms(goal_defs[gid], trips, pk) if gid in goal_defs else None)
+            out.append({**b, "goals": goals,
+                        "minutes": {f"{pt}|{m}": _tv(t) for (pt, m), t in trips.get(pk, {}).items()
+                                    if pt.startswith("commute_targets:") or pt in shown}})
+        return out
+
+    def place_rows() -> list[dict[str, Any]]:
+        """Every place's list row apart from its goals (with_goals): reads no goal, so a goal edit reuses it."""
         trips = all_trips()
-        goal_defs = effective().goals
         by_place = listings_by_place()
         anns = latest_annotations("place")
         # per place, the fastest trip to any point of each set and mode ("walk to the nearest Google bus stop"),
@@ -638,21 +720,12 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         nearest_all = cached("nearest_sets", lambda: {
             pk: {f"{s}|{m}": {**_tv(t), "point": t["point_id"].split(":", 1)[1]}
                  for (s, m), t in nearest_by_set(tr).items() if s != "commute_targets"}
-            for pk, tr in all_trips().items()})
+            for pk, tr in trips.items()})
         files = media_files()
-        # `minutes` feeds the cards' commute rows (app.js limitValue): commute targets one by one, sets through
-        # `nearest`. Times to other sets' single points (stations, bus stops, groceries: about a fifth of all keys)
-        # are left out unless a goal's commute rule names that point.
-        shown = {r.get("target") for g in goal_defs.values() for r in [*g.rules, *g.nice] if r.get("type") == "commute_any"}
         out = []
         for p in all_places().values():
             pk = p["place_key"]
             rows = by_place.get(pk, [])
-            goals = {}
-            for gid, pres in res["places"].items():
-                r = pres.get(pk)
-                if r:
-                    goals[gid] = goal_view(r, place_commute_terms(goal_defs[gid], trips, pk) if gid in goal_defs else None)
             title = next((x["title"] for x in rows if x.get("title")), None)
             parsed = [{**x, "data": json.loads(x["data"])} for x in rows]
             cover = gather_photos(parsed, limit=1, files=files)
@@ -664,9 +737,6 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 "photo": cover[0]["url"] if cover else None,  # map hover
                 "beds": sorted({x["beds"] for x in rows if x["beds"] is not None}),
                 "baths": sorted({x["baths"] for x in rows if x["baths"] is not None}),
-                "goals": goals,
-                "minutes": {f"{pt}|{m}": _tv(t) for (pt, m), t in trips.get(pk, {}).items()
-                            if pt.startswith("commute_targets:") or pt in shown},
                 "nearest": nearest_all.get(pk, {}),
                 # a limit on who may rent that any listing here states (income, senior, ...): the card's badge
                 "restriction": place_restriction(parsed, a),
@@ -678,6 +748,31 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 "user_status": (a.get("status") or {}).get("comment"),
             })
         return out
+
+    def goal_refresh() -> bool:
+        """After a goal edit (goal_lane): the goal results, the list and its JSON rebuilt from the last snapshots
+        of their goal-free inputs (GOAL_FREE: the trips with KNN, goal_inputs, place_rows), taken as they are even
+        when new scrapes made them out of date, so it takes seconds, never a full rebuild. Each new snapshot keeps
+        its predecessor's version with the new goal version: what it was out of date on stays out of date and the
+        worker rebuilds it as usual. False when a snapshot is missing (the worker then builds the list)."""
+        names = ("goal_inputs", "place_rows", "evaluate_all", "places_list", "places_body")
+        with memo_lock:
+            snap = {n: memo.get(n) for n in names}
+        # the list loaded from disk at a start has no places_list beside it: it takes the list's JSON version
+        snap["places_list"] = snap["places_list"] or snap["places_body"]
+        if any(v is None or (v[0] is not None and n not in GOAL_FREE and not goal_tagged(v[0]))
+               for n, v in snap.items()):
+            return False
+        goals = raw_version()[2]
+        goal_defs = effective().goals
+        inp = snap["goal_inputs"][3]
+        res = judge(inp, snap["goal_inputs"][2], goal_defs, snap["evaluate_all"][3])
+        lst = with_goals(snap["place_rows"][3], res, inp["trips"], goal_defs)
+        for name, val, fn in (("evaluate_all", res, judge_all), ("places_list", lst, build_places),
+                              ("places_body", encode_list(lst), encode_places)):
+            old = snap[name]
+            store(name, (None if old[0] is None else (*old[0][:-1], ("goal", goals)), old[1]), old[2], val, fn)
+        return True
 
     @app.get("/api/raw")
     def raw_item(source: str, source_id: str) -> dict[str, Any]:
@@ -1071,6 +1166,16 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
     def save_goal(gid: str, d: dict[str, Any]) -> dict[str, Any]:
         with lock:
             aid = append_annotation(conn, AUTHOR, "goal", gid, "definition", comment=json.dumps(d, sort_keys=True))
+        if background:
+            # the list with the new goals in seconds (goal_refresh), on its own lane so it never waits behind a
+            # full rebuild; the answer waits for it, so the page's next /api/places is already fresh
+            done = False
+            try:
+                done = goal_lane.submit(goal_refresh).result(timeout=GOAL_WAIT_S)
+            except Exception:  # noqa: BLE001  (slow or failed: the worker rebuilds the list as usual)
+                pass
+            if not done:
+                schedule("places_body", encode_places)
         return {"id": aid, "goal": gid}
 
     @app.get("/api/goals")
@@ -1246,7 +1351,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             # the user's own route shows in the drawer the page reloads next: this request (only it, holding no lock)
             # waits for the worker to rebuild the trips and goal results; every other request keeps answering
             schedule("best_trips", lambda: best_trips(conn, located()), urgent=True).result()
-            schedule("evaluate_all", lambda: evaluate_all(conn, trips=all_trips()), urgent=True).result()
+            schedule("evaluate_all", judge_all, urgent=True).result()
         return {"new_trips": n, "provider": provider, "api_calls": getattr(source, "calls", 0)}
 
     # ------------------------------------------------------------------ the Pipeline panel's background job
@@ -1551,18 +1656,22 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                          ("n_sample", lambda: len(verify.sample_queue(conn))),
                          ("own_site_queue", lambda: verify.own_site_queue(conn)),
                          ("duplicate_queue", lambda: verify.duplicate_queue(conn, list(all_places().values()))),
-                         ("pipeline", lambda: pipeline_data())):
+                         ("pipeline", lambda: pipeline_data()),
+                         # what a goal save and the draft preview judge over (goal_refresh), also after a restart
+                         # that loaded the list from disk
+                         ("goal_inputs", lambda: goal_inputs(conn, trips=all_trips())),
+                         ("place_rows", place_rows)):
             schedule(name, fn)
 
         def watch() -> None:
             while True:
                 time.sleep(WATCH_EVERY_S)
                 try:
-                    version = data_version()
+                    raw = raw_version()
                     now = time.monotonic()
                     with memo_lock:
                         todo = [(k, v[4]) for k, v in memo.items() if v[4] is not None
-                                and now - last_read.get(k, 0) < WATCH_RECENT_S and not fresh(v, version)]
+                                and now - last_read.get(k, 0) < WATCH_RECENT_S and not fresh(v, version_of(k, raw))]
                     todo.sort(key=lambda kv: kv[0] != "places_body")  # the list first: it is what an edit is for
                     for name, fn in todo:
                         schedule(name, fn)
