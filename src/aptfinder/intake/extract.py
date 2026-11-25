@@ -55,7 +55,8 @@ from .discover import SECRET_ENV, Blocker, clean_url
 TEXT_SOURCES = ("craigslist", "furnishedfinder", "airbnb", "apartments_com", "zillow", "zumper", "padmapper",
                 "rentcafe", "direct", "google_places", "portfolio")  # every source: a name alone can state a limit
 RAW_SOURCES = ("apartments_com", "zumper")  # raw item holds text the parser does not store
-VERSION = 4  # schema version: answers and 'read' marks of an older schema are read again (4: parking object)
+VERSION = 5  # schema version: answers and 'read' marks of an older schema are read again (4: parking object;
+# 5: parking required, Haiku left an optional key out: 'Amenities: off-street parking' read as nothing)
 # a listing has text to read: a description, an amenity list, or a name or title as stored (shared with the Pipeline
 # panel); a name alone is read for who may rent ('The Laurel at Mountain View (55+)')
 HAS_TEXT_SQL = ("(length(trim(COALESCE(json_extract(data, '$.description'), ''))) >= 40 "
@@ -140,7 +141,7 @@ PARKING = {
                    "evidence": {"type": "array", "items": {"type": "string"}}}}
 _STR = {"type": ["string", "null"]}
 SCHEMA = {"type": "object", "required": ["results"], "properties": {"results": {"type": "array", "items": {
-    "type": "object", "required": ["key", "restriction"],
+    "type": "object", "required": ["key", "restriction", "parking"],
     "properties": {
         "key": {"type": "string"},
         "address": {**_STR, "description": "street address of the rental as written, e.g. '231 Grant Ave, "
