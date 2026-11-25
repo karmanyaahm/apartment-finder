@@ -20,7 +20,7 @@ from .. import pipeline, settings, verify
 from ..areas import in_walk_zone
 from ..areas import zones as area_zones
 from ..config import Goal, load_goals, load_point_sets, load_points
-from ..filter import (AMENITY_FLAGS, amenity_flags, place_parking, place_restriction, best_trips, evaluate_all, evaluate_goal, goal_inputs, nearest_by_set,
+from ..filter import (AMENITY_FLAGS, place_parking, place_restriction, best_trips, evaluate_all, evaluate_goal, goal_inputs, nearest_by_set,
                       place_commute_terms)
 from ..filter import goals as goalstore
 from ..filter.rules import AGGS, EQUALS_FIELDS, KNOWN_FIELDS, NUMERIC_FIELDS, RULE_TYPES
@@ -426,7 +426,6 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         points = load_points()
         return {
             "db": Path(db_path).name,
-            "goals": [{"id": g, "label": v.label} for g, v in goals.goals.items()],
             "targets": [p.id for p in points.get("commute_targets", [])],
             "default_target": next((r.get("target") for g in goals.goals.values() for r in g.rules
                                     if r.get("type") == "commute_any"), None),
@@ -490,9 +489,6 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 "minutes": {f"{pt}|{m}": _tv(t) for (pt, m), t in trips.get(pk, {}).items()
                             if pt.startswith("commute_targets:") or pt in shown},
                 "nearest": nearest_all.get(pk, {}),
-                # amenity flags (filter.amenity_flags over every listing's list here): true / false, null when nothing listed
-                "amenities": amenity_flags(sorted({a for x in rows if x.get("amenities")
-                                                   for a in json.loads(x["amenities"])})),
                 # a limit on who may rent that any listing here states (income, senior, ...): the card's badge
                 "restriction": place_restriction(parsed, a),
                 # parking as the most informative listing here states it (filter.place_parking): the card's line

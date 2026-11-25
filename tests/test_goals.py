@@ -46,7 +46,6 @@ def test_editing_a_goal_changes_its_results(client):
     assert set(after.values()) == {"pass"} and after != before
     g = next(g for g in c.get("/api/goals").json()["goals"] if g["id"] == "lease")
     assert g["origin"] == "edited" and g["label"] == "Lease, anything"
-    assert c.get("/api/meta").json()["goals"][1] == {"id": "lease", "label": "Lease, anything"}
     conn = connect(db)  # stored as one append-only annotation row
     assert conn.execute("SELECT COUNT(*) FROM annotations WHERE entity_type = 'goal'").fetchone()[0] == 1
 

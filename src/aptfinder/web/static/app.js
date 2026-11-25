@@ -263,8 +263,11 @@ function aggregate(vals, agg) {
 function netCommute(p) {
   const terms = S.goal === "all" ? null : p.goals[S.goal]?.commute;
   if (!terms || !terms.length) return null;
-  const known = terms.filter((t) => t[0] != null).map((t) => t[0]);
-  return { v: aggregate(known, $("#agg").value), sd: aggregate(known, "spread"), n: terms.length, known: known.length,
+  const known = terms.filter((t) => t[0] != null).map((t) => t[0]), agg = $("#agg").value;
+  // a total needs every counted trip's time: with one missing it is needs check (v null), never a smaller sum;
+  // mean, median and spread use the trips that have a time
+  const v = agg === "total" && known.length < terms.length ? null : aggregate(known, agg);
+  return { v, sd: aggregate(known, "spread"), n: terms.length, known: known.length,
     est: terms.some((t) => t[0] != null && t[1]) };
 }
 // the trips behind the net commute, one line each, from the same terms the number is computed from (the third
@@ -299,8 +302,9 @@ function netFact(p, fails) {
   const tip = esc(netTip(p));
   const mk = mk0 ? mk0.replace(/title="([^"]*)"/, (_, t) => `title="${t}${tip ? `\n\n${tip}` : ""}"`) : (tip ? ` title="${tip}"` : "");
   const trips = `${n.n} trip${n.n > 1 ? "s" : ""}${n.est ? ", est." : ""}`;
-  if (n.v == null) return `<span${mk0 ? mk : `${mk} data-ff="needs_check"`}>net commute: no times yet (${trips})</span>`;
-  const unk = n.known < n.n ? (agg === "total" ? ` + ? (${n.n - n.known} unknown)` : ` of ${n.known} known (${n.n - n.known} unknown)`) : "";
+  if (n.v == null) return `<span${mk0 ? mk : `${mk} data-ff="needs_check"`}>net commute: ${n.known
+    ? `total needs check (${n.n - n.known} of ${n.n} trips without a time)` : "no times yet"} (${trips})</span>`;
+  const unk = n.known < n.n ? ` of ${n.known} known (${n.n - n.known} unknown)` : "";
   const main = agg === "spread" ? `spread ±<b>${mins(n.v)}</b> min${unk}` : `${agg} <b>${mins(n.v)}</b> min${unk}${n.known > 1 ? ` · spread ±${mins(n.sd)}` : ""}`;
   return `<span${mk}>net commute ${main} (${trips})</span>`;
 }
@@ -680,7 +684,8 @@ function sorted(list) {
     ppb: (p) => [nil(goalTerm(S.goal) === "long" ? p.min_lease_per_bed : p.min_price_per_bed)],
     beds: (p) => [-(p.max_beds || 0)],
     // complete sums first, then those with unknown terms (by what is known), then none
-    net: (p) => { const n = netCommute(p); return n && n.v != null ? [n.known < n.n ? 1 : 0, n.v] : [2, 0]; },
+    // complete, then partial (mean / median of the known trips), then a total missing a time, then no time at all
+    net: (p) => { const n = netCommute(p); return n && n.v != null ? [n.known < n.n ? 1 : 0, n.v] : [n && n.known ? 2 : 3, 0]; },
     rating: (p) => [-(p.rating || 0)], nice: (p) => [-(Math.max(0, ...Object.values(p.goals).map((g) => g.nice_score || 0)))],
   };
   const f = fns[key];

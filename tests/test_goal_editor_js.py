@@ -59,3 +59,19 @@ def test_editor_inputs_read_the_options_from_api_goals():
         assert f"G.{key}" in body, f"ruleInputs does not read {key} from api/goals"
     # the 'count in net commute' box shows where /api/goals lists in_net as an optional key of the rule type
     assert 'G.types[r.type]?.optional?.includes("in_net")' in body
+
+
+def test_net_total_needs_every_counted_time():
+    # a total with a counted trip missing is needs check (v null), never a smaller sum; mean uses the known trips
+    if not shutil.which("node"):
+        pytest.skip("node not installed")
+    src = APP_JS.read_text()
+    p = {"goals": {"g": {"commute": [[10, False], [None, False], [20, True]]}}}
+    out = {}
+    for agg in ("total", "mean"):
+        script = (f"const S = {{ goal: 'g' }};\nconst $ = () => ({{ value: '{agg}' }});\n"
+                  f"{_function(src, 'aggregate')}\n{_function(src, 'netCommute')}\n"
+                  f"console.log(JSON.stringify(netCommute({json.dumps(p)})));")
+        out[agg] = json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout)
+    assert out["total"]["v"] is None and (out["total"]["known"], out["total"]["n"]) == (2, 3)
+    assert out["mean"]["v"] == 15

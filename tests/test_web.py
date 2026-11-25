@@ -256,23 +256,25 @@ def test_places_name_the_attribute_each_goal_fails_on(client):
     assert temp["commute"]["pt"] == "commute_targets:Downtown Palo Alto" and "bike" in temp["commute"]["modes"]
 
 
-def test_places_carry_amenity_flags_for_the_require_checkboxes(client):
-    import json
+def test_amenity_presets_from_api_goals_judge_as_amenity_rules(client):
+    """The editor's amenity presets (GET /api/goals `amenities`) become amenity rules: an entry matches a preset's
+    words, never its exclusions ("Dishwasher" is not laundry, "no parking" is not parking)."""
+    from aptfinder.filter.rules import Ctx, evaluate
 
-    from aptfinder.filter import amenity_flags
+    c, _ = client
+    presets = c.get("/api/goals").json()["amenities"]
+    assert set(presets) == {"gym", "in_unit_laundry", "parking", "pets"}
 
-    assert amenity_flags(None) == {"gym": None, "in_unit_laundry": None, "parking": None, "pets": None}
-    f = amenity_flags(["Fitness Center", "Dishwasher", "Washer/Dryer Hookup", "no parking", "Dogs allowed (read from text)"])
-    assert f == {"gym": True, "in_unit_laundry": False, "parking": False, "pets": True}
-    assert amenity_flags(["In-unit laundry (read from text)", "Parking: garage (read from text)"])["in_unit_laundry"]
-    c, db = client
-    places = c.get("/api/places").json()
-    assert all(set(p["amenities"]) == {"gym", "in_unit_laundry", "parking", "pets"} for p in places)
-    conn = connect(db)
-    for p in places:
-        listed = [a for (am,) in conn.execute("SELECT amenities FROM listings WHERE place_key = ?", (p["place_key"],))
-                  if am for a in json.loads(am)]
-        assert p["amenities"] == amenity_flags(listed)
+    def has(k, am):
+        return evaluate({"type": "amenity", "name": k, **presets[k]}, {"amenities": am}, Ctx())[0]
+
+    am = ["Fitness Center", "Dishwasher", "Washer/Dryer Hookup", "no parking", "Dogs allowed (read from text)"]
+    assert {k: has(k, am) for k in presets} == {"gym": "pass", "in_unit_laundry": "fail", "parking": "fail",
+                                                "pets": "pass"}
+    assert has("in_unit_laundry", ["In-unit laundry (read from text)", "Parking: garage (read from text)"]) == "pass"
+    assert has("gym", None) == "needs_check"
+    assert "amenities" not in c.get("/api/places").json()[0]
+    assert "goals" not in c.get("/api/meta").json()
 
 
 def test_verify_batch_filters_by_goal_and_zone_and_counts_cheap(client):
