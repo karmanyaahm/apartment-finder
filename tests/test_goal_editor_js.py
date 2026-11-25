@@ -1,0 +1,59 @@
+"""The goal editor's "+ add" menu (app.js ruleTemplates) against the backend's rule shapes: every rule type the
+backend evaluates can be added from the menu, and every template is a rule the backend accepts. The fields and values
+inside a rule's inputs come from GET /api/goals (numeric_fields, equals_fields, known_fields, aggs, amenities)."""
+from __future__ import annotations
+
+import json
+import pathlib
+import re
+import shutil
+import subprocess
+
+import pytest
+
+from aptfinder.filter.rules import EQUALS_FIELDS, RULE_TYPES, validate_rule
+
+APP_JS = pathlib.Path(__file__).resolve().parents[1] / "src/aptfinder/web/static/app.js"
+
+
+def _function(src: str, name: str) -> str:
+    m = re.search(rf"^function {name}\(.*?^\}}$", src, re.M | re.S)
+    assert m, f"no function {name} in app.js"
+    return m.group(0)
+
+
+@pytest.fixture(scope="module")
+def templates() -> list[list]:
+    if not shutil.which("node"):
+        pytest.skip("node not installed")
+    meta = {"default_target": "commute_targets:Meta HQ", "targets": ["commute_targets:Meta HQ"],
+            "point_sets": {"commute_targets": {"label": "targets"}, "caltrain_stations": {"label": "Caltrain"}}}
+    script = (f"const S = {{ meta: {json.dumps(meta)} }};\nconst $ = () => ({{ value: 'total' }});\n"
+              f"{_function(APP_JS.read_text(), 'ruleTemplates')}\nconsole.log(JSON.stringify(ruleTemplates()));")
+    out = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout
+    return json.loads(out)
+
+
+def test_every_rule_type_has_an_add_entry(templates):
+    assert set(RULE_TYPES) - {r["type"] for _, r in templates} == set()
+
+
+def test_every_add_entry_is_a_valid_rule(templates):
+    for label, rule in templates:
+        err = validate_rule(rule, modes=["walk", "bike", "drive"], points={"commute_targets:Meta HQ"},
+                            sets={"commute_targets", "caltrain_stations"})
+        assert err is None, f"{label}: {err}"
+
+
+def test_every_equals_field_is_reachable(templates):
+    # an equals rule's field select lists equals_fields, so one equals template reaches every field; the restriction
+    # preset is there because 'no limit' is what goals ask for
+    assert any(r["type"] == "equals" for _, r in templates)
+    assert {"field": "restriction", "type": "equals", "value": "none"} in [r for _, r in templates]
+    assert "none" in EQUALS_FIELDS["restriction"]
+
+
+def test_editor_inputs_read_the_options_from_api_goals():
+    body = _function(APP_JS.read_text(), "ruleInputs")
+    for key in ("numeric_fields", "equals_fields", "known_fields", "aggs", "amenities"):
+        assert f"G.{key}" in body, f"ruleInputs does not read {key} from api/goals"

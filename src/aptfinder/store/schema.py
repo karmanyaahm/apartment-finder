@@ -371,10 +371,12 @@ SELECT place_key, MAX(p_address) AS address, MAX(p_city) AS city, MAX(p_name) AS
        SUM(kind IS NOT 'site_info') AS n_listings, SUM(active AND kind IS NOT 'site_info') AS n_active, COUNT(DISTINCT unit_key) AS n_units,
        group_concat(DISTINCT source) AS sources,
        MIN(price_month) AS min_price_month, MIN(price_per_bed) AS min_price_per_bed,
-       -- an ordinary lease vs a furnished short stay (plans.plan_key's offers): cards show the one that fits
-       MIN(CASE WHEN term IS NOT 'short' AND furnished IS NOT 1 THEN price_month END) AS min_lease_month,
-       MIN(CASE WHEN term IS NOT 'short' AND furnished IS NOT 1 THEN price_per_bed END) AS min_lease_per_bed,
-       MIN(CASE WHEN term = 'short' THEN price_month END) AS min_stay_month,
+       -- a lease vs a short stay, by term as the goals' term rule reads it: lease = term 'long' (furnished or not,
+       -- e.g. a furnished 1-12+ month lease on Zillow), stay = term 'short'; only an unknown term falls back to
+       -- furnished (furnished = stay, else lease). Each listing counts in exactly one of the two.
+       MIN(CASE WHEN term = 'long' OR (term IS NULL AND furnished IS NOT 1) THEN price_month END) AS min_lease_month,
+       MIN(CASE WHEN term = 'long' OR (term IS NULL AND furnished IS NOT 1) THEN price_per_bed END) AS min_lease_per_bed,
+       MIN(CASE WHEN term = 'short' OR (term IS NULL AND furnished = 1) THEN price_month END) AS min_stay_month,
        MAX(beds) AS max_beds,
        MIN(first_seen) AS first_seen, MAX(last_seen) AS last_seen
 FROM l GROUP BY place_key;

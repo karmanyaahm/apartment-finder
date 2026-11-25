@@ -248,6 +248,8 @@ def fact(rule: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
         out = {"f": rule["field"], "v": v}
         if row.get(f"{rule['field']}_evidence"):
             out["ev"] = row[f"{rule['field']}_evidence"]
+        if rule.get("strict"):  # a strict limit fails on equality: the card says ">= lim" / "<= lim"
+            out["strict"] = True
         if t == "min":  # a floor: the card says "< lim"
             return {**out, "lim": rule["value"], "min": True}
         return {**out, "lim": rule["value"]} if t == "max" else out

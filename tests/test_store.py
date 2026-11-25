@@ -164,6 +164,22 @@ def test_places_group_listings(conn):
     assert conn.execute("SELECT n_listings FROM units").fetchone()[0] == 2
 
 
+def test_lease_and_stay_prices_split_by_term_like_the_goals(conn):
+    """A furnished long-term lease (Blueground's 1-12+ months on Zillow) is a lease price, as the goals' term rule
+    judges it; furnished decides only when the term is unknown (328 Bryant St, 2026-11-25)."""
+    r = start_run(conn, "intake", "zillow")
+    rows = [("1", 6480, {"term": "long", "furnished": True}), ("2", 6500, {"term": "short", "furnished": True}),
+            ("3", 5000, {"furnished": True}), ("4", 4000, {})]
+    for sid, price, d in rows:
+        _obs(conn, r, sid=sid, price=price, **d)
+        _link(conn, sid=sid, pk="p_a", uk=f"p_a/{sid}")
+    p = conn.execute("SELECT * FROM places").fetchone()
+    assert p["min_lease_month"] == 4000 and p["min_stay_month"] == 5000
+    _link(conn, sid="4", pk="p_b", uk="p_b/4")  # without the unknown-term unfurnished row: the furnished lease shows
+    p = conn.execute("SELECT * FROM places WHERE place_key = 'p_a'").fetchone()
+    assert p["min_lease_month"] == 6480 and p["min_lease_per_bed"] == 2160 and p["min_stay_month"] == 5000
+
+
 def test_stay_price_normalized_to_month(conn):
     r = start_run(conn, "intake", "airbnb")
     append_observation(conn, r, "airbnb", "a1", {"beds": 1}, price=3100, price_basis="stay",

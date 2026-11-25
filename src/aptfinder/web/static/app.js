@@ -214,7 +214,7 @@ function limitValue(p, pt, mode) {
   return pt.startsWith("set:") ? (p.nearest || {})[`${pt.slice(4)}|${mode}`] : p.minutes[`${pt}|${mode}`];
 }
 // a commute time coloured by the provider that computed it, the provider named on hover ("~" marks an estimate)
-const SRC = { google: ["src-google", "Google Maps"], knn: ["src-knn", "from 3 nearby Google routes"],
+const SRC = { google: ["src-google", "Google Maps"], knn: ["src-knn", "range of up to 3 nearby Google routes"],
   estimate: ["src-estimate", "straight-line estimate (not routed)"] };
 const srcOf = (prov) => SRC[prov] || ["", prov || "unknown source"];
 // the text of a time: a KNN range "17-19" (one number when both ends round alike), "~27" for an estimate
@@ -222,10 +222,10 @@ const srcText = (v) => v.provider === "knn" && v.min != null
   ? (Math.round(v.min) === Math.round(v.max) ? mins(v.min) : `${Math.round(v.min)}–${Math.round(v.max)}`)
   : `${v.provider === "estimate" ? "~" : ""}${mins(v.minutes)}`;
 const srcTitle = (v) => v.provider === "knn" && v.neighbors
-  ? `from 3 nearby Google routes: ${v.neighbors.map((n) => mins(n.minutes)).join(", ")} min (${v.neighbors.map((n) => n.km).join(", ")} km away)`
+  ? `from ${v.neighbors.length} nearby Google route${v.neighbors.length === 1 ? "" : "s"}: ${v.neighbors.map((n) => mins(n.minutes)).join(", ")} min (${v.neighbors.map((n) => n.km).join(", ")} km away)`
   : srcOf(v.provider)[1];
 const srcMin = (v) => `<b class="${srcOf(v.provider)[0]}" title="${esc(srcTitle(v))}">${srcText(v)}</b>`;
-const SRC_LEGEND = `<span class="src-key"><b class="src-google">■</b> Google Maps · <b class="src-knn">■ a–b</b> range of the 3 nearest places' Google routes · <b class="src-estimate">■ ~</b> straight-line estimate</span>`;
+const SRC_LEGEND = `<span class="src-key"><b class="src-google">■</b> Google Maps · <b class="src-knn">■ a–b</b> range of up to 3 nearby places' Google routes · <b class="src-estimate">■ ~</b> straight-line estimate</span>`;
 
 // the selected goal's commute rules as (point, mode) facts on each card, so the requirement is visible:
 // "walk to nearest Google bus 6 min (stop name, est.)"; the goal's fails colour them
@@ -270,7 +270,8 @@ function netFact(p, fails) {
   const n = netCommute(p);
   if (!n) return "";
   const agg = $("#agg").value;
-  const mk = markFor(fails, (x) => x.f === "net_commute");
+  // the rule's verdict colours the number only when the card shows the rule's own aggregate; else it stays a chip
+  const mk = markFor(fails, (x) => x.f === "net_commute" && x.agg === agg);
   const trips = `${n.n} trip${n.n > 1 ? "s" : ""}${n.est ? ", est." : ""}`;
   if (n.v == null) return `<span${mk || ' data-ff="needs_check"'}>net commute: no times yet (${trips})</span>`;
   const unk = n.known < n.n ? (agg === "total" ? ` + ? (${n.n - n.known} unknown)` : ` of ${n.known} known (${n.n - n.known} unknown)`) : "";
@@ -305,6 +306,7 @@ function ruleTemplates() {
     ["beds at least", { type: "min", field: "beds", value: 3 }],
     ["beds and baths", { type: "size_options", options: [{ beds: 3, min_baths: 2 }] }],
     ["commute", { type: "commute_any", target: pt, options: [{ mode: "bike", max: 25 }] }],
+    ["nearest point of a set", { type: "near", set: Object.keys(S.meta.point_sets).find((k) => k !== "commute_targets"), mode: "walk", max: 15 }],
     ["amenity", { type: "amenity", name: "gym", match: ["gym", "fitness"] }],
     ["lease term", { type: "equals", field: "term", value: "long" }],
     ["furnished", { type: "equals", field: "furnished", value: true }],
@@ -312,12 +314,12 @@ function ruleTemplates() {
     ["no restrictions (who may rent)", { type: "equals", field: "restriction", value: "none" }],
     ["available for dates", { type: "dates_cover", start: new Date().toISOString().slice(0, 10), end: new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10) }],
     ["field known", { type: "known", field: "sqft" }],
-    ["net commute (all commute rules)", { type: "net_commute", agg: $("#agg").value || "total", max: 90 }],
+    ["net commute (the must-have commute rules)", { type: "net_commute", agg: $("#agg").value || "total", max: 90 }],
   ];
 }
 const opt = (v, label, sel) => `<option value="${esc(v)}"${String(v) === String(sel) ? " selected" : ""}>${esc(label)}</option>`;
 const FIELD_LABEL = { price: "price", price_month: "price / month", price_per_bed: "price / bed", beds: "beds", baths: "baths",
-  sqft: "sqft", term: "term", furnished: "furnished", private_bath: "private bath", kind: "kind" };
+  sqft: "sqft", term: "term", furnished: "furnished", private_bath: "private bath", kind: "kind", restriction: "who may rent" };
 const fieldName = (f) => FIELD_LABEL[f] || f.replace(/_/g, " ");
 // one rule row's inputs; each input names the path it sets in data-p ("value", "options.0.max", ...)
 function ruleInputs(r) {
@@ -359,7 +361,8 @@ function ruleInputs(r) {
     const preset = Object.keys(G.amenities).includes(r.name) ? r.name : "";
     return `<select data-amenity>${Object.keys(G.amenities).map((k) => opt(k, k.replace(/_/g, " "), preset)).join("")}${opt("", "other…", preset)}</select>
       ${preset ? "" : `<input data-p="name" value="${esc(r.name)}" placeholder="name" style="width:7em">`}
-      <input data-words="match" value="${esc((r.match || []).join(", "))}" placeholder="words, comma separated" title="matches when an amenity entry contains any of these words" style="width:11em">`;
+      <input data-words="match" value="${esc((r.match || []).join(", "))}" placeholder="words, comma separated" title="matches when an amenity entry contains any of these words" style="width:11em">
+      not <input data-words="exclude" value="${esc((r.exclude || []).join(", "))}" placeholder="except words" title="an entry containing any of these words never matches (e.g. no parking)" style="width:8em">`;
   }
   return `<code>${esc(JSON.stringify(r))}</code>`;
 }
@@ -606,7 +609,7 @@ function failChip(x) {
   else if (x.f === "near") t = `${x.modes.map((m) => MODE_LABEL[m] || m).join("/")} to nearest ${S.meta.point_sets?.[x.set]?.label || x.set}`;
   else if (x.f === "amenity") t = `no ${x.v}`;
   else if (x.f === "net_commute") t = `net commute (${x.agg}) > ${mins(x.lim)}`;
-  else t = `${FACT_LABEL[x.f] || x.f.replace(/_/g, " ")} ${fmtv(x.v)}${x.lim != null && x.s === "fail" && x.v != null ? ` ${x.min ? "<" : ">"} ${num(x.lim)}` : ""}`;
+  else t = `${FACT_LABEL[x.f] || x.f.replace(/_/g, " ")} ${fmtv(x.v)}${x.lim != null && x.s === "fail" && x.v != null ? ` ${x.min ? (x.strict ? "≤" : "<") : (x.strict ? "≥" : ">")} ${num(x.lim)}` : ""}`;
   return `<span class="chip ff-chip" data-ff="${x.s}" title="${esc(`${x.goal}: ${x.text}`)}">${esc(t)}</span>`;
 }
 
@@ -686,6 +689,18 @@ function restrictionBadge(rx, fails = []) {
   if (!rx) return "";
   const mk = markFor(fails, (x) => x.f === "restriction");
   return `<span class="chip rx-chip"${mk || ` title="${esc(`"${rx.evidence || ""}" (${rx.source})`)}"`}>${esc(RESTRICTION_LABEL[rx.value] || rx.value)}</span>`;
+}
+
+// Your answer on who may rent this place (annotation place / restriction, the same one Verify writes): it beats
+// every source's reading in the goals' restriction rule. The values are the rule's own (api/goals equals_fields).
+function whoMayRent(d, p) {
+  const vals = S.goalsData?.equals_fields?.restriction;
+  if (!vals || S.meta.readonly) return "";
+  const mine = [...d.annotations].reverse().find((a) => a.attribute === "restriction" && a.comment)?.comment;
+  const read = p.restriction ? `read: ${RESTRICTION_LABEL[p.restriction.value] || p.restriction.value} ("${p.restriction.evidence || ""}", ${p.restriction.source})` : "no limit read from any source";
+  return `<div class="small">Who may rent: <select id="rx-set"><option value="">${mine ? "" : "not answered"}</option>
+    ${vals.map((v) => opt(v, v === "none" ? "no limit (anyone)" : RESTRICTION_LABEL[v] || v, mine)).join("")}</select>
+    <span class="muted">${mine ? "your answer" : esc(read)}</span></div>`;
 }
 
 function stars(n) { return n ? `<span class="stars" title="${n}/5">${"★".repeat(n)}${"☆".repeat(5 - n)}</span>` : ""; }
@@ -908,6 +923,7 @@ async function openPlace(pk) {
     ${(d.websites || []).length ? `<div class="website">${d.websites.map((w) => `<a href="${esc(w.url)}" target="_blank" rel="noopener noreferrer">🌐 ${esc(w.site)} ↗</a>`).join(" ")}</div>` : '<div class="website muted small">no website found yet</div>'}
     <div class="muted small">${esc(p.address || "address unknown")} ${p.city ? "· " + esc(p.city) : ""} · ${esc(pk)}</div>
     <h3>Goals</h3>${goals}
+    ${whoMayRent(d, p)}
     ${photos.length ? `<h3>Photos (${photos.length})</h3><div class="media">${photos.join("")}</div>` : '<p class="muted small">No photos from any source.</p>'}
     ${relatedBox}
     ${(d.nearby || []).length ? `<details class="merge small"><summary>Same building as a nearby place? Merge…</summary>
@@ -950,6 +966,13 @@ function wireDrawer(pk) {
     if (!a) return;
     S.meta.attributes.push(a);
     openPlace(pk);
+  });
+  $("#rx-set")?.addEventListener("change", async (e) => {
+    if (!e.target.value) return;
+    try {
+      await post("api/annotations", { entity_type: "place", entity_key: pk, attribute: "restriction", comment: e.target.value });
+      toast(`Who may rent: ${e.target.selectedOptions[0].textContent}`); await refreshAfterWrite(pk);
+    } catch (err) { toast("Not saved: " + err.message, 6000); }
   });
   $$("#drawer [data-goto]").forEach((a) => a.addEventListener("click", (e) => { e.preventDefault(); openPlace(a.dataset.goto); }));
   $$("#drawer [data-raw]").forEach((b) => b.addEventListener("click", () => {
