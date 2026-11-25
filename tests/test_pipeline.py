@@ -75,3 +75,24 @@ def test_website_states_and_no_website_count(db, monkeypatch):
     d = pipeline.overview(conn)
     nv = next(s for s in d["stages"] if s["id"] == "verify")
     assert nv["counts"]["no_website"] == len(verify.no_website_queue(conn))
+
+
+def test_sites_show_the_last_render_outcome_failure_or_not(db):
+    import json
+
+    conn = connect(db)
+    conn.execute("INSERT INTO runs (started_at, finished_at, component, source, params, counts, status) VALUES "
+                 "('2026-11-24T10:00:00+00:00', '2026-11-24T10:05:00+00:00', 'intake', 'direct', ?, ?, 'ok')",
+                 (json.dumps({"render": True, "areas": ["sevens#render", "the-dean#render"]}),
+                  json.dumps({"areas": {"sevens#render": {"state": "failed", "outcome": "blocked", "http_status": 403,
+                                                          "error": "Request blocked - received 403 status code."},
+                                        "the-dean#render": {"state": "complete", "outcome": "ok", "items": 6}}})))
+    conn.commit()
+    d = TestClient(create_app(db)).get("/api/pipeline").json()
+    rows = {r["id"]: r for r in d["sites"]}
+    assert rows["sevens"]["render"]["label"] == "blocked (HTTP 403) on 11-24, will retry"
+    assert rows["sevens"]["render"]["retry"] and not rows["the-dean"]["render"]["retry"]
+    assert rows["avalon-mountain-view"]["render"]["outcome"] == "skipped" and rows["landsby"]["render"] is None
+    sites = next(s for s in d["stages"] if s["id"] == "sites")
+    assert "nix run .#intake -- render --chunk mountain_view --retry-failed" in sites["commands"]
+    assert sites["render_counts"]["blocked"] == 1

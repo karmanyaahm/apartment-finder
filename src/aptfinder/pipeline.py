@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .areas import chunk_of, is_active
-from .config import load_areas, load_goals, load_points, load_sites
+from .config import CHECK_LABEL, CHECK_RETRY, check_outcome, load_areas, load_goals, load_points, load_sites
 from .verify import is_named_building
 
 STALE_DAYS = 7
@@ -21,7 +21,7 @@ WEB_STATES = {  # website state -> label, in display order
     "scraped": "own site scraped, no prices",
     "listed": "in the site list, not scraped yet",
     "known": "URL known, not fetched yet",
-    "blocked": "site blocks the scraper (HTTP 403)",
+    "blocked": "page not fetched yet (blocked or failed; retried)",
     "rejected": "found, page lacks the address",
     "no_site": "searched, no site found",
     "none_confirmed": "you said: no website",
@@ -99,11 +99,6 @@ def website_status(conn: sqlite3.Connection, place_key: str | None = None) -> di
         if mine(m.get("place_key")):
             out[m["place_key"]] = {"state": "no_site", "model": m.get("model") or "?",
                                    "detail": f"searched ({m.get('model') or '?'}): {m.get('note') or 'no site found'}"}
-    for f in rec.get("found", []):
-        c = checks.get(f["id"])
-        if mine(f.get("place_key")) and c and not c.get("ok"):
-            st = "blocked" if c.get("reason") == "page not fetched" else "rejected"
-            out[f["place_key"]] = {"state": st, "url": f["url"], "detail": f"{c.get('reason')} ({f.get('found_by')})"}
     for pk, url in conn.execute(
             "SELECT place_key, MIN(json_extract(data, '$.extra.website')) FROM listings WHERE place_key IS NOT NULL "
             "AND json_extract(data, '$.extra.website') IS NOT NULL" + w + " GROUP BY place_key", args):
@@ -119,6 +114,18 @@ def website_status(conn: sqlite3.Connection, place_key: str | None = None) -> di
         else:
             out[r["entity_key"]] = {"state": "known", "url": r["comment"],
                                     "detail": "you gave the website; promote-sites fetches it"}
+    # a found site's latest check: rejected (fetched, no address) or not fetched yet (blocked, timed out: retried)
+    for f in rec.get("found", []):
+        c = checks.get(f["id"])
+        if not (mine(f.get("place_key")) and c) or out.get(f["place_key"], {}).get("state") == "none_confirmed":
+            continue
+        oc = check_outcome(c)
+        if oc == "rejected":
+            out[f["place_key"]] = {"state": "rejected", "url": f["url"],
+                                   "detail": f"{c.get('reason')} ({f.get('found_by')})"}
+        elif oc in CHECK_RETRY:
+            out[f["place_key"]] = {"state": "blocked", "url": f["url"], "outcome": oc,
+                                   "detail": f"{check_label(c)} ({f.get('found_by')})"}
     for r in conn.execute(
             "SELECT place_key, MAX(last_seen) AS seen, SUM(price IS NOT NULL) AS priced, MIN(url) AS url "
             "FROM listings WHERE source = 'direct' AND place_key IS NOT NULL" + w + " GROUP BY place_key", args):
@@ -126,6 +133,37 @@ def website_status(conn: sqlite3.Connection, place_key: str | None = None) -> di
                                "detail": "own site gives units with prices" if r["priced"]
                                else "own site scraped: plans, photos or link, no prices"}
     return out
+
+
+def render_outcomes(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    """site id -> its latest render outcome (`intake.render.last_outcomes`) with a label ('blocked (HTTP 403) on
+    11-24, will retry'), `retry` (a transient failure) and `stale` (done, but older than STALE_DAYS)."""
+    from .intake.render import TRANSIENT, describe, last_outcomes
+
+    out = {}
+    for sid, o in last_outcomes(conn).items():
+        out[sid] = {**o, "label": describe(o), "retry": o["outcome"] in TRANSIENT,
+                    "stale": o["outcome"] not in TRANSIENT and _fresh(o["at"], datetime.now(timezone.utc)) == "stale"}
+    return out
+
+
+def site_checks() -> dict[str, dict[str, Any]]:
+    """site id -> the latest address check of a discovered site (`promote-sites`), with its outcome and a label."""
+    from .intake.discover import _records
+    from .config import last_checks
+
+    return {sid: {"outcome": check_outcome(c), "at": c.get("at"), "http_status": c.get("http_status"),
+                  "label": check_label(c)} for sid, c in last_checks(_records()).items()}
+
+
+def check_label(c: dict[str, Any]) -> str:
+    """'blocked (HTTP 403) on 11-24, will retry'."""
+    oc = check_outcome(c)
+    return (CHECK_LABEL[oc] + (f" (HTTP {c['http_status']})" if c.get("http_status") else "")
+            + (f" on {str(c['at'])[5:10]}" if c.get("at") else "") + (", will retry" if oc in CHECK_RETRY else ""))
+
+
+RENDER_SKIP = {"avalon"}  # intake.render.SKIP_PLATFORMS: the page data gives every unit
 
 
 def _current_points() -> set[str]:
@@ -288,17 +326,23 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
         "SELECT substr(source_id, 1, instr(source_id, ':') - 1) AS site, COUNT(*) AS rows, SUM(active) AS active, "
         "SUM(price IS NOT NULL) AS priced, SUM(kind = 'site_info') AS info FROM listings WHERE source = 'direct' "
         "GROUP BY 1")}
+    renders = render_outcomes(conn)
+    checks = site_checks()
     site_rows = []
     for sid, s in sites.items():
         p = by_key.get(s.get("place_key") or "")
         chunk = s.get("chunk") or (p["chunk"] if p else None)
         last = (seen.get(sid) or {}).get("last")
         st = stats.get(sid) or {}
+        rd = renders.get(sid)
+        if s.get("platform") in RENDER_SKIP:
+            rd = {"outcome": "skipped", "label": "not needed (page data gives every unit)"}
         site_rows.append({"id": sid, "name": s.get("name") or sid, "url": s["url"], "platform": s.get("platform"),
                           "chunk": chunk, "active": is_active(chunk), "last": last, "state": _fresh(last, now),
                           "rows": st.get("rows") or 0, "priced": st.get("priced") or 0,
                           "info_only": bool(st.get("rows")) and st.get("info") == st.get("rows"),
                           "discovered": bool(s.get("verify_address")),
+                          "render": rd, "check": checks.get(sid),
                           "command": f"{INTAKE} run direct --area {sid}" + (" --reload" if last else "")})
     order = {"todo": 0, "stale": 1, "done": 2}
     site_rows.sort(key=lambda r: (order[r["state"]], r["last"] or "", r["name"].lower()))
@@ -311,10 +355,17 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
             cmds.append(f"{INTAKE} run direct --chunk {ch}")
         if mine["stale"]:
             cmds.append(f"{INTAKE} run direct --chunk {ch} --reload")
+        rmine = Counter((r["render"] or {}).get("retry") for r in act_sites if r["chunk"] == ch)
+        if rmine[True]:
+            cmds.append(f"{INTAKE} render --chunk {ch} --retry-failed")
+        if any(not r["render"] or r["render"].get("stale") for r in act_sites if r["chunk"] == ch):
+            cmds.append(f"{INTAKE} render --chunk {ch}")
+    rc = Counter((r["render"] or {"outcome": "never"})["outcome"] for r in act_sites)
     stage("sites", "Own-site scrapes", _roll([r["state"] for r in act_sites]),
           f"active chunks: {sc['done']} fresh, {sc['stale']} stale, {sc['todo']} never scraped "
-          f"of {len(act_sites)} sites ({len(site_rows)} in the list)", cmds,
-          counts=dict(sc), **_run_info(runs, "intake", "direct"))
+          f"of {len(act_sites)} sites ({len(site_rows)} in the list); rendered: "
+          + (", ".join(f"{n} {k}" for k, n in rc.most_common()) or "none"), cmds,
+          counts=dict(sc), render_counts=dict(rc), **_run_info(runs, "intake", "direct"))
 
     # 7-9. commute: trips under the current point ids only (renamed points leave old rows behind)
     points = _current_points()
@@ -425,5 +476,12 @@ def place_status(conn: sqlite3.Connection, place_key: str, now: datetime | None 
             "SELECT DISTINCT place_key, point_id, provider FROM trips WHERE place_key IN (?, ?)", (place_key, base)):
         if pt in points:
             trips[prov] += 1
+    # the building's own site(s): the latest render and address check of each, failure or not
+    sids = {sid for sid, s in load_sites().items() if s.get("place_key") == base}
+    sids |= {r[0] for r in conn.execute(
+        "SELECT DISTINCT substr(source_id, 1, instr(source_id, ':') - 1) FROM listings WHERE source = 'direct' "
+        "AND place_key = ?", (base,))}
+    renders, checks = render_outcomes(conn), site_checks()
+    sites = [{"id": sid, "render": renders.get(sid), "check": checks.get(sid)} for sid in sorted(sids - {""})]
     return {"sources": sources, "website": {**ws, "label": WEB_STATES[ws["state"]]}, "trips": dict(trips),
-            "stale_days": STALE_DAYS}
+            "sites": sites, "stale_days": STALE_DAYS}

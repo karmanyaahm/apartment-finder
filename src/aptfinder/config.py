@@ -119,17 +119,44 @@ class Area(BaseModel):
     slug: str | None = None  # box: Airbnb place slug for the search URL (default Palo-Alto--CA)
 
 
+CHECK_RETRY = {"blocked", "timeout", "error", "not_fetched", "empty"}  # a discovered site's page not fetched yet
+CHECK_LABEL = {"ok": "address shown", "rejected": "page does not show the street address",
+               "blocked": "blocked", "timeout": "timed out", "error": "fetch failed", "not_fetched": "page not fetched",
+               "empty": "page has no text"}
+
+
+def check_outcome(c: dict[str, Any]) -> str:
+    """Outcome of a `[[check]]` of a discovered site: `ok`, `rejected` (fetched, the address is not on the page;
+    the only outcome that drops the site) or a retryable one (CHECK_RETRY). Checks written before outcomes were
+    recorded are read from their reason ('page not fetched', 'page has no text')."""
+    if c.get("outcome"):
+        return c["outcome"]
+    if c.get("ok"):
+        return "ok"
+    reason = c.get("reason") or ""
+    return ("rejected" if reason.startswith("page does not show") else "empty" if reason == "page has no text"
+            else "not_fetched")
+
+
+def last_checks(raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """site id -> its latest `[[check]]` (the file is append-only, so later rows are newer)."""
+    return {c["id"]: c for c in raw.get("check", [])}
+
+
 def load_sites(config_dir: Path | None = None) -> dict[str, dict[str, Any]]:
     """Community websites: hand-listed ones (config/direct_sites.toml) plus ones found by `aptf-intake
     discover-sites` (config/discovered_sites.toml, machine-appended). A discovered site is left out once a
-    `[[check]]` failed it, or when a hand entry has the same id, URL or place; it carries `verify_address`."""
+    `[[check]]` rejected it (its latest check: the page was fetched and lacks the address; a page not fetched is
+    retried), or when a hand entry has the same id, URL or place; it carries `verify_address`."""
     d = config_dir or settings.CONFIG_DIR
     out: dict[str, dict[str, Any]] = {}
     if (d / "direct_sites.toml").exists():
         out = {s["id"]: s for s in _toml(d / "direct_sites.toml").get("site", [])}
     if (d / "discovered_sites.toml").exists():
         raw = _toml(d / "discovered_sites.toml")
-        failed = {c["id"] for c in raw.get("check", []) if not c.get("ok")}
+        # only a page that was fetched and lacks the address rejects a site; a page not fetched (blocked, timed
+        # out, empty) is retried. The last check of a site wins.
+        failed = {i for i, c in last_checks(raw).items() if check_outcome(c) == "rejected"}
         moved = {c["id"]: c for c in raw.get("check", []) if c.get("ok") and c.get("final_url")}
         urls = {s["url"].rstrip("/") for s in out.values()}
         places = {s.get("place_key") for s in out.values()} - {None}

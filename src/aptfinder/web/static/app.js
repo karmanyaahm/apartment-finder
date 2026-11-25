@@ -640,9 +640,10 @@ async function openPipeline() {
     ${Object.entries(web.labels).map(([k, label]) => `<tr><td>${esc(label)}${k === "no_site" && models ? ` <span class="muted">(${esc(models)})</span>` : ""}</td>
       <td>${web.active_by_state[k] || 0}</td><td>${web.by_state[k] || 0}</td></tr>`).join("")}
     <tr><td><b>named buildings</b></td><td><b>${web.active_named}</b></td><td><b>${web.named}</b></td></tr></table></div>`;
-  const sites = `<div class="scroll-x"><table><tr><th>site</th><th>chunk</th><th>state</th><th>last scrape</th><th>rows</th><th>priced</th><th>re-scrape</th></tr>
-    ${d.sites.map((s) => `<tr class="${s.active ? "" : "off"}"><td><a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.name)}</a>${s.discovered ? ' <span class="muted small">(found by search)</span>' : ""}</td>
+  const sites = `<div class="scroll-x"><table><tr><th>site</th><th>chunk</th><th>state</th><th>last scrape</th><th>last render</th><th>rows</th><th>priced</th><th>re-scrape</th></tr>
+    ${d.sites.map((s) => `<tr class="${s.active ? "" : "off"}"><td><a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.name)}</a>${s.discovered ? ' <span class="muted small">(found by search)</span>' : ""}${s.check && s.check.outcome !== "ok" ? `<br><span class="small ${s.check.outcome === "rejected" ? "reason fail" : "muted"}">address check: ${esc(s.check.label)}</span>` : ""}</td>
       <td>${esc(s.chunk || "?")}</td><td>${stChip(s.state, s.state === "todo" ? "never" : s.state)}</td><td>${day(s.last)}</td>
+      <td>${renderCell(s.render)}</td>
       <td>${s.rows}${s.info_only ? ' <span class="muted small">photos/link only</span>' : ""}</td><td>${s.priced}</td><td class="cmd"><code>${esc(s.command)}</code></td></tr>`).join("")}
   </table></div>`;
   const anchors = d.stages.find((s) => s.id === "anchors").anchors;
@@ -662,6 +663,13 @@ async function openPipeline() {
   </div>`;
 }
 
+// a site's last render, failure or not: "blocked (HTTP 403) on 11-24, will retry"
+function renderCell(r) {
+  if (!r) return '<span class="muted">never</span>';
+  const st = r.outcome === "skipped" ? "done" : r.retry ? "blocked" : r.stale ? "stale" : "done";
+  return `${stChip(st, r.outcome === "skipped" ? "done" : r.retry ? "failed" : r.stale ? "stale" : "done")} <span class="small" title="${esc(r.error || "")}">${esc(r.label || "")}</span>`;
+}
+
 function pipelineBlock(ps) {
   if (!ps) return "";
   const rows = ps.sources.map((s) => `<tr><td>${esc(s.source === "direct" ? "own site" : s.source)}</td><td>${day(s.seen)}</td>
@@ -676,6 +684,7 @@ function pipelineBlock(ps) {
   return `<h3>Pipeline</h3><div class="pipe-place">
     <div class="scroll-x"><table><tr><th>source</th><th>last seen</th><th></th><th>listings</th><th>text</th></tr>${rows}</table></div>
     <p class="small">Own website: <b>${esc(w.label)}</b>${w.url ? ` · <a href="${esc(w.url)}" target="_blank" rel="noopener noreferrer">${esc(w.url)}</a>` : ""} <span class="muted">${esc(w.detail || "")}</span></p>
+    ${(ps.sites || []).map((x) => `<p class="small">Own site <code>${esc(x.id)}</code>: render ${renderCell(x.render)}${x.check ? ` · address check: ${esc(x.check.label)}` : ""}</p>`).join("")}
     <p class="small">Commute: ${commute}</p></div>`;
 }
 

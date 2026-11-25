@@ -89,6 +89,8 @@ def main(argv: list[str] | None = None) -> None:
     ps.add_argument("--chunk", action="append", required=True)
     ps.add_argument("--limit", type=int, default=100)
     ps.add_argument("--no-fetch", action="store_true")
+    ps.add_argument("--retry-failed", action="store_true", help="only fetch again found sites whose page was not "
+                                                               "fetched last time (blocked, timed out, empty)")
     ps.add_argument("--dry-run", action="store_true")
     ex = sub.add_parser("extract", help="read facts from listing text with Claude Haiku (address, name, website, "
                                         "furnished, private bath, minimum stay, utilities)")
@@ -106,6 +108,8 @@ def main(argv: list[str] | None = None) -> None:
     rd.add_argument("--site", action="append", default=[], help="site id (repeatable); default every site in --chunk")
     rd.add_argument("--model", default="haiku")
     rd.add_argument("--max-usd", type=float, default=1.0, help="cap for each of Apify and Claude")
+    rd.add_argument("--retry-failed", action="store_true", help="only sites whose last render failed (blocked, "
+                                                               "timed out, empty, not returned)")
     rd.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
 
@@ -124,7 +128,7 @@ def main(argv: list[str] | None = None) -> None:
 
         try:
             res = render(conn, args.chunk, sites=args.site or None, model=args.model, max_claude_usd=args.max_usd,
-                         max_apify_usd=args.max_usd, dry_run=args.dry_run)
+                         max_apify_usd=args.max_usd, dry_run=args.dry_run, retry_failed=args.retry_failed)
         except Blocker as e:
             raise SystemExit(f"BLOCKED: {e}")
         print(json.dumps(res, indent=1, default=str))
@@ -135,7 +139,8 @@ def main(argv: list[str] | None = None) -> None:
         from .extract import extract
 
         try:
-            res = (promote(conn, args.chunk, limit=args.limit, dry_run=args.dry_run, fetch=not args.no_fetch)
+            res = (promote(conn, args.chunk, limit=args.limit, dry_run=args.dry_run, fetch=not args.no_fetch,
+                           retry_failed=args.retry_failed)
                    if args.cmd == "promote-sites" else
                    extract(conn, args.source, limit=args.limit, batch=args.batch, model=args.model,
                            max_usd=args.max_usd, dry_run=args.dry_run, reread=args.reread))

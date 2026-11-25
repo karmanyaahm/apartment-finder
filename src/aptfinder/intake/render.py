@@ -1,6 +1,6 @@
 """Render buildings' own websites in a real browser and read their offered plans and prices with Claude Haiku.
 
-  aptf-intake render --chunk mountain_view [--site ID] [--dry-run]
+  aptf-intake render --chunk mountain_view [--site ID] [--retry-failed] [--dry-run]
 
 Many community sites load floor plans, prices and availability with JavaScript, which the plain page fetch
 (`direct`, cheerio) never sees. This step fetches each site in the site list (`config.load_sites`) through Apify's
@@ -8,6 +8,11 @@ Many community sites load floor plans, prices and availability with JavaScript, 
 anything that applies, books, contacts or signs in: AGENTS.md rule 7), scrolls to the bottom, and also opens the
 site's own floor-plans page once, and up to MAX_UNIT_PAGES per-plan unit lists ("View apartments"), all inside the
 community's own path. Avalon sites are skipped: their page data already gives every unit exactly.
+
+Each site's outcome is recorded in the run's counts (`areas['<site>#render']`): `ok`, `no_plans`, or a transient
+failure (`blocked`, `timeout`, `empty`, `not_returned`, `error`, `not_read`) with the HTTP status and the
+scraper's message. A chunk run picks transient failures first, then sites never rendered, then those older than
+STALE_DAYS; `ok` and `no_plans` are done until then.
 
 Each site's rendered text goes to headless `claude -p --model haiku` (no tools) with a fixed schema of plans and
 units. An answer counts only if what it states is on the page: the plan or unit name, the price (as written, with or
@@ -23,7 +28,7 @@ import os
 import re
 import subprocess
 import tempfile
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any
 
 from .. import identity, settings
@@ -31,7 +36,7 @@ from ..areas import chunk_of
 from ..config import load_sites
 from ..store import append_observation, finish_run, start_run
 from ..store.models import ObservationData
-from .apify import run_actor
+from .apify import classify_failure, failed_requests, log_errors, run_actor, same_url
 from .discover import SECRET_ENV, Blocker
 from .lease import _avail
 
@@ -216,7 +221,86 @@ def _site_address(conn, sid: str, site: dict[str, Any]) -> tuple[str | None, str
     return (r["address"], r["place_key"]) if r else (site.get("address"), None)
 
 
+STALE_DAYS = 7
+DONE = {"ok", "no_plans"}  # done until stale
+TRANSIENT = {"blocked", "timeout", "empty", "not_returned", "error", "not_read"}  # picked again first
+STATE_OF = {"ok": "complete", "no_plans": "empty"}  # area state (retires old plans); any other outcome: failed
+MIN_TEXT = 200  # rendered text shorter than this is `empty`
 PAGE_BUDGET = {"start": 12000, "floorplans": 12000, "units": 6000}  # characters of each page sent to Haiku
+OUTCOME_LABEL = {"ok": "plans found", "no_plans": "rendered, no plans offered", "blocked": "blocked",
+                 "timeout": "timed out", "empty": "rendered almost no text", "not_returned": "no page returned",
+                 "error": "failed", "not_read": "not read (Claude budget reached)"}
+
+
+def describe(o: dict[str, Any]) -> str:
+    """'blocked (HTTP 403) on 11-24, will retry'."""
+    s = OUTCOME_LABEL.get(o["outcome"], o["outcome"])
+    if o.get("http_status"):
+        s += f" (HTTP {o['http_status']})"
+    if o.get("at"):
+        s += f" on {o['at'][5:10]}"
+    return s + (", will retry" if o["outcome"] in TRANSIENT else "")
+
+
+def last_outcomes(conn) -> dict[str, dict[str, Any]]:
+    """site id -> its latest render outcome {outcome, at, run_id, http_status, error, plans}. Runs before outcomes
+    were recorded: state complete -> ok, empty -> no_plans, partial -> not_read, failed -> not_returned."""
+    old = {"complete": "ok", "empty": "no_plans", "partial": "not_read", "failed": "not_returned"}
+    out: dict[str, dict[str, Any]] = {}
+    for r in conn.execute("SELECT id, started_at, counts FROM runs WHERE component = 'intake' AND source = 'direct' "
+                          "AND json_extract(params, '$.render') AND counts IS NOT NULL ORDER BY id"):
+        for area, a in (json.loads(r["counts"]).get("areas") or {}).items():
+            if not area.endswith("#render"):
+                continue
+            oc = a.get("outcome") or old.get(a.get("state"), "not_returned")
+            out[area[: -len("#render")]] = {"outcome": oc, "at": r["started_at"], "run_id": r["id"],
+                                            "http_status": a.get("http_status"), "error": a.get("error"),
+                                            "plans": a.get("items")}
+    return out
+
+
+def _age_days(ts: str) -> float:
+    t = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    t = t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - t).total_seconds() / 86400
+
+
+def select(candidates: list[str], last: dict[str, dict[str, Any]], *, retry_failed: bool = False) -> list[tuple[str, str]]:
+    """[(site, why)] in the order to render: transient failures first, then never rendered, then stale; a site
+    whose last outcome is ok or no_plans and younger than STALE_DAYS is done. `retry_failed`: only the failures."""
+    fail, never, stale = [], [], []
+    for sid in candidates:
+        o = last.get(sid)
+        if o is None:
+            never.append((sid, "never rendered"))
+        elif o["outcome"] in TRANSIENT:
+            fail.append((sid, f"retry: {describe(o)}"))
+        elif _age_days(o["at"]) > STALE_DAYS:
+            stale.append((sid, f"stale: {describe(o)}"))
+    return fail if retry_failed else fail + never + stale
+
+
+def site_outcome(start_url: str, pages: list[dict[str, Any]], failed: list[dict[str, Any]],
+                 log: str | None) -> dict[str, Any]:
+    """Outcome of one site's fetch before reading: `read` (pages to read), or a failure with the HTTP status and
+    the scraper's message. `pages`: the site's items; `failed`: failed requests of the whole run (`#error` items)."""
+    start = [p for p in pages if p.get("kind", "start" if not p.get("child") else "") == "start"]
+    if start:
+        status = start[0].get("status")
+        text = "".join(p.get("text") or "" for p in pages)
+        if status in (403, 429):
+            return {"outcome": "blocked", "http_status": status, "error": f"HTTP {status}"}
+        if len(text.strip()) < MIN_TEXT:
+            return {"outcome": "empty", "http_status": status, "error": f"{len(text.strip())} characters of text"}
+        return {"outcome": "read", "http_status": status}
+    f = next((f for f in failed if same_url(f["url"], start_url)), None)
+    if f:
+        return {"outcome": classify_failure(f["status"], f["messages"]), "http_status": f["status"],
+                "error": (f["messages"] or [None])[-1]}
+    status, msgs = log_errors(log, start_url)
+    if msgs:
+        return {"outcome": classify_failure(status, msgs), "http_status": status, "error": msgs[-1]}
+    return {"outcome": "not_returned", "http_status": None, "error": "the actor returned no item for this page"}
 
 
 def site_text(pages: list[dict[str, Any]]) -> str:
@@ -231,9 +315,10 @@ def site_text(pages: list[dict[str, Any]]) -> str:
 
 
 def render(conn, chunks: list[str], *, sites: list[str] | None = None, model: str = "haiku",
-           max_claude_usd: float = 1.0, max_apify_usd: float = 1.0, dry_run: bool = False) -> dict[str, Any]:
+           max_claude_usd: float = 1.0, max_apify_usd: float = 1.0, dry_run: bool = False,
+           retry_failed: bool = False) -> dict[str, Any]:
     all_sites = load_sites()
-    pick = {}
+    cands = []
     for sid, s in all_sites.items():
         if s.get("platform") in SKIP_PLATFORMS:
             continue
@@ -244,41 +329,55 @@ def render(conn, chunks: list[str], *, sites: list[str] | None = None, model: st
                              "source_id LIKE ? LIMIT 1", (f"{sid}:%",)).fetchone()
             if not r or chunk_of(r["lat"], r["lon"]) not in chunks:
                 continue
-        pick[sid] = s
+        cands.append(sid)
+    last = last_outcomes(conn)
+    # sites named with --site are rendered whatever their last outcome
+    order = [(sid, "asked for") for sid in cands] if sites else select(cands, last, retry_failed=retry_failed)
+    pick = {sid: all_sites[sid] for sid, _ in order}
     if dry_run or not pick:
-        return {"sites": [(sid, s["url"]) for sid, s in pick.items()],
-                "estimated_apify_usd": round(0.003 * PAGES_PER_SITE * len(pick), 2), "estimated_claude_usd": round(0.004 * len(pick), 2)}
+        return {"sites": [(sid, all_sites[sid]["url"], why) for sid, why in order],
+                "done": {sid: describe(last[sid]) for sid in cands if sid not in pick and sid in last},
+                "estimated_apify_usd": round(0.003 * PAGES_PER_SITE * len(pick), 2),
+                "estimated_claude_usd": round(0.006 * len(pick), 2)}
     areas = {f"{sid}#render": sid for sid in pick}
     run = start_run(conn, "intake", "direct", {"areas": list(areas), "render": True, "scope": "partial",
                                                "actor": ACTOR, "model": model})
+    n_req = PAGES_PER_SITE * len(pick)
     res = run_actor(ACTOR, {"startUrls": [{"url": s["url"], "userData": {"site": sid}} for sid, s in pick.items()],
                             "pageFunction": PAGE_FUNCTION, "proxyConfiguration": {"useApifyProxy": True},
-                            "maxRequestsPerCrawl": PAGES_PER_SITE * len(pick), "maxRequestRetries": 2,
-                            "headless": True, "pageLoadTimeoutSecs": 120, "pageFunctionTimeoutSecs": 240,
-                            "waitUntil": "domcontentloaded"},
-                    max_items=PAGES_PER_SITE * len(pick), max_charge_usd=max_apify_usd, timeout_s=1800, memory_mb=2048)
+                            "maxRequestsPerCrawl": n_req, "maxRequestRetries": 2, "headless": True,
+                            "pageLoadTimeoutSecs": 120, "pageFunctionTimeoutSecs": 240, "waitUntil": "domcontentloaded"},
+                    max_items=2 * n_req, max_charge_usd=max_apify_usd, timeout_s=1800, memory_mb=2048,
+                    clean=False, with_log=True)
     raw_dir = settings.RAW_DIR / "render"
     raw_dir.mkdir(parents=True, exist_ok=True)
     raw_path = raw_dir / f"run{run}.json"
     raw_path.write_text(json.dumps({"actor": ACTOR, "apify_run": res.run_id, "status": res.status,
-                                    "cost_usd": res.cost_usd, "items": res.items}))
+                                    "cost_usd": res.cost_usd, "items": res.items, "log": res.log}))
+    failed = failed_requests(res.items)
     pages: dict[str, list[dict[str, Any]]] = {}
     for it in res.items:
-        if it.get("site") in pick:
+        if not it.get("#error") and it.get("site") in pick:
             pages.setdefault(it["site"], []).append(it)
     spent, per_area, n_obs, report = 0.0, {}, 0, {}
     try:
         for sid, s in pick.items():
             its = pages.get(sid, [])
-            text = site_text(its)
-            if not its or len((text or "").strip()) < 200:
-                per_area[f"{sid}#render"] = {"state": "failed", "items": 0}
-                report[sid] = "page not rendered (blocked or empty)"
+            o = site_outcome(s["url"], its, failed, res.log)
+            followed = {u for i in its for u in i.get("followed") or []}
+            info = {"http_status": o.get("http_status"), "error": o.get("error"), "pages": len(its),
+                    "unit_pages": sum(i.get("kind") == "units" for i in its),
+                    "pages_failed": [f"{f['url']}: {(f['messages'] or ['?'])[-1]}" for f in failed
+                                     if any(same_url(f["url"], u) for u in followed)]}
+            if o["outcome"] != "read":
+                per_area[f"{sid}#render"] = {"state": "failed", "items": 0, "outcome": o["outcome"], **info}
+                report[sid] = describe({**o, "at": None})
                 continue
             if spent >= max_claude_usd:
-                per_area[f"{sid}#render"] = {"state": "partial", "items": 0}
+                per_area[f"{sid}#render"] = {"state": "failed", "items": 0, "outcome": "not_read", **info}
                 report[sid] = "Claude budget reached"
                 continue
+            text = site_text(its)
             answer, cost = ask(s.get("name") or sid, text, model, min(0.3, max_claude_usd - spent + 0.05))
             spent += cost
             plans = check_plans(answer, text)
@@ -298,7 +397,8 @@ def render(conn, chunks: list[str], *, sites: list[str] | None = None, model: st
                                    price_basis="month" if p.get("price") else None, raw_path=str(raw_path),
                                    commit=False)
                 n_obs += 1
-            per_area[f"{sid}#render"] = {"state": "complete" if plans else "empty", "items": len(plans)}
+            oc = "ok" if plans else "no_plans"
+            per_area[f"{sid}#render"] = {"state": STATE_OF[oc], "items": len(plans), "outcome": oc, **info}
             report[sid] = [_line(p) for p in plans] if plans else "no plans on the page"
     except (Blocker, subprocess.TimeoutExpired) as e:
         conn.commit()
@@ -310,4 +410,6 @@ def render(conn, chunks: list[str], *, sites: list[str] | None = None, model: st
                est_cost=round((res.cost_usd or 0) + spent, 4))
     identity.run(conn)
     return {"run_id": run, "apify_usd": res.cost_usd, "claude_usd": round(spent, 4), "observations": n_obs,
+            "outcomes": {sid: {k: v for k, v in a.items() if k != "state"} for sid, a in
+                         ((k[: -len("#render")], a) for k, a in per_area.items())},
             "sites": report}

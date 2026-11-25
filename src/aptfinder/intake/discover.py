@@ -7,8 +7,9 @@ searched before. Claude (`claude -p`, the only tool WebSearch: it never fetches 
 a URL or null per building. A proposal is cleaned (no query string, no tour/apply/contact path, no aggregator or
 social host) and appended to config/discovered_sites.toml as `[[found]]` (misses as `[[miss]]`, so reruns skip
 them). Then the page is fetched through Apify like any community site, and it counts only if it shows the
-building's street address (`direct.address_on_page`); a failure is appended as `[[check]] ok = false` and the
-site is dropped. Each Claude call is a `runs` row (component `discover`) with its cost.
+building's street address (`direct.address_on_page`); a page without the address is appended as `[[check]] outcome = "rejected"` and
+the site is dropped; a page not fetched (blocked, timed out, empty) is a retryable outcome and is fetched again
+by the next `promote-sites`. Each Claude call is a `runs` row (component `discover`) with its cost.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from .. import settings
 from ..areas import chunk_of
-from ..config import load_areas, load_sites
+from ..config import CHECK_LABEL, CHECK_RETRY, check_outcome, last_checks, load_areas, load_sites
 from ..store import finish_run, start_run
 
 FILE = "discovered_sites.toml"
@@ -166,8 +167,8 @@ def append(kind: str, rows: list[dict[str, Any]], config_dir: Path | None = None
     path = (config_dir or settings.CONFIG_DIR) / FILE
     if not path.exists():
         path.write_text("# Machine-appended by `aptf-intake discover-sites` (see src/aptfinder/intake/discover.py).\n"
-                        "# [[found]] a proposed site, [[miss]] searched with no site, [[check]] a fetched page that\n"
-                        "# did (ok = true) or did not show the building's address. Delete a [[found]] to drop it.\n")
+                        "# [[found]] a proposed site, [[miss]] searched with no site, [[check]] a fetch of its page:\n"
+                        "# outcome ok, rejected (no address on it) or not fetched (retried). Delete a [[found]] to drop it.\n")
     with open(path, "a") as f:
         for r in rows:
             f.write(f"\n[[{kind}]]\n" + "".join(f"{k} = {_toml_value(v)}\n" for k, v in r.items() if v is not None))
@@ -227,12 +228,28 @@ def discover(conn, chunks: list[str], *, limit: int, batch: int, model: str, max
     return res
 
 
-def promote(conn, chunks: list[str], *, limit: int, dry_run: bool = False, fetch: bool = True) -> dict[str, Any]:
+def retryable(chunks: list[str]) -> list[str]:
+    """Found sites in the chunks whose latest check did not fetch the page (blocked, timed out, empty): fetched
+    again by `promote-sites`."""
+    rec = _records()
+    last = last_checks(rec)
+    return [f["id"] for f in rec.get("found", [])
+            if f.get("chunk") in chunks and f["id"] in last and check_outcome(last[f["id"]]) in CHECK_RETRY]
+
+
+def promote(conn, chunks: list[str], *, limit: int, dry_run: bool = False, fetch: bool = True,
+            retry_failed: bool = False) -> dict[str, Any]:
     """Websites that listings already name (Apartments.com's website field, URLs read from Craigslist text by
     `extract`) become `[[found]]` sites without a search, then go through the same Apify fetch and address check
-    as searched ones. One proposal per place: the URL most of its listings give."""
+    as searched ones. One proposal per place: the URL most of its listings give. Found sites whose page was not
+    fetched last time (blocked, timed out) are fetched again with them; `retry_failed`: only those."""
     from collections import Counter
 
+    retry = retryable(chunks)
+    if retry_failed:
+        if dry_run or not retry or not fetch:
+            return {"retry": retry}
+        return {"retry": retry, "fetch": fetch_and_check(conn, retry)}
     rec = _records()
     proposed = {r.get("place_key") for r in rec.get("found", [])}
     have = {s.get("place_key") for s in load_sites().values()} | proposed
@@ -271,12 +288,13 @@ def promote(conn, chunks: list[str], *, limit: int, dry_run: bool = False, fetch
                      "chunk": chunk_of(r["lat"], r["lon"]), "found_at": now, "platform": platform_of(url), "url": url,
                      "found_by": "you (Verify)" if source == "you" else f"{source} listing",
                      "note": "typed in Verify" if source == "you" else f"website field of {n} listing(s)"})
-    if dry_run or not rows:
-        return {"sites": [(r["name"], r["url"]) for r in rows]}
-    append("found", rows)
-    res: dict[str, Any] = {"proposed": len(rows)}
+    if dry_run or not (rows or retry):
+        return {"sites": [(r["name"], r["url"]) for r in rows], "retry": retry}
+    if rows:
+        append("found", rows)
+    res: dict[str, Any] = {"proposed": len(rows), "retry": retry}
     if fetch:
-        res["fetch"] = fetch_and_check(conn, [r["id"] for r in rows])
+        res["fetch"] = fetch_and_check(conn, [r["id"] for r in rows] + retry)
     return res
 
 
@@ -289,9 +307,11 @@ def fetch_and_check(conn, ids: list[str]) -> dict[str, Any]:
     _, areas = load_areas()
     pick = [a for a in areas if a.kind == "site" and a.id in ids]
     res = run_source(conn, ADAPTERS["direct"], pick)
-    items = []
+    items, apify_runs = [], []
     for f in (settings.RAW_DIR / "direct").glob(f"run{res.run_id}_*.json"):
-        items += json.loads(f.read_text()).get("items") or []
+        blob = json.loads(f.read_text())
+        items += blob.get("items") or []
+        apify_runs += [blob["apify_run"]] if blob.get("apify_run") else []
     sites = direct.sites()
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     checks, seen = [], set()
@@ -306,12 +326,32 @@ def fetch_and_check(conn, ids: list[str]) -> dict[str, Any]:
         final, _ = clean_url(it.get("url"))
         moved = final if final and final.rstrip("/") != s["url"].rstrip("/") else None
         checks.append({"id": s["id"], "ok": bool(ok), "at": now, "run_id": res.run_id,
+                       "outcome": "ok" if ok else "rejected" if ok is False else "empty",
                        "final_url": moved, "platform": platform_of(moved) if moved and ok else None,
                        "reason": ("address shown; rows: %d" % n) if ok else
                        ("page does not show the street address" if ok is False else "page has no text")})
-    checks += [{"id": i, "ok": False, "at": now, "run_id": res.run_id, "reason": "page not fetched"}
-               for i in ids if i not in seen and i in sites]
+    missing = [i for i in ids if i not in seen and i in sites]
+    log = ""
+    if missing and apify_runs:  # why the page did not come back: the run log names the URL and the error
+        from .apify import run_log
+
+        log = "\n".join(run_log(r) for r in apify_runs)
+    for i in missing:
+        checks.append({"id": i, "ok": False, "at": now, "run_id": res.run_id, **unfetched(sites[i]["url"], log)})
     append("check", checks)
     direct.sites.cache_clear()
     return {"run_id": res.run_id, "apify_usd": res.cost_usd, "ok": [c["id"] for c in checks if c["ok"]],
-            "rejected": {c["id"]: c["reason"] for c in checks if not c["ok"]}}
+            "rejected": {c["id"]: c["reason"] for c in checks if c["outcome"] == "rejected"},
+            "retry": {c["id"]: c["reason"] for c in checks if c["outcome"] in CHECK_RETRY}}
+
+
+def unfetched(url: str, log: str) -> dict[str, Any]:
+    """A check for a page that did not come back: retryable, with the HTTP status and error the log gives."""
+    from .apify import classify_failure, log_errors
+
+    status, msgs = log_errors(log, url)
+    if not msgs:
+        return {"outcome": "not_fetched", "reason": "page not fetched"}
+    oc = classify_failure(status, msgs)
+    return {"outcome": oc, "http_status": status, "error": msgs[-1],
+            "reason": f"page not fetched: {CHECK_LABEL[oc]}" + (f" (HTTP {status})" if status else "")}

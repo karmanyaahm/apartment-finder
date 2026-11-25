@@ -6,6 +6,7 @@ misbehaving actor cannot overspend even if our own accounting is wrong.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -28,6 +29,7 @@ class ActorRun:
     console_url: str
     truncated: bool = False  # the source said there was more than it returned: every area of the run is partial
     truncated_areas: list[str] | None = None  # ... or only these areas (Places: a box whose query hit 60 results)
+    log: str | None = None  # the run's log, when asked for (`with_log`): why requests failed
 
 
 def _client() -> httpx.Client:
@@ -38,7 +40,11 @@ def _client() -> httpx.Client:
 
 
 def run_actor(actor: str, run_input: dict[str, Any], *, max_items: int, max_charge_usd: float,
-              timeout_s: int = 900, poll_s: int = 10, memory_mb: int | None = None) -> ActorRun:
+              timeout_s: int = 900, poll_s: int = 10, memory_mb: int | None = None, clean: bool = True,
+              with_log: bool = False) -> ActorRun:
+    """`clean=False` keeps hidden fields and empty items: Apify's scrapers (web/playwright-scraper) push a failed
+    request as an item with only `#error` and `#debug` (url, statusCode, errorMessages), which `clean` drops.
+    `with_log` also fetches the run's log."""
     actor_path = actor.replace("/", "~")
     with _client() as c:
         params: dict[str, Any] = {"maxItems": max_items, "maxTotalChargeUsd": max_charge_usd}
@@ -58,11 +64,12 @@ def run_actor(actor: str, run_input: dict[str, Any], *, max_items: int, max_char
             c.post(f"/actor-runs/{run['id']}/abort")
             run = c.get(f"/actor-runs/{run['id']}").json()["data"]
         items = c.get(f"/datasets/{run['defaultDatasetId']}/items",
-                      params={"clean": "true", "format": "json"}).json()
+                      params={"clean": "true" if clean else "false", "format": "json"}).json()
+        log = c.get(f"/actor-runs/{run['id']}/log").text if with_log else None
     return ActorRun(
         actor=actor, run_id=run["id"], status=run["status"], items=items,
         cost_usd=run.get("usageTotalUsd"), charged_events=run.get("chargedEventCounts"),
-        console_url=f"https://console.apify.com/actors/runs/{run['id']}",
+        console_url=f"https://console.apify.com/actors/runs/{run['id']}", log=log,
     )
 
 
@@ -73,3 +80,56 @@ def account_remaining_usd() -> float | None:
     limit = (d.get("limits") or {}).get("maxMonthlyUsageUsd")
     used = (d.get("current") or {}).get("monthlyUsageUsd")
     return None if limit is None or used is None else round(limit - used, 4)
+
+
+def run_log(run_id: str) -> str:
+    """The plain-text log of an actor run (why its requests failed)."""
+    with _client() as c:
+        return c.get(f"/actor-runs/{run_id}/log").text
+
+
+def same_url(a: str | None, b: str | None) -> bool:
+    """URLs equal up to scheme, a leading 'www.', a trailing slash and a fragment (the crawler normalizes)."""
+    def n(u: str) -> str:
+        u = u.split("#", 1)[0].strip().lower()
+        u = re.sub(r"^https?://(www\.)?", "", u)
+        return u.rstrip("/")
+    return bool(a and b) and n(a) == n(b)
+
+
+def classify_failure(status: int | None, messages: list[str]) -> str:
+    """Why a page did not come back, from its HTTP status and the scraper's error messages: `blocked` (HTTP 403 or
+    429, or the crawler's 'Request blocked'), `timeout`, else `error`."""
+    text = " ".join(m or "" for m in messages)
+    if status in (403, 429) or re.search(r"request blocked|\b(403|429)\b|captcha|access denied", text, re.I):
+        return "blocked"
+    if re.search(r"time[d_\s]*out", text, re.I):  # "Timeout 120000ms", "timed out", net::ERR_TIMED_OUT
+        return "timeout"
+    return "error"
+
+
+def failed_requests(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Requests Apify's web/playwright scrapers gave up on: with `clean=False` each is an item carrying `#error`
+    and `#debug` (url, statusCode, errorMessages). -> [{url, status, messages}]."""
+    out = []
+    for it in items:
+        if it.get("#error"):
+            d = it.get("#debug") or {}
+            out.append({"url": d.get("url") or d.get("loadedUrl"), "status": d.get("statusCode"),
+                        "messages": [str(m).split("\n", 1)[0][:300] for m in d.get("errorMessages") or []]})
+    return out
+
+
+def log_errors(log: str | None, url: str) -> tuple[int | None, list[str]]:
+    """The run log's warning and error lines about one URL -> (HTTP status if a line names one, messages)."""
+    msgs, status = [], None
+    for line in (log or "").splitlines():
+        if not re.search(r"\b(WARN|ERROR)\b", line) or not any(same_url(u, url) for u in _URL.findall(line)):
+            continue
+        msgs.append(re.sub(r"\s+", " ", line.strip())[:300])
+        if m := re.search(r"\b(?:status(?: code)?|HTTP)[:\s]+(\d{3})\b|received (\d{3})", line, re.I):
+            status = int(m.group(1) or m.group(2))
+    return status, msgs
+
+
+_URL = re.compile(r"https?://[^\s\"'<>)]+")
