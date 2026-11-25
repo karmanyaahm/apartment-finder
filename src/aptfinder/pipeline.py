@@ -6,6 +6,7 @@ places inside some station's walk zone (`areas.in_walk_zone`)."""
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -178,7 +179,12 @@ def _current_points() -> set[str]:
     return {p.id for pts in load_points().values() for p in pts}
 
 
-def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str, Any]:
+def overview(conn: sqlite3.Connection, now: datetime | None = None, *, places: list[dict] | None = None,
+             res: dict | None = None, conflicts: list | None = None, own_queue: list | None = None,
+             dup_queue: list | None = None, web: dict | None = None) -> dict[str, Any]:
+    """Every stage's state. The keyword arguments are results the caller already holds (the dashboard's cache:
+    places view rows, evaluate_all, verify.all_conflicts / own_site_queue / duplicate_queue, website_status);
+    each one missing is computed here."""
     from . import verify
     from .filter import evaluate_all, routing_candidates
     from .intake import ADAPTERS
@@ -188,7 +194,9 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
     now = now or datetime.now(timezone.utc)
     areas = load_areas()
     runs = _runs(conn)
-    places = [dict(r) for r in conn.execute("SELECT place_key, property_name, address, lat, lon FROM places")]
+    cols = ("place_key", "property_name", "address", "lat", "lon")  # copies: stage 5 writes p["web"] on them
+    places = [{k: p[k] for k in cols} for p in (places if places is not None else
+                                                 conn.execute(f"SELECT {', '.join(cols)} FROM places"))]
     in_zone = {p["place_key"] for p in places if in_walk_zone(p["lat"], p["lon"])}
     stages: list[dict[str, Any]] = []
 
@@ -289,7 +297,7 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
           rows=ex_rows, cost=round(sum(r["cost"] for r in ex_rows), 2))
 
     # 5. website finding, over named buildings (verify.is_named_building)
-    ws = website_status(conn)
+    ws = web if web is not None else website_status(conn)
     named = [p for p in places if is_named_building(p["property_name"], p["address"])]
     for p in named:
         p["web"] = ws.get(p["place_key"], {}).get("state", "not_searched")
@@ -403,7 +411,7 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
           [] if na == len(anchors) else [f"{COMMUTE} --provider google anchors --dry-run",
                                           f"{COMMUTE} --provider google anchors"], anchors=anchors)
 
-    res = evaluate_all(conn)
+    res = res if res is not None else evaluate_all(conn)
     cands: set[str] = set()
     for pk in routing_candidates(conn, res=res):  # routed as its building, like `compute --candidates`
         base = pk.split("~", 1)[0]
@@ -428,12 +436,12 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
 
     # 10. verify
     n_checks = conn.execute("SELECT COUNT(*) FROM checks").fetchone()[0]
-    open_conflicts = verify.all_conflicts(conn)
+    open_conflicts = conflicts if conflicts is not None else verify.all_conflicts(conn)
     conflicts = len(open_conflicts)
     pending = sum(c["pending_render"] for c in open_conflicts)  # an own-site render will likely settle these
     # the own-site queue: named buildings in a walk zone whose own site gave no usable offer
-    no_web = len(verify.own_site_queue(conn))  # named buildings whose own site gave nothing usable
-    n_dup = len(verify.duplicate_queue(conn))  # pairs of places that are probably one building
+    no_web = len(own_queue if own_queue is not None else verify.own_site_queue(conn))  # named buildings whose own site gave nothing usable
+    n_dup = len(dup_queue if dup_queue is not None else verify.duplicate_queue(conn))  # pairs of places that are probably one building
     stage("verify", "Verify (hand checks)",
           "done" if not conflicts and not no_web and not n_dup else "todo" if not n_checks else "partial",
           f"{n_checks} checks made; {conflicts} open conflicts ({pending} waiting for an own-site render); "
@@ -469,18 +477,41 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
             "stuck_runs": stuck}
 
 
+def _extracted(data: str | None) -> bool:
+    """json_extract(data, '$.extra.extracted') IS NOT NULL."""
+    d = json.loads(data) if data else None
+    extra = d.get("extra") if isinstance(d, dict) else None
+    return isinstance(extra, dict) and extra.get("extracted") is not None
+
+
+def _source_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Per source of one place's listings rows: last seen, active, count and text read, as place_status's SQL."""
+    out: dict[str, dict[str, Any]] = {}
+    for l in rows:
+        r = out.setdefault(l["source"], {"source": l["source"], "seen": None, "active": 0, "n": 0, "read": 0})
+        if l["last_seen"] is not None and (r["seen"] is None or l["last_seen"] > r["seen"]):
+            r["seen"] = l["last_seen"]
+        r["active"] += l["active"] or 0
+        r["n"] += 1
+        r["read"] += _extracted(l["data"])
+    return [out[k] for k in sorted(out)]
+
+
 def place_status(conn: sqlite3.Connection, place_key: str, now: datetime | None = None,
-                 web: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+                 web: dict[str, dict[str, Any]] | None = None,
+                 by_place: dict[str, list[dict[str, Any]]] | None = None) -> dict[str, Any]:
     """One place: each source's last sighting (stale after STALE_DAYS), its own website, whether its text was
     read, and whether its commute times are estimates or Google routes. A stay place (`<building>~<operator>`)
-    takes the website and trips of its building."""
+    takes the website and trips of its building. `by_place`: the listings view's rows by place_key, already read
+    (the dashboard caches them; each `listings WHERE place_key = ?` reads the whole view)."""
     now = now or datetime.now(timezone.utc)
     base = place_key.split("~", 1)[0]
     sources = []
-    for r in conn.execute(
+    rows = (_source_rows(by_place.get(place_key, [])) if by_place is not None else conn.execute(
             "SELECT source, MAX(last_seen) AS seen, SUM(active) AS active, COUNT(*) AS n, "
             "SUM(json_extract(data, '$.extra.extracted') IS NOT NULL) AS read FROM listings WHERE place_key = ? "
-            "GROUP BY source ORDER BY source", (place_key,)):
+            "GROUP BY source ORDER BY source", (place_key,)))
+    for r in rows:
         sources.append({"source": r["source"], "seen": r["seen"], "listings": r["n"], "active": r["active"] or 0,
                         "state": _fresh(r["seen"], now),
                         "text_read": (r["read"] or 0) if r["source"] in TEXT_SOURCES else None})
@@ -495,9 +526,13 @@ def place_status(conn: sqlite3.Connection, place_key: str, now: datetime | None 
             trips[prov] += 1
     # the building's own site(s): the latest render and address check of each, failure or not
     sids = {sid for sid, s in load_sites(duplicates=True).items() if s.get("place_key") == base}
-    sids |= {r[0] for r in conn.execute(
-        "SELECT DISTINCT substr(source_id, 1, instr(source_id, ':') - 1) FROM listings WHERE source = 'direct' "
-        "AND place_key = ?", (base,))}
+    if by_place is not None:  # substr(source_id, 1, instr(source_id, ':') - 1): '' when there is no ':'
+        sids |= {l["source_id"].split(":", 1)[0] if ":" in l["source_id"] else ""
+                 for l in by_place.get(base, []) if l["source"] == "direct"}
+    else:
+        sids |= {r[0] for r in conn.execute(
+            "SELECT DISTINCT substr(source_id, 1, instr(source_id, ':') - 1) FROM listings WHERE source = 'direct' "
+            "AND place_key = ?", (base,))}
     renders, checks = render_outcomes(conn), site_checks()
     sites = [{"id": sid, "render": renders.get(sid), "check": checks.get(sid)} for sid in sorted(sids - {""})]
     return {"sources": sources, "website": {**ws, "label": WEB_STATES[ws["state"]]}, "trips": dict(trips),

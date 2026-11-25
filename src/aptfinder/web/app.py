@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -331,6 +332,12 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             headers = {k: v for k, v in resp.headers.items() if k.lower() != "content-length"}
             return Response(body, status_code=resp.status_code, headers=headers, media_type=resp.media_type)
 
+    # gzip JSON, the page and scripts (the place list is ~18 MB of JSON, ~1.7 MB gzipped). Added after the redact
+    # middleware so it wraps it: redact still reads plain text. Photos are already compressed: left alone.
+    app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5,
+                       exclude_content_types=("text/event-stream", "image/jpeg", "image/png", "image/webp",
+                                              "image/gif", "image/svg+xml", "application/pdf"))
+
     memo: dict[str, tuple[Any, ...]] = {}
 
     def data_version() -> tuple[tuple, tuple]:
@@ -363,6 +370,28 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
     def all_places() -> dict[str, dict[str, Any]]:
         """The places view by key, read once per data version (the view is computed over everything)."""
         return cached("places_by_key", lambda: {r["place_key"]: dict(r) for r in conn.execute("SELECT * FROM places")})
+
+    def all_trips() -> dict[str, dict[tuple[str, str], dict[str, Any]]]:
+        """best_trips (KNN included) once per data version, shared by every consumer below: goal results, the
+        list, the drawer, sampling. Read only."""
+        return cached("best_trips", lambda: best_trips(conn, located()))
+
+    def results() -> dict[str, Any]:
+        """evaluate_all over the cached trips (it used to build its own best_trips, the slowest part)."""
+        return cached("evaluate_all", lambda: evaluate_all(conn, trips=all_trips()))
+
+    def inputs() -> dict[str, Any]:
+        """goal_inputs over the cached trips, for the draft preview and Verify's goal relevance."""
+        return cached("goal_inputs", lambda: goal_inputs(conn, trips=all_trips()))
+
+    def located() -> dict[str, tuple[float, float]]:
+        """place_key -> (lat, lon) of located places (sampling.located), from the cached places view."""
+        return cached("located", lambda: {pk: (p["lat"], p["lon"]) for pk, p in all_places().items()
+                                          if p["lat"] is not None})
+
+    def listings_by_place() -> dict[str, list[dict[str, Any]]]:
+        """The listings view's placed rows grouped by place, read once per data version."""
+        return cached("listings_by_place", lambda: _group_listings(conn))
 
     def media_files() -> dict[str, dict[str, Any]]:
         """url -> our stored copy, read once per data version."""
@@ -414,13 +443,15 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
 
     @app.get("/api/places")
     def places() -> list[dict[str, Any]]:
-        res = cached("evaluate_all", lambda: evaluate_all(conn))
-        trips = cached("best_trips", lambda: best_trips(conn))
+        # the whole list is built once per data version: every input is (goal results, trips, the places and
+        # listings views, annotations, goal edits), so a reload or a goal switch reuses it
+        return cached("places_list", build_places)
+
+    def build_places() -> list[dict[str, Any]]:
+        res = results()
+        trips = all_trips()
         goal_defs = effective().goals
-        listings = q("SELECT * FROM listings WHERE place_key IS NOT NULL")
-        by_place: dict[str, list[dict[str, Any]]] = {}
-        for row in listings:
-            by_place.setdefault(row["place_key"], []).append(row)
+        by_place = listings_by_place()
         anns = latest_annotations("place")
         # per place, the fastest trip to any point of each set and mode ("walk to the nearest Google bus stop"),
         # for the list's requirement rows; commute targets are in `minutes` one by one
@@ -429,8 +460,12 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                  for (s, m), t in nearest_by_set(tr).items() if s != "commute_targets"}
             for pk, tr in trips.items()})
         files = media_files()
+        # `minutes` feeds the cards' commute rows (app.js limitValue): commute targets one by one, sets through
+        # `nearest`. Times to other sets' single points (stations, bus stops, groceries: about a fifth of all keys)
+        # are left out unless a goal's commute rule names that point.
+        shown = {r.get("target") for g in goal_defs.values() for r in [*g.rules, *g.nice] if r.get("type") == "commute_any"}
         out = []
-        for p in q("SELECT * FROM places"):
+        for p in all_places().values():
             pk = p["place_key"]
             rows = by_place.get(pk, [])
             goals = {}
@@ -450,8 +485,8 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 "beds": sorted({x["beds"] for x in rows if x["beds"] is not None}),
                 "baths": sorted({x["baths"] for x in rows if x["baths"] is not None}),
                 "goals": goals,
-                "minutes": {f"{pt}|{m}": _tv(t)
-                            for (pt, m), t in trips.get(pk, {}).items()},
+                "minutes": {f"{pt}|{m}": _tv(t) for (pt, m), t in trips.get(pk, {}).items()
+                            if pt.startswith("commute_targets:") or pt in shown},
                 "nearest": nearest_all.get(pk, {}),
                 # amenity flags (filter.amenity_flags over every listing's list here): true / false, null when nothing listed
                 "amenities": amenity_flags(sorted({a for x in rows if x.get("amenities")
@@ -489,18 +524,18 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             raise HTTPException(404, "no such place")
         place = dict(places_by_key[place_key])
         place["label"] = place_label(place)
-        by_place = cached("listings_by_place", lambda: _group_listings(conn))
+        by_place = listings_by_place()
         listings = by_place.get(place_key, [])
         parsed = [{**x, "data": json.loads(x["data"])} for x in listings]
         place["restriction"] = place_restriction(parsed, latest_annotations("place", place_key).get(place_key, {}))
         place["parking"] = place_parking(parsed)
-        res = cached("evaluate_all", lambda: evaluate_all(conn))
-        trips = cached("best_trips", lambda: best_trips(conn)).get(place_key, {})
+        res = results()
+        trips = all_trips().get(place_key, {})
         out_listings = []
+        # the current_checks view joins latest_obs over everything: read it once per data version, not per listing
+        all_checks = cached("current_checks", lambda: verify.current_checks(conn))
         for l in listings:
-            checks = {c["field"]: c["verdict"] for c in q(
-                "SELECT field, verdict FROM current_checks WHERE source = ? AND source_id = ?",
-                (l["source"], l["source_id"]))}
+            checks = dict(all_checks.get((l["source"], l["source_id"]), {}))
             history = q("SELECT observed_at, price, price_basis, query_checkin, query_checkout, "
                         "json_extract(data, '$.available_from') AS available_from, content_hash "
                         "FROM observations WHERE source = ? AND source_id = ? ORDER BY observed_at, id",
@@ -536,7 +571,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                  (place_key,))
         web = cached("website_status", lambda: pipeline.website_status(conn))
         with lock:
-            pstatus = pipeline.place_status(conn, place_key, web=web)
+            pstatus = pipeline.place_status(conn, place_key, web=web, by_place=by_place)
         # an own-site plan row without baths: the same plan's baths on another source, else its drawing's reading
         from ..planread import readings as plan_readings
 
@@ -556,11 +591,22 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             # other places within 300 m, for a manual merge of a duplicate building
             "nearby": nearby_places(place_key),
             # the building and its third-party stay places (`<building>~<operator>`), linked both ways
-            "related": [dict(r, label=place_label(r)) for r in q(
-                "SELECT place_key, property_name, operator, address, n_active, min_lease_month, min_stay_month "
-                "FROM places WHERE (place_key = ? OR place_key LIKE ?) AND place_key <> ?",
-                (place_key.split("~", 1)[0], place_key.split("~", 1)[0] + "~%", place_key))],
+            "related": related_places(place_key),
         }
+
+    def related_places(place_key: str) -> list[dict[str, Any]]:
+        """The building and its third-party stay places, from the cached places view: as `place_key = base OR
+        place_key LIKE 'base~%'` (LIKE: '_' any one character, ASCII case-insensitive), without this place."""
+        base = place_key.split("~", 1)[0]
+        like = re.compile("".join("." if ch == "_" else ".*" if ch == "%" else re.escape(ch)
+                                  for ch in base + "~%"), re.IGNORECASE | re.DOTALL)
+        cols = ("place_key", "property_name", "operator", "address", "n_active", "min_lease_month", "min_stay_month")
+        out = []
+        for pk, p in all_places().items():
+            if pk != place_key and (pk == base or like.fullmatch(pk)):
+                r = {k: p[k] for k in cols}
+                out.append(dict(r, label=place_label(r)))
+        return out
 
     credit_memo: dict[str, Any] = {}
 
@@ -615,7 +661,11 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
     def pipeline_overview() -> dict[str, Any]:
         """Each pipeline stage's state from the logs: done / partial / todo / stale / blocked, and the commands
         that would run the rest (aptfinder.pipeline)."""
-        return {**cached("pipeline", lambda: pipeline.overview(conn)), "apify": apify_credit()}
+        return {**cached("pipeline", lambda: pipeline.overview(
+            conn, places=list(all_places().values()), res=results(),
+            conflicts=cached("all_conflicts", lambda: verify.all_conflicts(conn)),
+            own_queue=cached("own_site_queue", lambda: verify.own_site_queue(conn)), dup_queue=duplicates(),
+            web=cached("website_status", lambda: pipeline.website_status(conn)))), "apify": apify_credit()}
 
     @app.get("/api/areas")
     def areas_map() -> dict[str, Any]:
@@ -662,10 +712,10 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 g = effective().goals.get(goal)
                 if g is None:
                     raise HTTPException(400, f"unknown goal {goal!r}")
-                lres = cached("evaluate_all", lambda: evaluate_all(conn))["listings"].get(goal, {})
+                lres = results()["listings"].get(goal, {})
                 rows = cached("goal_input_rows", lambda: {(r["source"], r["source_id"]): r for r in
-                                                          cached("goal_inputs", lambda: goal_inputs(conn))["listings"]})
-                low = cached("goal_inputs", lambda: goal_inputs(conn))["low"]
+                                                          inputs()["listings"]})
+                low = inputs()["low"]
                 out = []
                 for c in keep:
                     v = verify.goal_relevance(c, g.rules, lres, rows, low)
@@ -748,7 +798,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         """The sample, one item at a time. Conflicts are paged by /api/verify/batch, possible duplicates and
         buildings whose own site gave nothing usable are lists of their own (/api/verify/duplicates, /own_sites)."""
         with lock:
-            items = verify.sample_queue(conn, seed)
+            items = cached(f"sample_queue|{seed}", lambda: verify.sample_queue(conn, seed))
         if skip >= len(items):
             return {"done": True, "remaining": 0}
         item = items[skip]
@@ -893,7 +943,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         """An unsaved goal judged on the stored data, writes nothing: place_key -> the same per-goal entry as
         /api/places, for the list while you edit."""
         d = checked_goal(body)
-        inp = cached("goal_inputs", lambda: goal_inputs(conn))
+        inp = inputs()
         goal = Goal(**d)
         _, pres = evaluate_goal(inp, goal)
         return {"places": {pk: goal_view(r, place_commute_terms(goal, inp["trips"], pk)) for pk, r in pres.items()}}
@@ -1048,7 +1098,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         elif body.scope == "candidates":
             from ..filter import routing_candidates
 
-            res = cached("evaluate_all", lambda: evaluate_all(conn))
+            res = results()
             cands = routing_candidates(conn, res=res)
             keys = [pk for pk in cands if pk in located and in_walk_zone(*located[pk])]
         else:
@@ -1111,8 +1161,8 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         from .. import sampling
 
         with lock:
-            trips = cached("best_trips", lambda: best_trips(conn))
-            loc = cached("located", lambda: sampling.located(conn))
+            trips = all_trips()
+            loc = located()
             return {"|".join(p): {**sampling.cell_shown(trips, p, keys),
                                   "loo": cached(f"knn_loo|{'|'.join(p)}", lambda p=p: sampling.cell_loo(trips, p, loc))}
                     for p in pairs}
@@ -1131,17 +1181,14 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         """place_key -> goals it can still pass apart from commute rules (sampling.candidate_goals), cached."""
         from .. import sampling
 
-        return cached("candidate_goals", lambda: sampling.candidate_goals(
-            conn, res=cached("evaluate_all", lambda: evaluate_all(conn))))
+        return cached("candidate_goals", lambda: sampling.candidate_goals(conn, res=results(), loc=located()))
 
     def hinges() -> dict[str, Any]:
         """place_key -> goal -> the commute pairs its status waits on (sampling.hinges), cached."""
         from .. import sampling
 
-        return cached("hinges", lambda: sampling.hinges(cached("evaluate_all", lambda: evaluate_all(conn)),
-                                                         cached("best_trips", lambda: best_trips(conn)),
-                                                         goalstore.effective_goals(conn),
-                                                         cached("located", lambda: sampling.located(conn))))
+        return cached("hinges", lambda: sampling.hinges(results(), all_trips(), goalstore.effective_goals(conn),
+                                                         located()))
 
     def scope_status(keys: list[str], pairs: list[tuple[str, str]]) -> dict[str, Any]:
         """sampling.commute_status for one scope; each verdict's plan costs come from the same planners as the dry
@@ -1150,8 +1197,8 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         from ..filter.knn import RADIUS_M, loo_samples
         from ..trips import planned_legs
 
-        trips = cached("best_trips", lambda: best_trips(conn))
-        loc = cached("located", lambda: sampling.located(conn))
+        trips = all_trips()
+        loc = located()
         cfg = goalstore.effective_goals(conn)
 
         def cost(method: str, pair: tuple[str, str]) -> tuple[int, int]:
@@ -1159,7 +1206,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 pks = sampling.cover_plan(trips, [pair], keys, loc, RADIUS_M)[pair]
             else:
                 pks = sampling.refine_plan(trips, [pair], keys, cfg, candidates())[0][pair]
-            return len(pks), (len(planned_legs(db_path, pks, pair)) if pks else 0)
+            return len(pks), (len(planned_legs(db_path, pks, pair, loc)) if pks else 0)
 
         return sampling.commute_status(
             trips, pairs, keys, hinges(),
@@ -1204,19 +1251,19 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         if not keys:
             raise HTTPException(400, "no located places in that scope")
         with lock:
-            trips = cached("best_trips", lambda: best_trips(conn))
+            trips = all_trips()
             if body.method == "random":
                 plan = sampling.random_plan(trips, pairs, keys, body.pct, body.seed)
                 label = f"random {body.pct:g}%"
             elif body.method == "cover":
-                plan = sampling.cover_plan(trips, pairs, keys, sampling.located(conn), body.radius_m)
+                plan = sampling.cover_plan(trips, pairs, keys, located(), body.radius_m)
                 label = f"cover within {body.radius_m:g} m"
             elif body.method == "refine":
                 plan, notes = sampling.refine_plan(trips, pairs, keys, goalstore.effective_goals(conn), candidates())
                 label = "refine"
             else:
                 raise HTTPException(400, "method must be cover, random or refine")
-            summ = sampling.summary(conn, db_path, plan, keys, trips)
+            summ = sampling.summary(conn, db_path, plan, keys, trips, located())
             hinge = sampling.hinge_counts(hinges(), keys, pairs, plan)
             use = google_usage(conn)
         left = use["matrix_cap"] - use["matrix_elements"]

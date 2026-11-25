@@ -209,7 +209,10 @@ def test_places_carry_the_nearest_point_of_each_set(client):
     p = next(p for p in places if "caltrain_stations|walk" in p["nearest"])
     assert not any(k.startswith("commute_targets|") for k in p["nearest"])  # targets are in `minutes`, one by one
     n = p["nearest"]["caltrain_stations|walk"]
-    walks = [v["minutes"] for k, v in p["minutes"].items() if k.startswith("caltrain_stations:") and k.endswith("|walk")]
+    # a set's single points are not in the list's `minutes` (only commute targets and points a goal names); the
+    # drawer ranks them
+    assert not any(k.startswith("caltrain_stations:") for k in p["minutes"])
+    walks = [x["minutes"] for x in c.get(f"/api/places/{p['place_key']}").json()["nearest"]["caltrain_stations|walk"]]
     assert n["minutes"] == min(m for m in walks if m is not None) and n["point"] and n["provider"]
 
 

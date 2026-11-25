@@ -28,9 +28,11 @@ class _Trips(defaultdict):
         return default
 
 
-def best_trips(conn: sqlite3.Connection) -> dict[str, dict[tuple[str, str], dict[str, Any]]]:
+def best_trips(conn: sqlite3.Connection, located: dict[str, tuple[float, float]] | None = None
+               ) -> dict[str, dict[tuple[str, str], dict[str, Any]]]:
     """place_key -> (point_id, mode) -> latest trip from the most trusted provider: the place's own Google trip, else
-    a KNN range from nearby places' Google trips (filter.knn), else the straight-line estimate."""
+    a KNN range from nearby places' Google trips (filter.knn), else the straight-line estimate. `located`: place_key
+    -> (lat, lon) of the located places, already read (the places view is computed over everything)."""
     from .knn import add_knn, cells
 
     out: dict[str, dict[tuple[str, str], dict[str, Any]]] = _Trips(dict)
@@ -45,7 +47,9 @@ def best_trips(conn: sqlite3.Connection) -> dict[str, dict[tuple[str, str], dict
             out[r["place_key"]][key] = dict(r)
     sel = cells(conn)
     if sel:
-        located = {pk: (la, lo) for pk, la, lo in conn.execute("SELECT place_key, lat, lon FROM places WHERE lat IS NOT NULL")}
+        if located is None:
+            located = {pk: (la, lo) for pk, la, lo in
+                       conn.execute("SELECT place_key, lat, lon FROM places WHERE lat IS NOT NULL")}
         add_knn(out, located, sel)
     return out
 
@@ -75,12 +79,13 @@ def place_annotations(conn: sqlite3.Connection) -> dict[str, dict[str, dict[str,
     return out
 
 
-def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> dict[str, Any]:
+def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None, trips: dict | None = None) -> dict[str, Any]:
     """Everything a goal is judged on, read once: the offer rows (amenities pooled per place), trips, place
     annotations, low-accuracy source fields and the places whose own site prices offers. Reused by evaluate_all
-    for every goal and by the dashboard's draft preview (evaluate_goal on one unsaved goal)."""
+    for every goal and by the dashboard's draft preview (evaluate_goal on one unsaved goal). `trips`: a best_trips
+    result already in hand (the dashboard's cached one), read only."""
     cfg = cfg or load_goals()
-    trips = best_trips(conn)
+    trips = trips if trips is not None else best_trips(conn)
     anns = place_annotations(conn)
     low = low_accuracy(accuracy(conn), cfg.verify.min_samples, cfg.verify.min_accuracy)
     # site_info rows (a community website's photos and link) are not offers: no goal applies to them
@@ -312,7 +317,7 @@ def place_commute_terms(goal: Goal, trips: dict[str, Any], pk: str) -> list[dict
     return commute_trips([r for r in goal.rules if r["type"] in COMMUTE_RULES], t, nearest_by_set(t))
 
 
-def evaluate_all(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> dict[str, Any]:
+def evaluate_all(conn: sqlite3.Connection, cfg: GoalsConfig | None = None, trips: dict | None = None) -> dict[str, Any]:
     """{'listings': {goal: {(source, source_id): result}}, 'places': {goal: {place_key: result}}}.
     A result is {status, reasons: [(status, text, type)], fails: [{s, f, v, ...}] (rules.fact of each non-pass
     rule, in reasons order), nice: [(status, text, type)], nice_score}. `cfg` defaults to the effective goal set
@@ -320,7 +325,7 @@ def evaluate_all(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> di
     from .goals import effective_goals
 
     cfg = cfg or effective_goals(conn)
-    inp = goal_inputs(conn, cfg)
+    inp = goal_inputs(conn, cfg, trips)
     out: dict[str, Any] = {"listings": {}, "places": {}}
     for gid, goal in cfg.goals.items():
         out["listings"][gid], out["places"][gid] = evaluate_goal(inp, goal)

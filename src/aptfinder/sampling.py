@@ -40,10 +40,11 @@ def _base(pk: str, loc: dict) -> str:
     return base if base in loc else pk
 
 
-def candidate_goals(conn: sqlite3.Connection, res: dict | None = None) -> dict[str, set[str]]:
+def candidate_goals(conn: sqlite3.Connection, res: dict | None = None,
+                    loc: dict[str, tuple[float, float]] | None = None) -> dict[str, set[str]]:
     """place_key -> the goals some listing there can still pass apart from commute rules (filter.routing_candidates),
     a stay place merged into its building; every located place, in a walk zone or not."""
-    loc = located(conn)
+    loc = loc if loc is not None else located(conn)
     merged: dict[str, set[str]] = {}
     for pk, goals in routing_candidates(conn, res=res).items():
         merged.setdefault(_base(pk, loc), set()).update(goals)
@@ -238,17 +239,17 @@ def hinge_counts(h: dict[str, dict[str, set[Pair]]], keys: list[str], pairs: lis
 
 
 def summary(conn: sqlite3.Connection, db_path: str, plan: dict[Pair, list[str]], keys: list[str],
-            trips: dict | None = None) -> dict[str, Any]:
+            trips: dict | None = None, loc: dict[str, tuple[float, float]] | None = None) -> dict[str, Any]:
     """Per pair: places to route, uncached Route Matrix elements (trips.planned_legs) and coverage before -> after
     (scope places with a Google-routed place within knn.RADIUS_M); the total counts a leg shared by pairs once."""
     from .trips import planned_legs
 
     trips = trips if trips is not None else best_trips(conn)
-    loc = located(conn)
+    loc = loc if loc is not None else located(conn)
     out: dict[str, Any] = {"scope": len(keys), "radius_m": RADIUS_M, "pairs": {}}
     unique: set[tuple] = set()
     for p, pks in plan.items():
-        legs = planned_legs(db_path, pks, p) if pks else []
+        legs = planned_legs(db_path, pks, p, loc) if pks else []
         unique.update(legs)
         done = routed(trips, p)
         out["pairs"]["|".join(p)] = {

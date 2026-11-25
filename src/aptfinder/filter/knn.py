@@ -35,11 +35,15 @@ def neighbours(train: list[tuple[str, float, float, float]], lat: float, lon: fl
     reach_lat = int(radius_km / 111 // _CELL_DEG) + 1
     reach_lon = int(radius_km / (111 * max(cos(radians(lat)), 0.1)) // _CELL_DEG) + 1
     cy, cx = _cell(lat, lon)
+    # a cheap box first: a point further than radius_km north-south (or, with slack, east-west) cannot be within
+    # it, so most of the 3 x 3 cells' points skip the haversine (same neighbours, a fraction of the work)
+    dlat_max = radius_km / 111.19
+    dlon_max = dlat_max / max(cos(radians(abs(lat) + 1)), 0.1) * 1.1
     found = []
     for dy in range(-reach_lat, reach_lat + 1):
         for dx in range(-reach_lon, reach_lon + 1):
             for pk, la, lo, m in grid.get((cy + dy, cx + dx), ()):
-                if pk == exclude:
+                if pk == exclude or abs(la - lat) > dlat_max or abs(lo - lon) > dlon_max:
                     continue
                 km = haversine_m((lat, lon), (la, lo)) / 1000
                 if km <= radius_km:

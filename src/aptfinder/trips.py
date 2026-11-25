@@ -180,8 +180,10 @@ def latest_trip(conn: sqlite3.Connection, place_key: str, point_id: str, mode: s
 
 def compute_for_place(conn: sqlite3.Connection, commute: Commute, place: sqlite3.Row | dict,
                       on_demand: bool = False, sets: list[str] | None = None,
-                      only: tuple[str, str] | None = None) -> int:
-    """Append trips for one place. Returns the number of new rows.
+                      only: tuple[str, str] | None = None, points: dict | None = None,
+                      point_sets: dict | None = None) -> int:
+    """Append trips for one place. Returns the number of new rows. `points` / `point_sets`: load_points() and
+    load_point_sets() already read by the caller (compute_all reads them once, not once per place).
 
     Paid providers respect each set's prefilter_km, per-mode max_km and `auto` (point -> modes) unless
     on_demand, which routes the set's full `modes` table.
@@ -193,9 +195,9 @@ def compute_for_place(conn: sqlite3.Connection, commute: Commute, place: sqlite3
     if origin[0] is None or origin[1] is None:
         return 0
     paid = commute.source.name != "estimate"
-    points = load_points()
+    points = points if points is not None else load_points()
     pending = []  # written after all routing: the commute cache writes via its own connection
-    for set_name, cfg in load_point_sets().items():
+    for set_name, cfg in (point_sets if point_sets is not None else load_point_sets()).items():
         if sets and set_name not in sets:
             continue
         pts: list[Point] = points.get(set_name, [])
@@ -249,9 +251,11 @@ def compute_all(conn: sqlite3.Connection, commute: Commute, place_keys: list[str
         places = [p for p in places if p["place_key"].split("~", 1)[0] == p["place_key"]
                   or p["place_key"].split("~", 1)[0] not in keys]
     total, done, error = 0, 0, None
+    points, point_sets = load_points(), load_point_sets()
     try:
         for p in places:
-            total += compute_for_place(conn, commute, p, on_demand=on_demand, only=only)
+            total += compute_for_place(conn, commute, p, on_demand=on_demand, only=only, points=points,
+                                       point_sets=point_sets)
             done += 1
             if progress:
                 progress(done, len(places), total)
@@ -280,11 +284,12 @@ def estimate_missing(conn: sqlite3.Connection, db_path: str) -> dict[str, Any]:
     return res
 
 
-def planned_legs(db_path: str, place_keys: list[str], only: tuple[str, str]) -> list[tuple]:
+def planned_legs(db_path: str, place_keys: list[str], only: tuple[str, str],
+                 located: dict[str, tuple[float, float]] | None = None) -> list[tuple]:
     """The single legs (origin, destination, mode) that `compute_all(place_keys, on_demand=True, only=only)` with
     Google would route and are not in the cache yet. Walks the same code with a recording source over an in-memory
     copy of just these places (composed modes ask for their legs the same way); reads the real cache read-only,
-    routes and writes nothing."""
+    routes and writes nothing. `located`: place_key -> (lat, lon) already read (sampling.located), else read here."""
     legs: list[tuple] = []
     real = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     has_cache = real.execute("SELECT 1 FROM sqlite_master WHERE name = 'commute_legs'").fetchone()
@@ -307,9 +312,9 @@ def planned_legs(db_path: str, place_keys: list[str], only: tuple[str, str]) -> 
     mem.execute("CREATE TABLE trips (id INTEGER PRIMARY KEY, computed_at TEXT, place_key TEXT, point_id TEXT, "
                 "mode TEXT, minutes REAL, distance_m REAL, legs TEXT, depart_assumption TEXT, provider TEXT)")
     want = set(place_keys)
-    mem.executemany("INSERT INTO places VALUES (?, ?, ?)",
-                    [r for r in real.execute("SELECT place_key, lat, lon FROM places WHERE lat IS NOT NULL")
-                     if r[0] in want])
+    rows = ([(pk, *ll) for pk, ll in located.items()] if located is not None
+            else real.execute("SELECT place_key, lat, lon FROM places WHERE lat IS NOT NULL"))
+    mem.executemany("INSERT INTO places VALUES (?, ?, ?)", [r for r in rows if r[0] in want])
     compute_all(mem, build_commute(":memory:", Recording()), list(place_keys), on_demand=True, only=only)
     real.close()
     return legs
