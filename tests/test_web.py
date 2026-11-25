@@ -213,72 +213,12 @@ def test_places_carry_the_nearest_point_of_each_set(client):
     assert n["minutes"] == min(m for m in walks if m is not None) and n["point"] and n["provider"]
 
 
-def _wait_for_job(c):
-    import time
-
-    for _ in range(200):
-        s = c.get("/api/compute/status").json()
-        if s["state"] in ("done", "error"):
-            return s
-        time.sleep(0.05)
-    raise AssertionError("compute job did not finish")
-
-
-def test_compute_one_attribute_estimate(client):
-    c, db = client
-    keys = [p["place_key"] for p in c.get("/api/places").json()]
-    spec = {"point": "commute_targets:Meta HQ", "mode": "drive", "provider": "estimate", "place_keys": keys}
-    d = c.post("/api/compute/dry_run", json=spec).json()
-    assert d["places"] >= 1 and d["would_call"] == 0 and d["est_cost_usd"] == 0
-    assert c.post("/api/compute/dry_run", json={**spec, "point": "commute_targets:Nowhere"}).status_code == 400
-    conn = connect(db)
-    before = conn.execute("SELECT MAX(id) FROM trips").fetchone()[0]
-    # a mode the set does not list (point_sets.toml: grocery_chains walks only), so every row is new
-    r = c.post("/api/compute/run", json={**spec, "point": "set:grocery_chains", "mode": "bike"})
-    assert r.status_code == 200
-    s = _wait_for_job(c)
-    assert s["state"] == "done" and s["result"]["new_trips"] > 0
-    rows = conn.execute("SELECT DISTINCT substr(point_id, 1, instr(point_id, ':') - 1), mode, provider FROM trips "
-                        "WHERE id > ?", (before,)).fetchall()
-    assert [tuple(r) for r in rows] == [("grocery_chains", "bike", "estimate")]  # only that attribute
-    assert "grocery_chains|bike" in next(p for p in c.get("/api/places").json() if p["nearest"])["nearest"]
-
-
-def test_compute_one_attribute_google_needs_the_dry_run_and_stops_at_its_count(client, monkeypatch):
-    import sys
-
-    from aptfinder import trips
-
-    sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
-    from test_commute import FakeSource
-
-    c, db = client
-    keys = [p["place_key"] for p in c.get("/api/places").json()]
-    spec = {"point": "commute_targets:Meta HQ", "mode": "drive", "provider": "google", "place_keys": keys}
-    d = c.post("/api/compute/dry_run", json=spec).json()
-    assert d["would_call"] >= 1 and d["by_mode"] == {"drive": d["would_call"]}
-    assert d["google_usage_now"]["calls"] == 0  # a dry run calls nothing
-    assert c.post("/api/compute/run", json=spec).status_code == 400  # no confirm: refused
-    fake = FakeSource()
-    fake.name = "google"
-    monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "test")
-    monkeypatch.setattr(trips, "make_source", lambda provider, max_calls=200, meter_db=None:
-                        trips.MeteredSource(fake, max_calls, meter_db))
-    r = c.post("/api/compute/run", json={**spec, "confirm_calls": 1})  # fewer than needed: stops at 1 call
-    assert r.status_code == 200
-    s = _wait_for_job(c)
-    assert len(fake.calls) == 1 and s["state"] == "error" and "cap of 1" in s["result"]["error"]
-    conn = connect(db)
-    assert conn.execute("SELECT COUNT(*) FROM api_calls WHERE provider = 'google'").fetchone()[0] == 1
-
-
-def test_compute_is_refused_in_the_redacted_view(tmp_path):
+def test_sampling_is_refused_in_the_redacted_view(tmp_path):
     db = tmp_path / "seed.db"
     seed_db(db, with_trips=True)
     c = TestClient(create_app(db, redact={}))
-    spec = {"point": "commute_targets:Meta HQ", "mode": "drive", "scope": "zone"}
-    assert c.post("/api/compute/dry_run", json=spec).status_code == 403
-    assert c.post("/api/compute/run", json=spec).status_code == 403
+    assert c.post("/api/sample/dry_run", json={"method": "cover", "scope": "zone"}).status_code == 403
+    assert c.post("/api/sample/run", json={"plan": {}, "confirm_elements": 1}).status_code == 403
 
 
 def test_merge_a_duplicate_place(client):
@@ -296,32 +236,6 @@ def test_merge_a_duplicate_place(client):
     det = c.get(f"/api/places/{showers['place_key']}").json()
     assert "apartments_com" in {l["source"] for l in det["listings"]}
     assert all(l["unit_key"].startswith(showers["place_key"]) for l in det["listings"])
-
-
-def test_compute_over_20_google_calls_needs_the_counts_typed(client, monkeypatch):
-    """More than 20 Google calls: the run is refused unless the calls left this month are typed in; the search
-    candidates scope works, and every run is in the log."""
-    from aptfinder import trips
-
-    c, _ = client
-    monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "test")
-    real = trips.google_usage
-    monkeypatch.setattr(trips, "google_usage", lambda conn, month=None: {**real(conn, month), "calls": 1571})
-    keys = [p["place_key"] for p in c.get("/api/places").json()]
-    spec = {"point": "commute_targets:Meta HQ", "mode": "drive", "provider": "google", "place_keys": keys,
-            "confirm_calls": 25}
-    r = c.post("/api/compute/run", json=spec)
-    assert r.status_code == 400 and "type the calls left" in r.json()["detail"]
-    r = c.post("/api/compute/run", json={**spec, "confirm_left": 1})  # the wrong number
-    assert r.status_code == 400
-    d = c.post("/api/compute/dry_run", json={"point": "commute_targets:Meta HQ", "mode": "drive",
-                                             "provider": "estimate", "scope": "candidates"})
-    assert d.status_code in (200, 400)  # 400 only when the seed has no candidate in a walk zone
-    c.post("/api/compute/run", json={"point": "commute_targets:Meta HQ", "mode": "drive", "provider": "estimate",
-                                     "place_keys": keys})
-    _wait_for_job(c)
-    log = c.get("/api/compute/log").json()
-    assert log and log[0]["source"] == "estimate" and log[0]["params"]["only"] == ["commute_targets:Meta HQ", "drive"]
 
 
 def test_places_name_the_attribute_each_goal_fails_on(client):
@@ -356,27 +270,6 @@ def test_places_carry_amenity_flags_for_the_require_checkboxes(client):
         listed = [a for (am,) in conn.execute("SELECT amenities FROM listings WHERE place_key = ?", (p["place_key"],))
                   if am for a in json.loads(am)]
         assert p["amenities"] == amenity_flags(listed)
-
-
-def test_compute_job_says_it_waits_for_the_database_lock(client):
-    import sqlite3
-    import time
-
-    c, db = client
-    keys = [p["place_key"] for p in c.get("/api/places").json()]
-    holder = sqlite3.connect(db, isolation_level=None)
-    holder.execute("BEGIN IMMEDIATE")  # another job writing
-    spec = {"point": "set:grocery_chains", "mode": "bike", "provider": "estimate", "place_keys": keys}
-    assert c.post("/api/compute/run", json=spec).status_code == 200
-    for _ in range(100):
-        s = c.get("/api/compute/status").json()
-        if s.get("note"):
-            break
-        time.sleep(0.05)
-    assert s["state"] == "running" and s["note"] == "waiting for the database (another job is writing)"
-    holder.execute("COMMIT")
-    s = _wait_for_job(c)
-    assert s["state"] == "done" and "note" not in s
 
 
 def test_verify_batch_filters_by_goal_and_zone_and_counts_cheap(client):

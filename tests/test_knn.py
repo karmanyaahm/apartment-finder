@@ -253,6 +253,8 @@ def test_knn_cells_and_sampling_endpoints(tmp_path, monkeypatch):
     assert conn.execute("SELECT COUNT(*) FROM api_calls WHERE provider = 'google_matrix'").fetchone()[0] == r["elements"]
     params = json.loads(conn.execute("SELECT params FROM runs ORDER BY id DESC LIMIT 1").fetchone()[0])
     assert params["sample"] and params["from"] == "dashboard"  # closed out on the next start if a restart cuts it
+    log = c.get("/api/compute/log").json()  # the Pipeline panel's run log
+    assert log[0]["status"] == "ok" and log[0]["params"]["sample"] and log[0]["source"]
 
 
 def test_prefetch_keeps_the_requests_that_returned_when_a_later_one_fails(tmp_path):
