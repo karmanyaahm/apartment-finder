@@ -56,6 +56,21 @@ def browser_proxy(residential: bool) -> dict[str, Any]:
     return {"proxyConfiguration": RESIDENTIAL, "preNavigationHooks": RESIDENTIAL_HOOKS}
 
 
+def _get_json(c, path: str, tries: int = 6, **kw) -> Any:
+    """GET an Apify API path as JSON, retrying a hiccup (5xx, an empty or non-JSON body) instead of losing the run:
+    a Craigslist run (2026-11-25) crashed on one empty status response while the actor kept going."""
+    for i in range(tries):
+        try:
+            r = c.get(path, **kw)
+            if r.status_code < 500:
+                return r.json()
+        except (ValueError, httpx.TransportError):
+            if i == tries - 1:
+                raise
+        time.sleep(min(30, 3 * 2 ** i))
+    raise RuntimeError(f"Apify API kept failing for {path}")
+
+
 def run_actor(actor: str, run_input: dict[str, Any], *, max_items: int, max_charge_usd: float,
               timeout_s: int = 900, poll_s: int = 10, memory_mb: int | None = None, clean: bool = True,
               with_log: bool = False) -> ActorRun:
@@ -76,12 +91,12 @@ def run_actor(actor: str, run_input: dict[str, Any], *, max_items: int, max_char
         deadline = time.time() + timeout_s
         while run["status"] in ("READY", "RUNNING") and time.time() < deadline:
             time.sleep(poll_s)
-            run = c.get(f"/actor-runs/{run['id']}").json()["data"]
+            run = _get_json(c, f"/actor-runs/{run['id']}")["data"]
         if run["status"] in ("READY", "RUNNING"):
             c.post(f"/actor-runs/{run['id']}/abort")
-            run = c.get(f"/actor-runs/{run['id']}").json()["data"]
-        items = c.get(f"/datasets/{run['defaultDatasetId']}/items",
-                      params={"clean": "true" if clean else "false", "format": "json"}).json()
+            run = _get_json(c, f"/actor-runs/{run['id']}")["data"]
+        items = _get_json(c, f"/datasets/{run['defaultDatasetId']}/items",
+                          params={"clean": "true" if clean else "false", "format": "json"})
         log = c.get(f"/actor-runs/{run['id']}/log").text if with_log else None
     return ActorRun(
         actor=actor, run_id=run["id"], status=run["status"], items=items,
