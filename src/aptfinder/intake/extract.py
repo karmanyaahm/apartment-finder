@@ -106,11 +106,14 @@ RESTRICTION = {
                    "below market rate, income limits apply, tax credit / LIHTC, Section 8 or voucher holders only, "
                    "project-based vouchers / PBV), "
                    "senior (55+, 62+, seniors only), veterans (veterans only, VASH), student (students only), employer "
-                   "(only employees of a company or institution), other (any other eligibility rule: disability, "
-                   "supportive or transitional housing, members only). none when the entry sets no such limit, the "
-                   "usual rental. Accepting Section 8 or vouchers ('Section 8 welcome', 'vouchers accepted') is none, "
-                   "not a limit; so is being near a campus or an employer. evidence: the exact words that state the "
-                   "limit, copied character for character; empty for none.",
+                   "(only employees of a company or institution), other (any other rule on who may live there: "
+                   "disability, supportive or transitional housing, members only, one gender only). none when the "
+                   "entry sets no such limit, the usual rental. Not limits (none): accepting Section 8 or vouchers "
+                   "('Section 8 welcome'); a minimum income to qualify ('income 3x rent', 'income requirements' about "
+                   "earning enough), which is ordinary screening, unlike a maximum income; house or booking rules "
+                   "(21+, no children, vaccinated guests, no smoking or drugs, reviews needed, 1 person max); being "
+                   "near a campus or an employer. evidence: the exact words that state the limit, copied character "
+                   "for character; empty for none.",
     "properties": {"value": {"type": "string", "enum": list(RESTRICTIONS)}, "evidence": {"type": "string"}}}
 _STR = {"type": ["string", "null"]}
 SCHEMA = {"type": "object", "required": ["results"], "properties": {"results": {"type": "array", "items": {
