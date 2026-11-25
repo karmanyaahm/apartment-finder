@@ -111,6 +111,49 @@ def test_prefetch_fills_the_cache_one_request_per_destination_and_skips_cached(t
     assert c.prefetch(legs)["elements"] == 0  # all cached now
 
 
+def test_transit_knn_fills_a_place_with_no_transit_row_and_none_without_a_neighbour():
+    pa = "commute_targets:Downtown Palo Alto"
+    loc = {"a": (37.40, -122.10), "b": (37.401, -122.10), "far": (37.45, -122.10)}
+    trips = _trips([("a", (pa, "transit"), _g(22.0))])  # b and far have no transit row at all (no estimate)
+    add_knn(trips, loc, [(pa, "transit")])
+    assert trips["b"][(pa, "transit")]["provider"] == "knn" and trips["b"][(pa, "transit")]["minutes"] == 22.0
+    assert (pa, "transit") not in trips["far"]  # no routed neighbour within 400 m: stays '–'
+
+
+def test_transit_prefetch_splits_at_100_and_the_google_body_departs_in_the_future(tmp_path):
+    import json as _json
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    import httpx
+
+    from aptfinder.commute.sources import GoogleRoutesLegSource
+
+    src = FakeMatrix()
+    c = Commute(tmp_path / "c.db", src)
+    dest = (37.4447, -122.1610)
+    legs = [((37.30 + i * 0.001, -122.10), dest, "transit") for i in range(250)]
+    res = c.prefetch(legs)
+    assert res["elements"] == 250 and [r[0] for r in src.requests] == [100, 100, 50]
+
+    seen = []
+
+    def handler(req):
+        seen.append(_json.loads(req.content))
+        return httpx.Response(200, json=[{"originIndex": 1, "condition": "ROUTE_EXISTS", "duration": "1500s",
+                                          "distanceMeters": 9000}, {"condition": "ROUTE_NOT_FOUND"}])
+
+    g = GoogleRoutesLegSource("k", httpx.Client(transport=httpx.MockTransport(handler)))
+    out = g.matrix([(37.40, -122.10), (37.41, -122.10)], [dest], "transit", "weekday_0830")
+    assert out[(1, 0)].minutes == 25.0 and out[(0, 0)] is None
+    body = seen[0]
+    assert body["travelMode"] == "TRANSIT" and "routingPreference" not in body
+    dep = datetime.fromisoformat(body["departureTime"])
+    assert dep > datetime.now(ZoneInfo("America/Los_Angeles")) and dep.weekday() == 1 and dep.hour == 8
+    with pytest.raises(ValueError, match="at most 100"):
+        g.matrix([(37.40, -122.10)] * 101, [dest], "transit", "weekday_0830")
+
+
 def test_metered_matrix_logs_elements_and_stops_at_the_caps(tmp_path, monkeypatch):
     from aptfinder import trips
     from aptfinder.store import connect, init_db
@@ -160,12 +203,13 @@ def test_knn_cells_and_sampling_endpoints(tmp_path, monkeypatch):
     seed_db(db, with_trips=True)
     c = TestClient(create_app(db))
     d = c.get("/api/knn/cells").json()
-    assert d["cells"] == [] and "drive" in d["modes"] and "transit" not in d["modes"]
+    assert d["cells"] == [] and "drive" in d["modes"] and "transit" in d["modes"]
     assert any(r["id"] == META for r in d["rows"])
     cal = next(r for r in d["rows"] if r["id"] == "set:caltrain_stations")
     assert cal["k"] >= 1 and cal["points"] >= cal["k"] and d["k_stations"] == trips.K_STATIONS
     assert "matrix_cap" in d and "matrix_free" in d and d["knn_k"] == 3 and d["typed_over"] == 20
     assert c.post("/api/knn/cells", json={"cells": [["set:caltrain_stations", "bike_train_bike"]]}).status_code == 400
+    assert c.post("/api/knn/cells", json={"cells": [["set:caltrain_stations", "transit"]]}).status_code == 400
     assert c.post("/api/knn/cells", json={"cells": [[META, "drive"]]}).status_code == 200
     assert c.get("/api/knn/cells").json()["cells"] == [[META, "drive"]]
     keys = [p["place_key"] for p in c.get("/api/places").json()]

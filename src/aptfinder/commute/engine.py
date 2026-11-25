@@ -99,8 +99,8 @@ class Commute:
 
     def prefetch(self, legs: list[tuple[LatLon, LatLon, str]], batch: int = 625) -> dict[str, int]:
         """Fill the cache for many single legs with the source's `matrix` (one request per destination and mode, up
-        to `batch` origins each), so later `leg` / `trip` calls are cache hits. Legs already cached are skipped; an
-        element the source left out stays uncached."""
+        to `batch` origins each; transit up to the source's MATRIX_MAX_TRANSIT, Google's 100), so later `leg` / `trip`
+        calls are cache hits. Legs already cached are skipped; an element the source left out stays uncached."""
         todo: dict[tuple[LatLon, str], set[LatLon]] = {}
         for origin, dest, mode in legs:
             o, d = round_ll(origin), round_ll(dest)
@@ -112,8 +112,9 @@ class Commute:
         requests = elements = cached = 0
         for (d, mode), origins in sorted(todo.items()):
             olist = sorted(origins)
-            for i in range(0, len(olist), batch):
-                chunk = olist[i:i + batch]
+            size = min(batch, getattr(self.source, "MATRIX_MAX_TRANSIT", 100)) if mode == "transit" else batch
+            for i in range(0, len(olist), size):
+                chunk = olist[i:i + size]
                 res = self.source.matrix(chunk, [d], mode, self.depart)
                 requests += 1
                 elements += len(chunk)

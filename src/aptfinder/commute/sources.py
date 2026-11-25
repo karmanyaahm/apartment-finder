@@ -70,6 +70,8 @@ class GoogleRoutesLegSource:
 
     MATRIX_URL = "https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix"
     MATRIX_MAX = 625  # elements per request (origins x destinations) for walk, bike and drive without traffic
+    MATRIX_MAX_TRANSIT = 100  # Google: "Maximum allowed total number of elements per ComputeRouteMatrix request
+    # with travelMode set to TRANSIT is 100" (usage-and-billing); larger transit matrices are split into requests
     MATRIX_FIELDS = "originIndex,destinationIndex,duration,distanceMeters,status,condition"
 
     def __init__(self, api_key: str, client: httpx.Client | None = None):
@@ -122,16 +124,23 @@ class GoogleRoutesLegSource:
     def matrix(self, origins: list[LatLon], dests: list[LatLon], mode: str,
                depart: str) -> dict[tuple[int, int], LegResult | None]:
         """computeRouteMatrix (its own Essentials SKU, billed per element): (origin index, destination index) ->
-        LegResult, None when no route exists. An element that failed is left out (not cached as 'no route')."""
-        if mode not in ("walk", "bike", "drive"):
-            raise ValueError(f"matrix: mode {mode!r} not supported (walk, bike, drive)")
+        LegResult, None when no route exists. An element that failed is left out (not cached as 'no route').
+        Transit sends departureTime = next_departure(depart), a future weekday time, never 'now' (which bills
+        real-time traffic at a higher rate); Google allows 100 transit elements a request (`Commute.prefetch` splits
+        its requests to fit). Transit elements carry no steps: the matrix returns only duration and distance."""
+        if mode not in self.TRAVEL_MODE:
+            raise ValueError(f"matrix: mode {mode!r} not supported (walk, bike, drive, transit)")
         if len(origins) * len(dests) > self.MATRIX_MAX:
             raise ValueError(f"matrix: {len(origins) * len(dests)} elements, at most {self.MATRIX_MAX}")
+        if mode == "transit" and len(origins) * len(dests) > self.MATRIX_MAX_TRANSIT:
+            raise ValueError(f"matrix: {len(origins) * len(dests)} transit elements, at most {self.MATRIX_MAX_TRANSIT}")
         wp = lambda p: {"waypoint": {"location": {"latLng": {"latitude": p[0], "longitude": p[1]}}}}  # noqa: E731
         body: dict[str, Any] = {"origins": [wp(o) for o in origins], "destinations": [wp(d) for d in dests],
                                 "travelMode": self.TRAVEL_MODE[mode]}
         if mode == "drive":
             body["routingPreference"] = "TRAFFIC_UNAWARE"
+        if mode == "transit":
+            body["departureTime"] = next_departure(depart).isoformat()
         self.calls += 1
         resp = self.client.post(self.MATRIX_URL, json=body, headers={
             "X-Goog-Api-Key": self.api_key, "X-Goog-FieldMask": self.MATRIX_FIELDS}, timeout=120)

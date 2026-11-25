@@ -232,9 +232,8 @@ const SRC_LEGEND = `<span class="src-key"><b class="src-google">■</b> Google M
 function commuteRows() {
   const g = S.goal !== "all" && S.draft && S.draft.id === S.goal ? S.draft : null;
   if (!g) return [];
-  // transit is not shown (bike+train is the transit option), even where a goal still lists it
   return [...g.rules, ...g.nice].flatMap((r) => r.type === "commute_any" ? (r.options || []).map((o) => [r.target, o.mode])
-    : r.type === "near" ? [[`set:${r.set}`, r.mode]] : []).filter(([, mode]) => mode !== "transit");
+    : r.type === "near" ? [[`set:${r.set}`, r.mode]] : []);
 }
 function limitFacts(p, fails = []) {
   return commuteRows().map(([pt, mode]) => {
@@ -347,7 +346,7 @@ function ruleInputs(r) {
   if (r.type === "dates_cover") return `from <input data-p="start" type="date" value="${esc(r.start)}"> to <input data-p="end" type="date" value="${esc(r.end)}">`;
   if (r.type === "commute_any" || r.type === "near") {
     const pt = r.type === "near" ? `set:${r.set}` : r.target;
-    // a mode no longer offered (transit) stays selectable where a rule already uses it, so saving keeps it
+    // a mode no longer offered stays selectable where a rule already uses it, so saving keeps it
     const mOpts = (sel) => [...S.meta.modes, ...(sel && !S.meta.modes.includes(sel) ? [sel] : [])]
       .map((m) => opt(m, MODE_LABEL[m] || m, sel)).join("");
     const rows = r.type === "near" ? [{ mode: r.mode, max: r.max }] : r.options;
@@ -1558,6 +1557,7 @@ function rowNote(r) {
   if (r.k === 1) return "route to the nearest point only (straight line) — 1 route per place";
   return `routes to the ${pick}; shows the fastest — ${n} routes per place`;
 }
+const TRANSIT_NOTE = "Google transit, weekday morning departure; no straight-line estimate, so a place with no routed neighbour stays –";
 const btbNote = (ks) => `per place: bike to the ${ks} nearest stations + bike the whole way for comparison = up to ${ks + 1} routes
   (the whole-way leg is the bike column's route); train time from the timetable plus wait; station→destination bike legs
   are shared by every place (routed once, then reused)`;
@@ -1592,7 +1592,7 @@ function knnHelpHtml(d = KNN_META) {
     this commute (every other rule passes). <b>done</b> (green) = 0 undecided and p99 ≤ 2 min. Otherwise it names the cheaper
     of cover (${R} m) and refine that would pick something, with its elements; <i>settled</i> = no sample picks a
     place (what is left is KNN's error at places that cannot pass a goal). The total row lists places waiting on a
-    commute no ticked cell covers (tick it; transit cannot be sampled). The dry run shows undecided now → after.</p>
+    commute no ticked cell covers (tick it). The dry run shows undecided now → after.</p>
   <p><b>Of</b>: the current search results; every place in a walk zone; or search candidates (in a walk zone and can
     still pass a goal), usually the right one.</p>
   <p><b>Reading the dry run.</b> The first line's "N not yet routed, over all cells" adds up each cell's picks that
@@ -1633,12 +1633,13 @@ async function drawKnnGrid() {
   const num = (x) => Number(x).toLocaleString("en-US");
   const bill = `All sampling bills as Google Route Matrix Essentials: 1 element = 1 place × 1 destination; ${num(d.matrix_free)} free a month, `
     + (d.matrix_cap ? `cap ${num(d.matrix_cap)}.` : "no cap set in google.toml, so no matrix calls.");
-  box.innerHTML = `<table class="knn-grid"><tr><th></th>${d.modes.map((m) => `<th${m === "bike_train_bike" ? ` title="${esc(btbNote(d.k_stations))}"` : ""}>${esc(MODE_LABEL[m] || m)}${
-      m === "bike_train_bike" ? `<div class="muted small knn-note">${esc(btbNote(d.k_stations))}</div>` : ""}</th>`).join("")}</tr>
+  const colNote = (m) => m === "bike_train_bike" ? btbNote(d.k_stations) : m === "transit" ? TRANSIT_NOTE : "";
+  box.innerHTML = `<table class="knn-grid"><tr><th></th>${d.modes.map((m) => `<th${colNote(m) ? ` title="${esc(colNote(m))}"` : ""}>${esc(MODE_LABEL[m] || m)}${
+      colNote(m) ? `<div class="muted small knn-note">${esc(colNote(m))}</div>` : ""}</th>`).join("")}</tr>
     ${d.rows.map((r) => `<tr><th title="${esc(rowNote(r))}">${esc(r.label)}<div class="muted small knn-note">${esc(rowNote(r))}</div></th>${d.modes.map((m) => {
-      if (m === "bike_train_bike" && r.kind === "set") return "<td></td>";
+      if ((m === "bike_train_bike" || m === "transit") && r.kind === "set") return "<td></td>";
       const why = !r.paid ? "paid = false in point_sets.toml: no Google routing for this set"
-        : m === "bike_train_bike" ? btbNote(d.k_stations) : rowNote(r);
+        : colNote(m) || rowNote(r);
       return `<td title="${esc(why)}"><input type="checkbox" data-cell="${esc(r.id)}|${esc(m)}" title="${esc(why)}"
         ${on.has(`${r.id}|${m}`) ? "checked" : ""} ${r.paid ? "" : "disabled"}></td>`;
     }).join("")}</tr>`).join("")}</table><p class="muted small">${esc(bill)}</p>`;

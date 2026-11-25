@@ -30,8 +30,8 @@ from ..store.models import CHECKABLE_FIELDS
 
 STATIC = Path(__file__).parent / "static"
 AUTHOR = "user"
-# transit is not offered or shown (user, 2026-11-25): bike+train is the transit option; stored transit trips stay
-MODES = ["walk", "bike", "drive", "bike_train_bike", "bike_bus_bike"]
+# transit is shown again (user, 2026-11-25, later): Google transit through Route Matrix, KNN like the other modes
+MODES = ["walk", "bike", "transit", "drive", "bike_train_bike", "bike_bus_bike"]
 DEFAULT_ATTRIBUTES = ["overall", "status", "gym", "walk_to_caltrain", "living_room"]
 LISTING_FIELDS = ["price", "price_basis", "price_month", "price_per_bed", "beds", "baths", "sqft", "kind",
                   "term", "furnished", "private_bath", "available_from", "available_to", "address", "unit",
@@ -248,7 +248,9 @@ class SampleRunIn(BaseModel):
 
 
 INTERRUPTED = "interrupted: the dashboard restarted mid-run"
-KNN_MODES = ["drive", "bike", "walk", "bike_train_bike"]  # the KNN grid's columns (bike+train: commute targets only)
+# the KNN grid's columns (bike+train and transit: commute targets only)
+KNN_MODES = ["drive", "bike", "walk", "bike_train_bike", "transit"]
+TARGET_ONLY_MODES = ("bike_train_bike", "transit")
 
 
 class ComputeIn(BaseModel):
@@ -810,8 +812,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
     # seed; an edit, a new goal or a delete is an annotations row (goal / <id> / definition), latest wins
     def goal_refs() -> dict[str, Any]:
         pts = load_points()
-        # a goal may still name transit (stored Google transit trips); it is only not offered or shown
-        return {"modes": MODES + ["transit"], "points": {p.id for v in pts.values() for p in v},
+        return {"modes": MODES, "points": {p.id for v in pts.values() for p in v},
                 "sets": set(pts) | set(load_point_sets())}
 
     def checked_goal(body: dict[str, Any]) -> dict[str, Any]:
@@ -1138,7 +1139,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
 
         ids = {r["id"] for r in knn_cells_get()["rows"]}
         for p, m in body.cells:
-            if p not in ids or m not in KNN_MODES or (m == "bike_train_bike" and p.startswith("set:")):
+            if p not in ids or m not in KNN_MODES or (m in TARGET_ONLY_MODES and p.startswith("set:")):
                 raise HTTPException(400, f"no such cell {p} x {m}")
         with lock:
             append_annotation(conn, AUTHOR, *CELLS_KEY, comment=json.dumps(sorted(set(map(tuple, body.cells)))))
