@@ -55,10 +55,6 @@ function placeStatus(p, goal = S.goal) {
   const sts = Object.values(p.goals).map((g) => g.status);
   return sts.sort((a, b) => RANK[a] - RANK[b])[0] || "needs_check";
 }
-function minutesFor(p) {
-  const v = p.minutes[`${$("#target").value}|${$("#mode").value}`];
-  return v ? v : null;
-}
 const COLORS = () => {
   const cs = getComputedStyle(document.documentElement);
   return { pass: cs.getPropertyValue("--pass").trim(), needs_check: cs.getPropertyValue("--check").trim(), fail: cs.getPropertyValue("--fail").trim() };
@@ -176,15 +172,14 @@ function drawMarkers(list) {
 }
 
 /* ---------------------------------------------------------------- view controls (this browser only) */
-// Sort, target, mode, the status ticks, inactive and outside walk zones are view controls, kept per browser in
+// Sort, net, the status ticks, inactive and outside walk zones are view controls, kept per browser in
 // localStorage. What a place must have is the selected goal's rules (the goal editor below), stored on the server.
 const VIEW_KEY = "aptf.view";
-const OLD_FILTERS_KEY = "aptf.listFilters"; // per-browser filters before goals were editable (2026-11-25)
 const lsGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
 const lsSet = (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch { /* blocked */ } };
 function readView() {
   return {
-    sort: $("#sort").value, agg: $("#agg").value, target: $("#target").value, mode: $("#mode").value,
+    sort: $("#sort").value, agg: $("#agg").value,
     statuses: $$(".st").filter((c) => c.checked).map((c) => c.value),
     inactive: $("#inactive").checked, outzone: $("#outzone").checked,
   };
@@ -193,8 +188,6 @@ function applyView(f) {
   const has = (sel, v) => v != null && [...$(sel).options].some((o) => o.value === v);
   if (has("#sort", f.sort)) $("#sort").value = f.sort;
   if (has("#agg", f.agg)) $("#agg").value = f.agg;
-  if (has("#target", f.target)) $("#target").value = f.target;
-  if (has("#mode", f.mode)) $("#mode").value = f.mode;
   if (Array.isArray(f.statuses)) $$(".st").forEach((c) => { c.checked = f.statuses.includes(c.value); });
   if (f.inactive != null) $("#inactive").checked = !!f.inactive;
   if (f.outzone != null) $("#outzone").checked = !!f.outzone;
@@ -290,13 +283,13 @@ function goalTerm(id) {
 
 // "+ add" menu: [label, the new rule]
 function ruleTemplates() {
-  const pt = $("#target").value || S.meta.targets[0];
+  const pt = S.meta.default_target || S.meta.targets[0];
   return [
     ["price / bed at most", { type: "max", field: "price_per_bed", value: 2500 }],
     ["price / month at most", { type: "max", field: "price_month", value: 4000 }],
     ["beds at least", { type: "min", field: "beds", value: 3 }],
     ["beds and baths", { type: "size_options", options: [{ beds: 3, min_baths: 2 }] }],
-    ["commute", { type: "commute_any", target: pt, options: [{ mode: $("#mode").value || "walk", max: 25 }] }],
+    ["commute", { type: "commute_any", target: pt, options: [{ mode: "bike", max: 25 }] }],
     ["amenity", { type: "amenity", name: "gym", match: ["gym", "fitness"] }],
     ["lease term", { type: "equals", field: "term", value: "long" }],
     ["furnished", { type: "equals", field: "furnished", value: true }],
@@ -313,11 +306,12 @@ const fieldName = (f) => FIELD_LABEL[f] || f.replace(/_/g, " ");
 // one rule row's inputs; each input names the path it sets in data-p ("value", "options.0.max", ...)
 function ruleInputs(r) {
   const G = S.goalsData;
-  const numIn = (p, v, w = 5, step = "any") => `<input data-p="${p}" data-num type="number" step="${step}" value="${v ?? ""}" style="width:${w}em">`;
+  // the width is per kind (style.css .num-*): room for the largest realistic value plus the spinner
+  const numIn = (p, v, kind, step = "any") => `<input data-p="${p}" data-num type="number" class="num-${kind}" step="${step}" value="${v ?? ""}">`;
   if (r.type === "max" || r.type === "min") {
     const op = (r.type === "max" ? (r.strict ? "<" : "≤") : (r.strict ? ">" : "≥"));
     return `<select data-p="field">${G.numeric_fields.map((f) => opt(f, fieldName(f), r.field)).join("")}</select>
-      <select data-op>${["≤", "<", "≥", ">"].map((o) => opt(o, o, op)).join("")}</select>${numIn("value", r.value, 5.5)}`;
+      <select data-op>${["≤", "<", "≥", ">"].map((o) => opt(o, o, op)).join("")}</select>${numIn("value", r.value, "money")}`;
   }
   if (r.type === "equals") {
     const vals = G.equals_fields[r.field] || [];
@@ -325,11 +319,11 @@ function ruleInputs(r) {
       <select data-p="value" data-json>${vals.map((v) => opt(JSON.stringify(v), v === true ? "yes" : v === false ? "no" : v, JSON.stringify(r.value))).join("")}</select>`;
   }
   if (r.type === "net_commute") {
-    return `<select data-p="agg">${G.aggs.map((a) => opt(a, a, r.agg)).join("")}</select> of the commute rules ≤ ${numIn("max", r.max, 3.5, 1)} min`;
+    return `<select data-p="agg">${G.aggs.map((a) => opt(a, a, r.agg)).join("")}</select> of the commute rules ≤ ${numIn("max", r.max, "min", 1)} min`;
   }
   if (r.type === "known") return `<select data-p="field">${G.known_fields.map((f) => opt(f, fieldName(f), r.field)).join("")}</select> known`;
   if (r.type === "size_options") {
-    return r.options.map((o, i) => `<span class="sub">${numIn(`options.${i}.beds`, o.beds, 3, 1)} bd, ≥ ${numIn(`options.${i}.min_baths`, o.min_baths, 3.5, 0.5)} ba
+    return r.options.map((o, i) => `<span class="sub">${numIn(`options.${i}.beds`, o.beds, "bed", 1)} bd, ≥ ${numIn(`options.${i}.min_baths`, o.min_baths, "bed", 0.5)} ba
       ${r.options.length > 1 ? `<button type="button" class="small" data-rm-opt="${i}" title="remove this size">×</button>` : ""}</span>`).join(" or ")
       + ` <button type="button" class="small" data-add-opt="size" title="another size that also counts">+ or</button>`;
   }
@@ -340,7 +334,7 @@ function ruleInputs(r) {
     const rows = r.type === "near" ? [{ mode: r.mode, max: r.max }] : r.options;
     return `<select data-pt>${limitOptions().map(([v, l]) => opt(v, l, pt)).join("")}</select> `
       + rows.map((o, i) => `<span class="sub"><select data-p="${r.type === "near" ? "mode" : `options.${i}.mode`}">${mOpts(o.mode)}</select>
-        ≤ ${numIn(r.type === "near" ? "max" : `options.${i}.max`, o.max, 3.5, 1)} min${rows.length > 1 ? ` <button type="button" class="small" data-rm-opt="${i}" title="remove this mode">×</button>` : ""}</span>`).join(" or ")
+        ≤ ${numIn(r.type === "near" ? "max" : `options.${i}.max`, o.max, "min", 1)} min${rows.length > 1 ? ` <button type="button" class="small" data-rm-opt="${i}" title="remove this mode">×</button>` : ""}</span>`).join(" or ")
       + (r.type === "commute_any" ? ` <button type="button" class="small" data-add-opt="mode" title="another mode that also counts">+ or</button>` : "");
   }
   if (r.type === "amenity") {
@@ -366,12 +360,9 @@ function renderGoalEditor() {
   const box = $("#goal-editor");
   if (!S.goalsData) { box.innerHTML = ""; return; }
   const ro = S.meta.readonly;
-  const imp = S.legacyFilters && !ro
-    ? `<div class="row small"><button type="button" id="g-import" class="small">Import old saved filters as a goal</button>
-       <span class="muted">${esc(legacySummary(S.legacyFilters))}</span></div>` : "";
   if (S.goal === "all" || !S.draft) {
     box.innerHTML = `<div class="row small"><span class="muted">All goals: each place shows its best status. Pick a goal to see and edit its rules.</span>
-      ${ro ? "" : `<button type="button" id="g-new" class="small">+ new goal</button>`}</div>${imp}`;
+      ${ro ? "" : `<button type="button" id="g-new" class="small">+ new goal</button>`}</div>`;
   } else {
     const g = S.draft, dirty = draftDirty();
     const tmpl = ruleTemplates().map(([l], i) => `<option value="${i}">${esc(l)}</option>`).join("");
@@ -391,7 +382,7 @@ function renderGoalEditor() {
         <button type="button" id="g-delete" class="small">Delete goal</button>
         <button type="button" id="g-new" class="small">+ new goal</button></div>`}
       <div id="g-msg" class="small ${S.previewMsg.startsWith("!") ? "err" : "muted"}">${esc(S.previewMsg.replace(/^!/, ""))}</div>
-    </details>${imp}`;
+    </details>`;
     $("#g-details").addEventListener("toggle", (e) => { S.editorOpen = e.target.open; });
     if (ro) $$("#goal-editor input, #goal-editor select").forEach((el) => { el.disabled = true; });
     // no re-render on a typed change: it fires on blur, e.g. while the Save button is being clicked
@@ -408,7 +399,6 @@ function renderGoalEditor() {
   $("#g-revert")?.addEventListener("click", () => { S.draft = clone(savedGoal(S.goal)); draftChanged(true); });
   $("#g-delete")?.addEventListener("click", deleteGoal);
   $("#g-new")?.addEventListener("click", newGoal);
-  $("#g-import")?.addEventListener("click", importLegacy);
 }
 function wireRule(row) {
   const r = S.draft[row.dataset.part][+row.dataset.i];
@@ -523,7 +513,6 @@ function renderGoalSwitch() {
 // after a save: the goal list, the meta (default target), and every place's saved results
 async function reloadGoals(selectId) {
   S.goalsData = await api("api/goals");
-  S.legacyFilters = legacyFilters();
   S.meta = await api("api/meta");
   S.previewMsg = "saved; recomputing the list…";
   S.draft = null;
@@ -572,41 +561,6 @@ async function deleteGoal() {
     await reloadGoals("all");
   } catch (e) { toast("Not deleted: " + e.message, 6000); }
 }
-// The list filters saved before goals were editable (server's last "Save for everyone", or this browser's unsaved
-// copy) as rules: max $/bed, min beds and each requirement row. Offered once as a new goal "saved_filters".
-function legacyFilters() {
-  let f = null;
-  try { f = JSON.parse(lsGet(OLD_FILTERS_KEY) || "null"); } catch { f = null; }
-  if (S.goalsData.legacy_imported) { lsSet(OLD_FILTERS_KEY, null); return null; }
-  f = f || S.goalsData.legacy_filters;
-  if (!f) return null;
-  const rules = [];
-  if (f.maxppb !== "" && f.maxppb != null && !isNaN(+f.maxppb)) rules.push({ type: "max", field: "price_per_bed", value: +f.maxppb });
-  if (f.minbeds !== "" && f.minbeds != null && !isNaN(+f.minbeds)) rules.push({ type: "min", field: "beds", value: +f.minbeds });
-  for (const l of f.limits || []) {
-    const pt = l.point || l.target;
-    if (!pt || !l.mode || !(l.max > 0)) continue;
-    rules.push(pt.startsWith("set:") ? { type: "near", set: pt.slice(4), mode: l.mode, max: l.max }
-      : { type: "commute_any", target: pt, options: [{ mode: l.mode, max: l.max }] });
-  }
-  return rules.length ? rules : null;
-}
-function legacySummary(rules) {
-  return rules.map((r) => r.type === "max" ? `$/bed ≤ ${r.value}` : r.type === "min" ? `beds ≥ ${r.value}`
-    : r.type === "near" ? `${limitName("set:" + r.set, r.mode)} ≤ ${r.max}` : `${limitName(r.target, r.options[0].mode)} ≤ ${r.options[0].max}`).join(", ");
-}
-async function importLegacy() {
-  const base = S.draft;
-  const label = prompt("Name of the goal made from the old saved filters", base ? `${base.label} + saved filters` : "Saved filters");
-  if (!label) return;
-  // a $/bed or beds limit the goal already has at least as strictly is not added twice
-  const covered = (r) => (base?.rules || []).some((b) => b.type === r.type && b.field === r.field && r.field
-    && (r.type === "max" ? b.value <= r.value : b.value >= r.value));
-  const rules = [...(base?.rules || []), ...S.legacyFilters.filter((r) => !covered(r))];
-  await createGoal({ id: "saved_filters", label, rules, nice: base?.nice || [] });
-  lsSet(OLD_FILTERS_KEY, null);
-}
-
 // Which attribute a place fails on: each non-pass goal rule arrives as {s, f, v, lim?, pt?/set?, modes?}
 // (filter.rules.fact, parallel to reasons). The card marks that attribute red (fail) or amber (needs_check);
 // one the card does not show becomes a small chip. Only the selected goal, or every goal under All.
@@ -664,7 +618,7 @@ function sorted(list) {
     status: (p) => [RANK[placeStatus(p)], -(p.goals[S.goal]?.nice_score || 0), nil(p.min_price_per_bed)],
     price: (p) => [nil(goalTerm(S.goal) === "short" ? p.min_stay_month : goalTerm(S.goal) === "long" ? p.min_lease_month : p.min_price_month)],
     ppb: (p) => [nil(goalTerm(S.goal) === "long" ? p.min_lease_per_bed : p.min_price_per_bed)],
-    beds: (p) => [-(p.max_beds || 0)], minutes: (p) => [nil(minutesFor(p)?.minutes)],
+    beds: (p) => [-(p.max_beds || 0)],
     // complete sums first, then those with unknown terms (by what is known), then none
     net: (p) => { const n = netCommute(p); return n && n.v != null ? [n.known < n.n ? 1 : 0, n.v] : [2, 0]; },
     rating: (p) => [-(p.rating || 0)], nice: (p) => [-(Math.max(0, ...Object.values(p.goals).map((g) => g.nice_score || 0)))],
@@ -713,21 +667,21 @@ function stars(n) { return n ? `<span class="stars" title="${n}/5">${"★".repea
 function renderList() {
   const list = sorted(filtered());
   drawMarkers(list);
-  $("#count").textContent = `${list.length} of ${S.places.length} places`;
-  const tgt = $("#target").value.split(":")[1] || "";
-  const mode = MODE_LABEL[$("#mode").value];
+  // totals by status for the selected goal (All: each place's best), then how many the list shows if some are hidden
+  const tot = { pass: 0, needs_check: 0, fail: 0 };
+  S.places.forEach((p) => { tot[placeStatus(p)]++; });
+  $("#count").innerHTML = `${num(S.places.length)} places · <b class="n-pass">${num(tot.pass)}</b> pass · `
+    + `<b class="n-check">${num(tot.needs_check)}</b> check · <b class="n-fail">${num(tot.fail)}</b> fail`
+    + (list.length < S.places.length ? ` · showing ${num(list.length)}` : "");
   $("#cards").innerHTML = list.map((p) => {
     const st = placeStatus(p);
-    const mins = minutesFor(p);
     const chips = Object.entries(p.goals).filter(([g]) => S.goal === "all" || g === S.goal).map(([g, r]) => `<span class="chip ${r.status}" title="${esc(r.reasons.join("\n"))}">${esc(g)}: ${esc(STATUS_LABEL[r.status])}</span>`).join("");
     const fails = cardFails(p);
     const bm = markFor(fails, (x) => x.f === "beds"), am = markFor(fails, (x) => x.f === "baths");
     const bb = p.beds.length ? `<span${bm}>${esc(p.beds.map((b) => (b === 0 ? "studio" : b + "bd")).join("/"))}</span> · <span${am}>${esc(p.baths.join("/"))}ba</span>`
       : `<span${bm || am}>beds ?</span>`;
-    const cm = markFor(fails, (x) => x.f === "commute" && x.pt === $("#target").value && x.modes.includes($("#mode").value));
     const facts = `${priceFacts(p, fails)}
         <span>${bb}</span>
-        <span${cm}>${mins ? `<b>${num(mins.minutes)}</b> min ${esc(mode)} to ${esc(tgt)}${mins.provider === "estimate" ? " (est.)" : ""}` : `${esc(mode)} to ${esc(tgt)}: not computed`}</span>
         ${limitFacts(p, fails)}${netFact(p, fails)}`;
     const extra = fails.filter((x) => !x.used).map(failChip).join("");
     return `<div class="card ${st === "fail" ? "dim" : ""} ${S.selected === p.place_key ? "sel" : ""}" data-pk="${esc(p.place_key)}">
@@ -1345,8 +1299,8 @@ function computeBlock() {
     <label><input type="radio" name="c-scope" value="zone"> every place in a walk zone</label>
     <label><input type="radio" name="c-scope" value="candidates"> search candidates (in a walk zone, can still pass a goal)</label>
     <button id="c-dry">Dry run</button>
-    <span id="c-confirm" class="hidden">to run, type the Google calls (<b id="c-n-want"></b>) <input id="c-n" type="number" style="width:5em">
-      and the calls left this month (<b id="c-left-want"></b>) <input id="c-left" type="number" style="width:5em"></span>
+    <span id="c-confirm" class="hidden">to run, type the Google calls (<b id="c-n-want"></b>) <input id="c-n" type="number" class="num-count">
+      and the calls left this month (<b id="c-left-want"></b>) <input id="c-left" type="number" class="num-count"></span>
     <button id="c-run" class="accent hidden">Run</button> <span id="c-hint" class="muted hidden">type both numbers to unlock</span>
     <div id="c-out" class="muted"></div>
     <div id="c-job" class="muted"></div>
@@ -1574,19 +1528,14 @@ async function boot() {
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
   S.meta = await api("api/meta");
   $("#dbname").textContent = S.meta.db;
-  $("#target").innerHTML = S.meta.targets.map((t) => `<option value="${esc(t)}">${esc(t.split(":")[1])}</option>`).join("");
-  $("#mode").innerHTML = S.meta.modes.map((m) => `<option value="${esc(m)}">${esc(MODE_LABEL[m])}</option>`).join("");
-  if (S.meta.default_target) $("#target").value = S.meta.default_target; // the target a goal commutes to
-  $("#mode").value = "bike";
   loadView();
   S.goalsData = await api("api/goals");
-  S.legacyFilters = legacyFilters();
   initMap();
   // start on the lease goal when there is one, else All
   selectGoal(savedGoal("lease") ? "lease" : "all");
   $$("#base-switch button").forEach((b) => b.addEventListener("click", () => setBase(b.dataset.base)));
   $("#q").addEventListener("input", renderList);
-  ["#sort", "#agg", "#target", "#mode", "#inactive", "#outzone", ...$$(".st")].forEach((el) => {
+  ["#sort", "#agg", "#inactive", "#outzone", ...$$(".st")].forEach((el) => {
     const node = typeof el === "string" ? $(el) : el;
     node.addEventListener("input", () => { saveView(); renderList(); });
   });

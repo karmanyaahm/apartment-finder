@@ -29,7 +29,6 @@ from ..store import append_annotation, append_check, append_link, connect, init_
 from ..store.models import CHECKABLE_FIELDS
 
 STATIC = Path(__file__).parent / "static"
-LEGACY_GOAL = "saved_filters"  # the goal the old saved list filters are imported as
 AUTHOR = "user"
 MODES = ["walk", "bike", "transit", "drive", "bike_train_bike", "bike_bus_bike"]
 DEFAULT_ATTRIBUTES = ["overall", "status", "gym", "walk_to_caltrain", "living_room"]
@@ -752,12 +751,6 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                        "origin": "new" if g not in seed else "edited" if g in edits else "goals.toml"}
                       for g, v in effective().goals.items()],
             "deleted": sorted(g for g, d in edits.items() if d is None),
-            # the list filters last saved for everyone before goals were editable (view / list / filters), offered
-            # once in the editor as a new goal `saved_filters`; gone once that id has any row
-            "legacy_filters": legacy[0] if (legacy := [json.loads(r["comment"]) for r in q(
-                "SELECT comment FROM annotations WHERE entity_type = 'view' AND entity_key = 'list' "
-                "AND attribute = 'filters' ORDER BY id DESC LIMIT 1")]) else None,
-            "legacy_imported": LEGACY_GOAL in edits,
             # what the editor offers: rule types (label, required and optional keys), fields, presets
             "types": {t: {"label": lab, "keys": req, "optional": opt} for t, (lab, req, opt) in RULE_TYPES.items()},
             "aggs": AGGS, "numeric_fields": NUMERIC_FIELDS, "equals_fields": EQUALS_FIELDS, "known_fields": KNOWN_FIELDS,

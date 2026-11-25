@@ -185,22 +185,6 @@ def test_raw_is_fetched_per_listing_on_demand(client):
     assert c.get("/api/raw", params={"source": "nope", "source_id": "x"}).status_code == 404
 
 
-def test_old_saved_filters_are_offered_once_as_a_goal(client):
-    """The list filters saved before goals were editable (view / list / filters) are no longer an endpoint; the goal
-    list offers the last saved set until a goal `saved_filters` exists (its import)."""
-    c, db = client
-    assert c.get("/api/goals").json()["legacy_filters"] is None
-    old = {"maxppb": "2500", "limits": [{"point": "commute_targets:Meta HQ", "mode": "drive", "max": 30}]}
-    conn = connect(db)
-    append_annotation(conn, "user", "view", "list", "filters", comment=json.dumps(old))
-    g = c.get("/api/goals").json()
-    assert g["legacy_filters"] == old and g["legacy_imported"] is False
-    rules = [{"type": "max", "field": "price_per_bed", "value": 2500},
-             {"type": "commute_any", "target": "commute_targets:Meta HQ", "options": [{"mode": "drive", "max": 30}]}]
-    assert c.post("/api/goals", json={"id": "saved_filters", "label": "Saved filters", "rules": rules}).status_code == 200
-    assert c.get("/api/goals").json()["legacy_imported"] is True
-
-
 def test_places_carry_the_nearest_point_of_each_set(client):
     c, db = client
     places = c.get("/api/places").json()

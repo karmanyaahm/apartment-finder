@@ -45,6 +45,7 @@ main { flex: 1; display: flex; min-height: 0; }
 .controls .row { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; font-size: 12px; }
 #q { width: 100%; }
 #count { padding: 4px 12px; }
+#count .n-pass { color: var(--pass); } #count .n-check { color: var(--check); } #count .n-fail { color: var(--fail); }
 #cards { overflow-y: auto; flex: 1; padding: 0 8px 16px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 6px 0;
   cursor: pointer; }
@@ -173,6 +174,12 @@ td.nowrap { white-space: nowrap; }
 .goal-editor button.small, .goal-editor .g-add { padding: 1px 8px; font-size: 12px; }
 .goal-editor .g-add { margin: 3px 0 6px; }
 .goal-editor .err { color: var(--bad); }
+/* number inputs: digits in ch plus ~30px for padding, border and the spinner (border-box would otherwise eat the value) */
+input[type=number] { padding-right: 2px; }
+.num-bed { width: calc(3ch + 30px); }   /* beds, baths: "2.5" */
+.num-min { width: calc(3ch + 30px); }   /* minutes: "120" */
+.num-money { width: calc(6ch + 30px); } /* price, price / bed, sqft: "12000" */
+.num-count { width: calc(6ch + 30px); } /* compute confirm: Google calls */
 
 /* Pipeline panel: compute one attribute */
 .compute { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
