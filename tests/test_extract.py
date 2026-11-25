@@ -283,3 +283,22 @@ def test_cli_run_calls_the_hook(monkeypatch):
     monkeypatch.setattr(ex, "after_intake", lambda conn, src, n, **kw: seen.update(src=src, n=n, **kw))
     cli.main(["--db", ":memory:", "run", "craigslist", "--area", "94043", "--reload", "--workers", "12"])
     assert seen["src"] == "craigslist" and seen["n"] == 3 and seen["workers"] == 12 and seen["skip"] is False
+
+
+def test_same_street_ignores_formatting_but_not_another_number(conn):
+    from aptfinder import verify
+    from aptfinder.store import append_observation, start_run
+    from aptfinder.store.keys import same_street
+
+    assert same_street("240 Ortega Ave, Mountain View, CA 94040", "240 Ortega Avenue")
+    assert same_street("707 Leahy St, Redwood City, CA 94061", "707 Leahy")
+    assert same_street("750 Harvard Ave APT 3, Santa Clara, CA 95051", "750 Harvard Ave., Unit #3")
+    assert same_street("930 Berkeley Ave #3, Menlo Park, CA 94025", "930 Berkeley Ave in Menlo Park")
+    assert not same_street("388 Santana Row, San Jose, CA 95128", "3060 Olsen Dr, San Jose, CA 95128")
+    assert not same_street("942 Rose Avenue, Redwood City", "940 Rose Ave, Redwood City")
+    # a conflict stored before same_street existed is dropped at read time
+    run = start_run(conn, "extract", "zillow", {})
+    append_observation(conn, run, "zillow", "1", {
+        "address": "240 Ortega Ave, Mountain View, CA 94040",
+        "extra": {"extracted": {"fields": [], "model": "haiku", "run_id": run, "conflicts": {"address": "240 Ortega Avenue"}}}})
+    assert verify.text_conflict_queue(conn) == []

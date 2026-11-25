@@ -398,8 +398,10 @@ CONFLICT_FIELDS = ("address", "furnished", "private_bath")
 
 
 def _disagrees(field: str, stated: Any, text: Any) -> bool:
-    if field == "address":  # same street part = same address, however the rest is written
-        return _norm(str(stated).split(",")[0]) != _norm(str(text).split(",")[0])
+    if field == "address":  # same street line = same address, however the rest is written (store.keys.same_street)
+        from ..store.keys import same_street
+
+        return not same_street(str(stated), str(text))
     return stated != text
 
 

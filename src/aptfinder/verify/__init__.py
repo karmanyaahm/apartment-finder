@@ -265,15 +265,19 @@ def text_conflict_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     listings decide nothing, so their text is moot."""
     from ..plans import own_site_places
 
+    from ..store.keys import same_street
+
     own = own_site_places(conn)
     checked = current_checks(conn)
     out = []
-    for r in conn.execute("SELECT source, source_id, obs_id, place_key, "
+    for r in conn.execute("SELECT source, source_id, obs_id, place_key, address, "
                           "json_extract(data, '$.extra.extracted.conflicts') AS c FROM listings "
                           "WHERE json_extract(data, '$.extra.extracted.conflicts') IS NOT NULL ORDER BY source_id"):
         if r["place_key"] in own and r["source"] != "direct":
             continue
         text = json.loads(r["c"])
+        if "address" in text and same_street(r["address"], text["address"]):  # stored before same_street: a
+            del text["address"]  # formatting difference ('Ave' / 'Avenue', no suffix, the unit) is no conflict
         open_ = {f: v for f, v in text.items() if f not in checked.get((r["source"], r["source_id"]), {})}
         if open_:
             out.append({"kind": "conflict", "unit_key": None, "place_key": r["place_key"], "fields": sorted(open_),

@@ -81,6 +81,18 @@ def parse_address(address: str | None, city: str | None = None) -> dict[str, str
     return result
 
 
+def same_street(a: str | None, b: str | None) -> bool:
+    """Two addresses name the same street line: same street number, and the shorter normalized street (parse_address:
+    suffixes and directions abbreviated, unit dropped) is the start of the longer, so '240 Ortega Avenue' = '240 Ortega
+    Ave, Mountain View', '707 Leahy' = '707 Leahy St' and '750 Harvard Ave., Unit #3' = '750 Harvard Ave APT 3'.
+    Either side without a street number: the first comma parts compared, normalized."""
+    sa, sb = parse_address(a or "")["street"], parse_address(b or "")["street"]
+    if not sa or not sb:
+        return _norm_tokens((a or "").split(",")[0]) == _norm_tokens((b or "").split(",")[0])
+    ta, tb = sorted((sa.split(), sb.split()), key=len)
+    return ta[0] == tb[0] and tb[:len(ta)] == ta
+
+
 def _h(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
