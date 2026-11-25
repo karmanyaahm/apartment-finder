@@ -368,3 +368,9 @@ def test_a_restriction_answer_must_be_one_of_the_rules_values(client):
     a = c.get(f"/api/places/{pk}").json()["annotations"][-1]
     assert (a["attribute"], a["comment"]) == ("restriction", "income")
     assert c.post("/api/annotations", json={"entity_key": pk, "attribute": "gym", "comment": "students"}).status_code == 200
+
+
+def test_api_goals_lists_the_operators(client):
+    c, _ = client
+    names = c.get("/api/goals").json()["operators"]  # a not_operator rule's choices (config/operators.toml)
+    assert "Blueground" in names and "MidPen Housing" in names

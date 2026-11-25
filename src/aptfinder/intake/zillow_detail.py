@@ -64,6 +64,25 @@ def load_pages() -> dict[str, dict[str, Any]]:
     return out
 
 
+_LISTERS: dict[Any, dict[str, list[str]]] = {}
+
+
+def page_listers() -> dict[str, list[str]]:
+    """zpid -> the lister names its newest detail page gives (`attribution_info` brokerName and agentName, e.g.
+    'Blueground Furnished Apartments', 'Blueground US'); read from the raw pages, cached until a raw file changes.
+    The filter matches them against `config/operators.toml` names (filter.listing_operators)."""
+    key = tuple((str(p), p.stat().st_mtime) for p in raw_files())
+    if key not in _LISTERS:
+        out = {}
+        for z, it in load_pages().items():
+            a = it.get("attribution_info") or {}
+            if names := [str(a[k]) for k in ("brokerName", "agentName") if a.get(k)]:
+                out[z] = names
+        _LISTERS.clear()
+        _LISTERS[key] = out
+    return _LISTERS[key]
+
+
 # Structured facts sent to the text reading as plain lines. Building-level or stated policy only: no beds, baths,
 # area, price, dates or deposit (on a building's page those are one representative unit's). On a building's page
 # the UNIT_LINES and the furnished flag are that one unit's too, so a building's bedroom rows never get them.

@@ -8,7 +8,7 @@ import sqlite3
 from collections import defaultdict
 from typing import Any
 
-from ..config import Goal, GoalsConfig, load_goals, operator_restriction
+from ..config import Goal, GoalsConfig, load_goals, match_operators, operator_restriction
 from ..plans import inherit_baths, inherit_prices, is_own_priced
 from ..verify import accuracy, low_accuracy
 from .building import building_note, building_units_by_place, place_building_units
@@ -104,6 +104,7 @@ def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None, trips:
     from ..planread import readings as plan_readings
 
     inherit_baths(listings, plan_readings(conn))
+    listing_operators(listings)  # who rents each offer out (a `not_operator` rule reads it)
     # own website wins: where the building's own site prices an offer, only its active priced rows decide the
     # place's goals; other sources' listings there still get a result (shown in the drawer) but decide nothing
     own = {r["place_key"] for r in listings if r["place_key"] and is_own_priced(r)}
@@ -181,6 +182,42 @@ def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None, trips:
         r.update(parking_fields(pk_of.get((r["source"], r["source_id"]), []) +
                                 sorted(pk_place.get(r["place_key"] or "", []), key=lambda x: not x["page"])))
     return {"listings": listings, "trips": trips, "anns": anns, "low": low, "own": own}
+
+
+def listing_operators(listings: list[dict[str, Any]]) -> None:
+    """Set each row's `operators`, {configured operator name: how this offer names it}, per listing (never pooled
+    per place: Blueground reposts one unit of a large complex). What names the lister (`config.match_operators`,
+    names exact any case, or an own-site domain): the operator field; Apartments.com's management company; Zumper's
+    brokerage; a PadMapper row's Zumper twin (the same listing id, one company); a Zillow unit's detail page broker
+    or agent (raw page, `zillow_detail.page_listers`; a building's bedroom rows `<zpid>:Nbd` are not read, their
+    page is one representative unit's). Nothing found: {} (a not_operator rule passes)."""
+    from ..intake.zillow_detail import page_listers
+
+    def names(r: dict[str, Any], d: dict[str, Any]) -> list[tuple[str, str]]:
+        ex = d.get("extra") or {}
+        got = [(r.get("operator"), "operator field"), (ex.get("management_company"), "management company"),
+               (ex.get("brokerage"), "brokerage")]
+        return [(str(n), f"{how} '{n}' ({r['source']})") for n, how in got if n]
+
+    data = {id(r): (json.loads(r["data"]) if isinstance(r.get("data"), str) else r.get("data") or {}) for r in listings}
+    zumper = {r["source_id"]: names(r, data[id(r)]) for r in listings if r["source"] == "zumper"}
+    listers = page_listers() if any(r["source"] == "zillow" for r in listings) else {}
+    for r in listings:
+        d = data[id(r)]
+        cands = names(r, d)
+        if r["source"] == "padmapper":
+            cands += [(n, f"{how}, same listing as Zumper {r['source_id']}") for n, how in zumper.get(r["source_id"], [])]
+        if r["source"] == "zillow" and ":" not in r["source_id"]:
+            z = str((d.get("extra") or {}).get("zpid") or r["source_id"])
+            cands += [(n, f"Zillow page lister '{n}'") for n in listers.get(z, [])]
+        ops: dict[str, str] = {}
+        for n, how in cands:
+            for o in match_operators([], [n]):
+                ops.setdefault(o["name"], how)
+        urls = own_site_urls(r["source"], r.get("url"), (d.get("extra") or {}).get("website"))
+        for o in match_operators(urls):
+            ops.setdefault(o["name"], f"own site {urls[0]}")
+        r["operators"] = ops
 
 
 def row_restriction(extracted: dict[str, Any] | None, page: dict[str, Any] | None,

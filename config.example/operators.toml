@@ -169,7 +169,7 @@ names = ["FPI", "FPI Management"]
 name = "Blueground"
 restriction = "none"
 domains = ["theblueground.com"]
-names = ["Blueground"]
+names = ["Blueground", "Blueground US", "Blueground Furnished Apartments"]  # also Zillow's page lister names
 
 [[operator]]
 name = "Legacy Partners"

@@ -388,6 +388,7 @@ function ruleTemplates() {
     ["commute", { type: "commute_any", target: pt, options: [{ mode: "bike", max: 25 }] }],
     ["nearest point of a set", { type: "near", set: Object.keys(S.meta.point_sets).find((k) => k !== "commute_targets"), mode: "walk", max: 15 }],
     ["amenity", { type: "amenity", name: "gym", match: ["gym", "fitness"] }],
+    ["not rented out by (operator)", { type: "not_operator", name: "Blueground" }],
     ["lease term", { type: "equals", field: "term", value: "long" }],
     ["furnished", { type: "equals", field: "furnished", value: true }],
     ["private bath", { type: "equals", field: "private_bath", value: true }],
@@ -457,6 +458,11 @@ function ruleInputs(r, part) {
       ${preset ? "" : `<input data-p="name" value="${esc(r.name)}" placeholder="name" style="width:7em">`}
       <input data-words="match" value="${esc((r.match || []).join(", "))}" placeholder="words, comma separated" title="matches when an amenity entry contains any of these words" style="width:11em">
       not <input data-words="exclude" value="${esc((r.exclude || []).join(", "))}" placeholder="except words" title="an entry containing any of these words never matches (e.g. no parking)" style="width:8em">`;
+  }
+  if (r.type === "not_operator") {
+    // operators of config/operators.toml (GET /api/goals `operators`); a name no longer listed stays selectable
+    const names = [...new Set([...(G.operators || []), r.name])];
+    return `<select data-p="name">${names.map((n) => opt(n, n, r.name)).join("")}</select>`;
   }
   return `<code>${esc(JSON.stringify(r))}</code>`;
 }

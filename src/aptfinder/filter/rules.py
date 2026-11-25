@@ -125,6 +125,8 @@ def _label(rule: dict[str, Any]) -> str:
         return f"{rule['field']} known"
     if t == "net_commute":
         return f"net commute ({rule['agg']}) <= {rule['max']}"
+    if t == "not_operator":
+        return f"not {rule['name']}"
     return t
 
 
@@ -185,6 +187,13 @@ def evaluate(rule: dict[str, Any], row: dict[str, Any], ctx: Ctx) -> tuple[str, 
         ok = v == rule["value"]
         ev = row.get(f"{f}_evidence")  # restriction: the quote that states the limit
         return (PASS, label) if ok else (FAIL, f"{label}: is {v}" + (f", {ev}" if ev else ""))
+
+    if t == "not_operator":
+        # who rents the offer out (filter.listing_operators): fails on positive evidence only; no lister named is
+        # a pass, not needs_check (an exclusion has nothing to check: most offers name no operator)
+        name = rule["name"].strip().lower()
+        how = next((v for k, v in (row.get("operators") or {}).items() if k.lower() == name), None)
+        return (FAIL, f"{label}: is {rule['name']}, {how}") if how else (PASS, label)
 
     if t in ("max", "min"):
         f = rule["field"]
@@ -329,6 +338,8 @@ def fact(rule: dict[str, Any], row: dict[str, Any], people: int | None = None) -
         return {"f": "amenity", "v": rule["name"]}
     if t == "net_commute":
         return {"f": "net_commute", "agg": rule["agg"], "lim": rule["max"]}
+    if t == "not_operator":
+        return {"f": "operator", "v": rule["name"]}
     return {"f": t}
 
 
@@ -369,6 +380,7 @@ RULE_TYPES: dict[str, tuple[str, list[str], list[str]]] = {
     "amenity": ("amenity", ["name"], ["match", "exclude"]),
     "known": ("field known", ["field"], []),
     "net_commute": ("net commute", ["agg", "max"], []),
+    "not_operator": ("not rented out by", ["name"], []),  # an operator of config/operators.toml
 }
 
 
@@ -443,6 +455,8 @@ def validate_rule(rule: Any, *, modes: list[str], points: set[str], sets: set[st
             return f"net_commute: agg must be one of {', '.join(AGGS)}"
         if not _num(rule["max"]) or rule["max"] <= 0:
             return "net_commute: max must be minutes > 0"
+    if t == "not_operator" and not (isinstance(rule["name"], str) and rule["name"].strip()):
+        return "not_operator: name must be text"
     if t == "amenity":
         if not isinstance(rule["name"], str) or not rule["name"].strip():
             return "amenity: name must be text"

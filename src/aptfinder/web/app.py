@@ -25,7 +25,7 @@ from pydantic import BaseModel
 from .. import pipeline, settings, verify
 from ..areas import in_walk_zone
 from ..areas import zones as area_zones
-from ..config import Goal, load_goals, load_point_sets, load_points
+from ..config import Goal, load_goals, load_operators, load_point_sets, load_points
 from ..filter import (AMENITY_FLAGS, place_building_units, place_parking, place_restriction, best_trips, evaluate_goal, goal_inputs, nearest_by_set,
                       place_commute_terms)
 from ..filter import goals as goalstore
@@ -1192,6 +1192,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             "types": {t: {"label": lab, "keys": req, "optional": opt} for t, (lab, req, opt) in RULE_TYPES.items()},
             "aggs": AGGS, "numeric_fields": NUMERIC_FIELDS, "equals_fields": EQUALS_FIELDS, "known_fields": KNOWN_FIELDS,
             "amenities": {k: {"match": w, "exclude": x} for k, (w, x) in AMENITY_FLAGS.items()},
+            "operators": [o["name"] for o in load_operators()],  # a not_operator rule's choices
             "modes": refs["modes"], "points": sorted(refs["points"]), "sets": sorted(refs["sets"]),
         }
 

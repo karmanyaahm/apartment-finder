@@ -109,17 +109,24 @@ def load_operators(config_dir: Path | None = None) -> list[dict[str, Any]]:
     return _OPERATORS[key]
 
 
+def match_operators(urls: list[str], names: list[str | None] = (), config_dir: Path | None = None
+                    ) -> list[dict[str, Any]]:
+    """The configured operators (`load_operators`) one of `urls` belongs to (its domain: the host or a subdomain of
+    it) or one of `names` names (exact, any case), in config order."""
+    from urllib.parse import urlparse
+
+    hosts = [(urlparse(u if "://" in u else f"https://{u}").hostname or "").lower() for u in urls if u]
+    low = {str(n).strip().lower() for n in names if n}
+    return [o for o in load_operators(config_dir)
+            if low & set(o["names"]) or any(h == d or h.endswith("." + d) for h in hosts for d in o["domains"])]
+
+
 def operator_restriction(urls: list[str], operators: list[str | None] = (), config_dir: Path | None = None
                          ) -> dict[str, Any] | None:
     """{value, evidence 'operator: <name> (affordable-housing nonprofit | market-rate)', source 'operator'} of the
     operator one of `urls` belongs to (its domain: the host or a subdomain of it) or one of `operators` names (a
     listing's operator field, exact, any case); an income operator first. None when none matches."""
-    from urllib.parse import urlparse
-
-    hosts = [(urlparse(u if "://" in u else f"https://{u}").hostname or "").lower() for u in urls if u]
-    names = {str(n).strip().lower() for n in operators if n}
-    hits = [o for o in load_operators(config_dir)
-            if names & set(o["names"]) or any(h == d or h.endswith("." + d) for h in hosts for d in o["domains"])]
+    hits = match_operators(urls, operators, config_dir)
     if not hits:
         return None
     o = next((o for o in hits if o["restriction"] != "none"), hits[0])

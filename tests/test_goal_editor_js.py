@@ -55,7 +55,7 @@ def test_every_equals_field_is_reachable(templates):
 
 def test_editor_inputs_read_the_options_from_api_goals():
     body = _function(APP_JS.read_text(), "ruleInputs")
-    for key in ("numeric_fields", "equals_fields", "known_fields", "aggs", "amenities"):
+    for key in ("numeric_fields", "equals_fields", "known_fields", "aggs", "amenities", "operators"):
         assert f"G.{key}" in body, f"ruleInputs does not read {key} from api/goals"
     # the 'count in net commute' box shows where /api/goals lists in_net as an optional key of the rule type
     assert 'G.types[r.type]?.optional?.includes("in_net")' in body
