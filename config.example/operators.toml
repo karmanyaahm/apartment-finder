@@ -6,6 +6,10 @@
 #     income-restricted, evidence "operator: <name> (affordable-housing nonprofit)", source 'operator', over a
 #     listing's 'none'; a quoted limit there (senior, employer, ...) wins, and so does a page that says market-rate
 #     in so many words (a 'none' with its quote).
+#   restriction = "employer": an employer's housing for its own staff or affiliates. Like income: the place counts
+#     as employer-restricted, evidence "operator: <name> (employer housing)", over a listing's 'none'; a page that
+#     says market-rate in so many words wins. List each community's own host, never the employer's whole domain
+#     (stanford.edu also holds student housing).
 #   restriction = "none": a market-rate REIT or manager. The place counts as no limit, evidence "operator: <name>
 #     (market-rate)", only where nothing was read (unknown); any quoted limit there (income, senior, employer) wins.
 #     Some of them run a few BMR units, which are no building-wide limit.
@@ -66,6 +70,16 @@ domains = ["housing.smcgov.org"]
 name = "Santa Clara County Housing Authority"
 restriction = "income"
 domains = ["scchousingauthority.org", "hacsc.org"]
+
+# ---- employer housing
+# Stanford's faculty and staff rental communities (Stanford Real Estate). The user's decision 2026-11-25 (Middle
+# Plaza); Colonnade's and The Cardinal's own pages say so ('a 167-unit community for Stanford employees', 'dedicated
+# to Stanford's workforce'). Not student housing (rde.stanford.edu, ev.stanford.edu: Blackwelder and the like).
+[[operator]]
+name = "Stanford faculty and staff housing"
+restriction = "employer"
+domains = ["middleplaza.stanford.edu", "stanfordwestapartments.stanford.edu", "welchroadapartments.stanford.edu",
+           "colonnadeapartments.stanford.edu", "thecardinalapartments.stanford.edu"]
 
 # ---- market-rate REITs and managers
 [[operator]]

@@ -83,12 +83,13 @@ def load_media(config_dir: Path | None = None) -> dict[str, Any]:
 
 
 _OPERATORS: dict[Any, list[dict[str, Any]]] = {}
-OPERATOR_KIND = {"income": "affordable-housing nonprofit", "none": "market-rate"}
+OPERATOR_KIND = {"income": "affordable-housing nonprofit", "employer": "employer housing", "none": "market-rate"}
 
 
 def load_operators(config_dir: Path | None = None) -> list[dict[str, Any]]:
-    """config/operators.toml `[[operator]]` {name, restriction income | none, domains, names}: affordable-housing
-    nonprofits and housing authorities (income), market-rate REITs and managers (none); the committed
+    """config/operators.toml `[[operator]]` {name, restriction income | employer | none, domains, names}:
+    affordable-housing nonprofits and housing authorities (income), an employer's housing for its staff (employer),
+    market-rate REITs and managers (none); the committed
     config.example/ list when config/ has none. Re-read when the file changes."""
     path = (config_dir or settings.CONFIG_DIR) / "operators.toml"
     if not path.exists():
@@ -100,7 +101,7 @@ def load_operators(config_dir: Path | None = None) -> list[dict[str, Any]]:
         ops = []
         for o in _toml(path).get("operator", []):
             if o.get("restriction") not in OPERATOR_KIND:
-                raise ValueError(f"{path}: operator {o.get('name')!r}: restriction must be income or none")
+                raise ValueError(f"{path}: operator {o.get('name')!r}: restriction must be income, employer or none")
             ops.append({"name": str(o["name"]), "restriction": o["restriction"],
                         "domains": [str(d).lower() for d in o.get("domains", [])],
                         "names": [str(n).strip().lower() for n in o.get("names", [])]})
@@ -123,9 +124,10 @@ def match_operators(urls: list[str], names: list[str | None] = (), config_dir: P
 
 def operator_restriction(urls: list[str], operators: list[str | None] = (), config_dir: Path | None = None
                          ) -> dict[str, Any] | None:
-    """{value, evidence 'operator: <name> (affordable-housing nonprofit | market-rate)', source 'operator'} of the
-    operator one of `urls` belongs to (its domain: the host or a subdomain of it) or one of `operators` names (a
-    listing's operator field, exact, any case); an income operator first. None when none matches."""
+    """{value, evidence 'operator: <name> (affordable-housing nonprofit | employer housing | market-rate)', source
+    'operator'} of the operator one of `urls` belongs to (its domain: the host or a subdomain of it) or one of
+    `operators` names (a listing's operator field, exact, any case); a restricting one (income, employer) first.
+    None when none matches."""
     hits = match_operators(urls, operators, config_dir)
     if not hits:
         return None

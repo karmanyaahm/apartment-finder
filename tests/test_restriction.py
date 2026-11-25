@@ -323,3 +323,33 @@ def test_operators_fill_in_who_may_rent_below_a_quoted_limit(conn):
     assert place_restriction([by["ab:r:a"]])["value"] == "income"
     from aptfinder.config import operator_restriction
     assert operator_restriction(["https://www.avaloncommunities.com/x"])["evidence"] == "operator: AvalonBay (market-rate)"
+
+
+def test_employer_operator_restricts_its_own_hosts_only():
+    from aptfinder.config import operator_restriction
+
+    # Stanford's staff housing (Middle Plaza): employer over a page's evidence-less 'none'
+    got = operator_restriction(["https://middleplaza.stanford.edu/living-here/floor-plans"])
+    assert got["value"] == "employer" and got["evidence"] == "operator: Stanford faculty and staff housing (employer housing)"
+    # the operator's hosts, never the whole stanford.edu domain (student housing is not employer housing)
+    assert operator_restriction(["https://rde.stanford.edu/studenthousing/"]) is None
+    assert operator_restriction(["https://ev.stanford.edu/ev-neighborhoods/blackwelder/"]) is None
+
+
+def test_employer_operator_place_restriction(conn):
+    from aptfinder.filter import place_restriction
+
+    run = start_run(conn, "intake", "direct", {"scope": "full"})
+    append_observation(conn, run, "direct", "mp:r:1a",
+                       {"address": "400a El Camino Real, Menlo Park, CA", "lat": 37.45, "lon": -122.18,
+                        "kind": "apartment", "beds": 1, "property_name": "Middle Plaza",
+                        "extra": {"page_restriction": {"value": "none", "url": "https://middleplaza.stanford.edu/"}}},
+                       url="https://middleplaza.stanford.edu/living-here/floor-plans", price=3000, price_basis="month")
+    finish_run(conn, run, "ok", {})
+    identity.run(conn)
+    res = evaluate_all(conn, _goal())["listings"]["g"]
+    assert res[("direct", "mp:r:1a")]["status"] == FAIL
+    assert res[("direct", "mp:r:1a")]["fails"][0]["v"] == "employer"
+    row = {**dict(conn.execute("SELECT * FROM listings").fetchone())}
+    row["data"] = json.loads(row["data"])
+    assert place_restriction([row])["value"] == "employer"
