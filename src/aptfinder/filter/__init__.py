@@ -8,7 +8,7 @@ import sqlite3
 from collections import defaultdict
 from typing import Any
 
-from ..config import Goal, GoalsConfig, load_goals
+from ..config import Goal, GoalsConfig, load_goals, operator_restriction
 from ..plans import inherit_prices, is_own_priced
 from ..verify import accuracy, low_accuracy
 from .rules import CHECK, FAIL, PASS, RANK, Ctx, combine, commute_trips, evaluate, fact
@@ -98,14 +98,21 @@ def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> dic
     # render): a limit any listing or site_info row states ('PBV - Belovida (VASH)') holds for every listing at the
     # place; otherwise each listing's own reading ('none'), or None when it has not been read (unknown: an `equals
     # restriction none` rule says needs_check). Your answer in Verify (annotation place / restriction) beats both.
+    # The place's operator (`config.operator_restriction`: its own site's domain or the operator field) fills in
+    # below a quoted limit: an affordable-housing one says income (unless a page there says market-rate in so many
+    # words), over a listing's none; a market-rate one says none where nothing was read (unknown).
     # parking: a row's own reading (extract's, then its site's pages) first, field by field; what it leaves unknown
     # comes from a building statement at the place (an own site's pages, a building-level source: `parking_pool`)
     pooled: dict[str, set[str]] = {}
     rx_of: dict[tuple[str, str], dict[str, Any]] = {}
     limits: dict[str, list[dict[str, Any]]] = {}
+    op_income: dict[str, dict[str, Any]] = {}
+    op_market: dict[str, dict[str, Any]] = {}
+    market: set[str] = set()
     pk_of: dict[tuple[str, str], list[dict[str, Any]]] = {}
     pk_place: dict[str, list[dict[str, Any]]] = {}
-    for r in conn.execute("SELECT source, source_id, place_key, amenities, "
+    for r in conn.execute("SELECT source, source_id, place_key, amenities, url, operator, "
+                          "json_extract(data, '$.extra.website') AS website, "
                           "json_extract(data, '$.extra.extracted.restriction') AS rx, "
                           "json_extract(data, '$.extra.page_restriction') AS prx, "
                           "json_extract(data, '$.extra.extracted.parking') AS pkx, "
@@ -125,12 +132,21 @@ def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> dic
             rx_of[(r["source"], r["source_id"])] = rx
             if pk and rx.get("value") not in (None, "none"):
                 limits.setdefault(pk, []).append(rx)
+            if pk and rx.get("value") == "none" and rx.get("evidence"):
+                market.add(pk)
+        op = pk and operator_restriction(own_site_urls(r["source"], r["url"], r["website"]), [r["operator"]])
+        if op:
+            (op_market if op["value"] == "none" else op_income).setdefault(pk, op)
     for r in listings:
         if r["place_key"] in pooled:
             own_am = json.loads(r["amenities"]) if isinstance(r.get("amenities"), str) else (r.get("amenities") or [])
             r["amenities"] = sorted(pooled[r["place_key"]] | set(own_am))
         mine = rx_of.get((r["source"], r["source_id"])) or {}
         rx = mine if mine.get("value") not in (None, "none") else (limits.get(r["place_key"]) or [mine])[0]
+        if rx.get("value") in (None, "none") and r["place_key"] in op_income and r["place_key"] not in market:
+            rx = op_income[r["place_key"]]
+        elif rx.get("value") is None and r["place_key"] in op_market:
+            rx = op_market[r["place_key"]]
         rx = annotated_restriction(anns.get(r["place_key"] or "", {})) or rx
         r["restriction"] = rx.get("value")
         r["restriction_evidence"] = restriction_note(rx)
@@ -146,6 +162,12 @@ def row_restriction(extracted: dict[str, Any] | None, page: dict[str, Any] | Non
     got = [({**x, "source": src}) for x, src in ((extracted, source), (page, f"{source} page"))
            if isinstance(x, dict) and x.get("value")]
     return next((x for x in got if x["value"] != "none"), got[0] if got else None)
+
+
+def own_site_urls(source: str, url: str | None, website: str | None) -> list[str]:
+    """The URLs a row gives for its building's own site: a direct or portfolio row's page, and any `extra.website`
+    (Google Places' website, extract's website read from a listing's text)."""
+    return [u for u in ((url if source in ("direct", "portfolio") else None), website) if u]
 
 
 # sources whose text describes a whole building or community, so their parking holds for every unit there; a
@@ -229,18 +251,23 @@ def restriction_note(rx: dict[str, Any] | None) -> str | None:
 
 def place_restriction(rows: list[dict[str, Any]], anns: dict[str, dict[str, Any]] | None = None
                       ) -> dict[str, Any] | None:
-    """The limit on who may rent that any of a place's listings states ({value, evidence, source}), else None; your
-    Verify answer (`anns`: the place's latest annotations) first. `rows`: listings with `data` parsed."""
+    """The limit on who may rent that any of a place's listings states ({value, evidence, source}), else an
+    affordable-housing operator's (`config.operator_restriction`) unless a page there says market-rate, else None;
+    your Verify answer (`anns`: the place's latest annotations) first. `rows`: listings with `data` parsed."""
     mark = annotated_restriction(anns or {})
     if mark:
         return mark if mark["value"] != "none" else None
+    op, market = None, False
     for x in rows:
         extra = (x.get("data") or {}).get("extra") or {}
         rx = row_restriction((extra.get("extracted") or {}).get("restriction"), extra.get("page_restriction"),
                              x["source"])
         if rx and rx["value"] != "none":
             return rx
-    return None
+        market = market or bool(rx and rx.get("evidence"))
+        got = operator_restriction(own_site_urls(x["source"], x.get("url"), extra.get("website")), [x.get("operator")])
+        op = op if op and op["value"] != "none" else got or op
+    return op if op and op["value"] != "none" and not market else None
 
 
 def evaluate_goal(inp: dict[str, Any], goal: Goal) -> tuple[dict[tuple[str, str], Any], dict[str, Any]]:
