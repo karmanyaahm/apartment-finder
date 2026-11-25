@@ -26,6 +26,8 @@ The same call reads who may rent the community (`restriction`, extract's values:
 its verbatim quote from the pages (`extract.check_restriction`), or 'none'; it is stored on every plan row of the
 site as `extra.page_restriction` {value, evidence, url}, which the place's restriction pooling reads beside extract's
 reading. `aptf-intake render-restriction` reads it again from the raw page text of sites already rendered (no Apify).
+Parking for the community's residents (extract's `parking` object, `extract.check_parking`) is read the same way and
+stored as `extra.page_parking`; `render-restriction --parking` reads only that for sites already rendered.
 """
 
 from __future__ import annotations
@@ -47,7 +49,7 @@ from .apify import (RESIDENTIAL_USD_PER_PAGE, browser_proxy, classify_failure, f
 from ..plans import match_drawing
 from .direct import plan_drawings
 from .discover import SECRET_ENV, Blocker
-from .extract import RESTRICTION, check_restriction
+from .extract import PARKING, RESTRICTION, check_parking, check_restriction
 from .lease import _avail
 from .precheck import precheck_many
 
@@ -147,7 +149,7 @@ PAGE_FUNCTION = r"""async function pageFunction(context) {
 SYSTEM = ("You read an apartment community's own website (rendered page text) and list the floor plans or units it "
           "currently offers. Use only what the text states; never infer. Copy names, prices, square feet and "
           "availability exactly as written. Skip other communities shown on the page (e.g. 'nearby' or 'other "
-          "properties'). Also say who may rent this community (restriction). Answer in the requested JSON.")
+          "properties'). Also say who may rent this community (restriction) and its parking. Answer in the requested JSON.")
 # who may rent: extract's field, worded for a whole website (a limit must hold for this community as a whole)
 PAGE_RESTRICTION = {**RESTRICTION, "description": RESTRICTION["description"] + (
     " The limit must hold for this community as a whole: 'This community is income restricted', 'affordable "
@@ -155,9 +157,13 @@ PAGE_RESTRICTION = {**RESTRICTION, "description": RESTRICTION["description"] + (
     "none when the pages describe the community and set no such limit; also none for a few BMR units in an "
     "otherwise market-rate building, other properties of the same operator, 'Section 8 accepted' and equal "
     "housing notices.")}
+# parking: extract's object, worded for a community's site (its residents' parking, often a fee list)
+PAGE_PARKING = {**PARKING, "description": PARKING["description"] + (
+    " Read it for a resident of this community: 'Garage parking $75/month', 'one assigned covered space per "
+    "apartment', 'Parking: Surface lot, free'. Ignore parking of other properties of the operator.")}
 _S = {"type": ["string", "null"]}
 SCHEMA = {"type": "object", "required": ["plans", "restriction"], "properties": {
-  "restriction": PAGE_RESTRICTION, "plans": {"type": "array", "items": {
+  "restriction": PAGE_RESTRICTION, "parking": PAGE_PARKING, "plans": {"type": "array", "items": {
     "type": "object", "required": ["name"],
     "properties": {
         "name": {**_S, "description": "plan or unit name as written, e.g. 'North 2CR', 'Plan B2', 'Unit 204'"},
@@ -211,6 +217,10 @@ def check_plans(answer: list[dict[str, Any]], text: str) -> list[dict[str, Any]]
 RX_SYSTEM = ("You read an apartment community's own website (rendered page text) and say who may rent there. Use only "
              "what the text states; never infer. Answer in the requested JSON.")
 RX_SCHEMA = {"type": "object", "required": ["restriction"], "properties": {"restriction": PAGE_RESTRICTION}}
+# parking alone, for `reread_restrictions(parking=True)`
+PK_SYSTEM = ("You read an apartment community's own website (rendered page text) and say what parking its residents "
+             "get. Use only what the text states; never infer. Answer in the requested JSON.")
+PK_SCHEMA = {"type": "object", "required": ["parking"], "properties": {"parking": PAGE_PARKING}}
 
 
 def argv(model: str, max_usd: float, system: str = SYSTEM, schema: dict[str, Any] = SCHEMA) -> list[str]:
@@ -235,10 +245,10 @@ def _call(name: str, text: str, model: str, max_usd: float, system: str, schema:
     return out["structured_output"], float(out.get("total_cost_usd") or 0)
 
 
-def ask(name: str, text: str, model: str, max_usd: float) -> tuple[list[dict[str, Any]], Any, float]:
-    """(plans, restriction as answered, cost)."""
+def ask(name: str, text: str, model: str, max_usd: float) -> tuple[list[dict[str, Any]], Any, float, Any]:
+    """(plans, restriction as answered, cost, parking as answered)."""
     out, cost = _call(name, text, model, max_usd, SYSTEM, SCHEMA)
-    return out.get("plans") or [], out.get("restriction"), cost
+    return out.get("plans") or [], out.get("restriction"), cost, out.get("parking")
 
 
 def ask_restriction(name: str, text: str, model: str, max_usd: float) -> tuple[Any, float]:
@@ -246,9 +256,20 @@ def ask_restriction(name: str, text: str, model: str, max_usd: float) -> tuple[A
     return out.get("restriction"), cost
 
 
+def ask_parking(name: str, text: str, model: str, max_usd: float) -> tuple[Any, float]:
+    out, cost = _call(name, text, model, max_usd, PK_SYSTEM, PK_SCHEMA)
+    return out.get("parking"), cost
+
+
 def page_restriction(rx: Any, text: str, url: str) -> dict[str, Any] | None:
     """The page's answer, checked like extract's (a limit needs its quote on the page), with the site's URL."""
     got = check_restriction(rx, text)
+    return {**got, "url": url} if got else None
+
+
+def page_parking(pk: Any, text: str, url: str) -> dict[str, Any] | None:
+    """The page's parking, checked like extract's (`check_parking`: every value backed by a quote on the page)."""
+    got = check_parking(pk, text)
     return {**got, "url": url} if got else None
 
 
@@ -480,12 +501,13 @@ def render(conn, *, sites: list[str] | None = None, model: str = "haiku",
                 report[sid] = "Claude budget reached"
                 continue
             text = site_text(its)
-            answer, rx, cost = ask(s.get("name") or sid, text, model, min(0.3, max_claude_usd - spent + 0.05))
+            answer, rx, cost, pk = ask(s.get("name") or sid, text, model, min(0.3, max_claude_usd - spent + 0.05))
             spent += cost
             plans = check_plans(answer, text)
             addr, _ = _site_address(conn, sid, s)
             url = next((i["url"] for i in its if i.get("child")), its[0]["url"])
             prx = page_restriction(rx, text, s["url"])
+            ppk = page_parking(pk, text, s["url"])
             drawings = page_drawings(its)
             for p in plans:
                 drawing = match_drawing(p.get("unit"), drawings) or match_drawing(p["name"], drawings)
@@ -499,7 +521,8 @@ def render(conn, *, sites: list[str] | None = None, model: str = "haiku",
                                               "available_label": p.get("available"), "model": model,
                                               "clicked": sorted({c for i in its for c in i.get("clicked") or []}),
                                               **({"floorplan_image": drawing} if drawing else {}),
-                                              **({"page_restriction": prx} if prx else {})})
+                                              **({"page_restriction": prx} if prx else {}),
+                                              **({"page_parking": ppk} if ppk else {})})
                 append_observation(conn, run, "direct", f"{sid}:r:{key}", data, url=url, price=p.get("price"),
                                    price_basis="month" if p.get("price") else None, raw_path=str(raw_path),
                                    commit=False)
@@ -532,12 +555,14 @@ def render(conn, *, sites: list[str] | None = None, model: str = "haiku",
 
 
 def reread_restrictions(conn, *, sites: list[str] | None = None, model: str = "haiku", max_usd: float = 1.0,
-                        workers: int = 4, dry_run: bool = False) -> dict[str, Any]:
+                        workers: int = 4, dry_run: bool = False, parking: bool = False) -> dict[str, Any]:
     """Who may rent, read again from the raw page text of sites already rendered (no Apify): for each site with
     active rendered plan rows (`<site>:r:%`), the pages of its newest raw file go to Haiku (`ask_restriction`);
     each plan row gets a new observation, its scraped data plus `extra.page_restriction` (append-only; run
     component `render_restriction`), then the cached extract answers are applied over them (free), so the plan
-    rows' own readings stay current. `sites`: only these. A site whose raw file is gone is reported, not read."""
+    rows' own readings stay current. `sites`: only these. A site whose raw file is gone is reported, not read.
+    `parking`: read the community's parking instead (`ask_parking`, stored as `extra.page_parking`; run component
+    `render_parking`); the plan row's other page readings stay, as its newest scraped observation carries them."""
     from concurrent.futures import ThreadPoolExecutor
 
     from .extract import extract
@@ -571,13 +596,14 @@ def reread_restrictions(conn, *, sites: list[str] | None = None, model: str = "h
             "estimated_claude_usd": round(0.004 * len(texts), 2)}
     if dry_run or not texts:
         return {**plan, "report": report}
-    run = start_run(conn, "render_restriction", "direct", {"model": model, "sites": len(texts)})
+    key, comp = ("page_parking", "render_parking") if parking else ("page_restriction", "render_restriction")
+    run = start_run(conn, comp, "direct", {"model": model, "sites": len(texts)})
     spent, n_obs, counts = 0.0, 0, {}
     err = None
 
     def one(sid: str) -> tuple[str, Any, float]:
         name = (all_sites.get(sid) or {}).get("name") or rows[sid][0]["property_name"] or sid
-        rx, cost = ask_restriction(name, texts[sid][0], model, 0.2)
+        rx, cost = (ask_parking if parking else ask_restriction)(name, texts[sid][0], model, 0.2)
         return sid, rx, cost
 
     try:
@@ -593,10 +619,15 @@ def reread_restrictions(conn, *, sites: list[str] | None = None, model: str = "h
                     continue
                 spent += cost
                 text, url = texts[sid]
-                prx = page_restriction(rx, text, url)
-                v = prx["value"] if prx else "unknown"
+                prx = (page_parking if parking else page_restriction)(rx, text, url)
+                if parking:
+                    v = f"{prx['offered'] or '?'}/{prx['cost'] or 'unspecified'}" if prx else "unknown"
+                    report[sid] = v + (f" spots={prx['spots']} ${prx['usd_month']} {prx['kinds']} "
+                                       f"{' | '.join(prx['evidence'])}" if prx else "")
+                else:
+                    v = prx["value"] if prx else "unknown"
+                    report[sid] = f"{v}" + (f': "{prx["evidence"]}"' if prx and prx.get("evidence") else "")
                 counts[v] = counts.get(v, 0) + 1
-                report[sid] = f"{v}" + (f': "{prx["evidence"]}"' if prx and prx.get("evidence") else "")
                 if not prx:
                     continue
                 for r in rows[sid]:
@@ -605,7 +636,7 @@ def reread_restrictions(conn, *, sites: list[str] | None = None, model: str = "h
                         "AND json_extract(data, '$.extra.extracted') IS NULL ORDER BY id DESC LIMIT 1",
                         (r["source_id"],)).fetchone() or r
                     d = json.loads(base["data"])
-                    d["extra"] = {**(d.get("extra") or {}), "page_restriction": prx}
+                    d["extra"] = {**(d.get("extra") or {}), key: prx}
                     append_observation(conn, run, "direct", r["source_id"], ObservationData(**d), url=base["url"],
                                        price=base["price"], price_basis=base["price_basis"],
                                        raw_path=base["raw_path"], commit=False)
@@ -617,13 +648,13 @@ def reread_restrictions(conn, *, sites: list[str] | None = None, model: str = "h
                         g.cancel()
     except Exception as e:
         conn.commit()
-        finish_run(conn, run, "error", {**plan, "observations": n_obs, "restriction": counts},
+        finish_run(conn, run, "error", {**plan, "observations": n_obs, ("parking" if parking else "restriction"): counts},
                    est_cost=round(spent, 4), error=repr(e)[:500])
         raise
-    finish_run(conn, run, "error" if err else "ok", {**plan, "observations": n_obs, "restriction": counts},
+    finish_run(conn, run, "error" if err else "ok", {**plan, "observations": n_obs, ("parking" if parking else "restriction"): counts},
                est_cost=round(spent, 4), error=str(err)[:500] if err else None)
     ex = extract(conn, "direct", cached_only=True, rebuild_identity=False, id_like="%:r:%") if n_obs else None
     identity.run(conn)
-    return {"run_id": run, "claude_usd": round(spent, 4), "observations": n_obs, "restriction": counts,
+    return {"run_id": run, "claude_usd": round(spent, 4), "observations": n_obs, ("parking" if parking else "restriction"): counts,
             "extract_cached": {k: ex.get(k) for k in ("listings", "observations", "restriction")} if ex else None,
             "error": str(err) if err else None, "report": report}

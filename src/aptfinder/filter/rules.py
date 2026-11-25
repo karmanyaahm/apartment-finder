@@ -299,15 +299,20 @@ def combine(statuses: list[str]) -> str:
 
 
 # ---------------------------------------------------------------- rule shapes (goals edited in the dashboard)
-NUMERIC_FIELDS = ["price", "price_month", "price_per_bed", "beds", "baths", "sqft"]
+# parking (extract's and render's `parking` reading, filter.parking_values): spaces that come with the home (0 when
+# the text says no parking) and the monthly price of one (0 when included)
+NUMERIC_FIELDS = ["price", "price_month", "price_per_bed", "beds", "baths", "sqft", "parking_spots",
+                  "parking_usd_month"]
 EQUALS_FIELDS: dict[str, list[Any]] = {"term": ["short", "long"], "furnished": [True, False],
                                        "private_bath": [True, False],
                                        "kind": ["apartment", "house", "townhome", "entire_place", "room"],
                                        # who may rent (extract's reading, pooled per place); 'none' = no limit
                                        "restriction": ["none", "income", "senior", "veterans", "student", "employer",
-                                                       "other"]}
+                                                       "other"],
+                                       # a space comes with the rent at no extra charge; false: none, street only, paid
+                                       "parking_included": [True, False]}
 KNOWN_FIELDS = [*NUMERIC_FIELDS, "furnished", "private_bath", "term", "kind", "available_from", "address",
-                "property_name", "restriction"]
+                "property_name", "restriction", "parking_included"]
 # type -> (label, required keys, optional keys): what the editor offers and validate_rule checks
 RULE_TYPES: dict[str, tuple[str, list[str], list[str]]] = {
     "max": ("field at most", ["field", "value"], ["strict"]),
