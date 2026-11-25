@@ -363,6 +363,7 @@ function netFact(p, fails) {
 S.goalsData = null; // GET api/goals
 S.draft = null; // {id, label, rules, nice, people}: the selected goal being edited
 S.previewMsg = "";
+S.preview = null; // {gid, body, places}: the last preview answer and the draft (JSON) it judged
 const clone = (o) => JSON.parse(JSON.stringify(o));
 const savedGoal = (id) => S.goalsData?.goals.find((g) => g.id === id);
 // what a goal stores (PUT / POST api/goals, the preview): `people` (sharing the rent) only when set
@@ -605,16 +606,20 @@ function refreshEditorState() {
   if (sum && S.draft) sum.textContent = `${S.draft.rules.length} must, ${S.draft.nice.length} nice${dirty ? " · unsaved draft" : ""}`;
 }
 // every place's result for the draft replaces its saved result for that goal (p.saved keeps the server's)
-async function previewDraft() {
+// S.preview keeps the last answer (with the draft it judged) so a reload of the list (loadPlaces: the 5 s re-poll
+// while the server says X-Updating) shows it again at once instead of flashing the saved goal's results.
+async function previewDraft(quiet = false) {
   const g = S.draft;
   if (!g) return;
   if (!draftDirty()) { applyGoalResults(g.id, null); S.previewMsg = ""; refreshEditorState(); renderList(); return; }
   const seq = (previewDraft.seq = (previewDraft.seq || 0) + 1);
-  S.previewMsg = "previewing the draft…"; refreshEditorState();
+  if (!quiet) { S.previewMsg = "previewing the draft…"; refreshEditorState(); }
   const end = busy("goal");
   try {
-    const r = await post("api/goals/preview", goalBody(g));
+    const body = goalBody(g);
+    const r = await post("api/goals/preview", body);
     if (seq !== previewDraft.seq || S.draft !== g) return; // a newer edit is on its way
+    S.preview = { gid: g.id, body: JSON.stringify(body), places: r.places };
     applyGoalResults(g.id, r.places);
     S.previewMsg = "draft shown in the list; not saved";
   } catch (e) {
@@ -2231,10 +2236,20 @@ function apifyCredit(a) {
 }
 
 /* ---------------------------------------------------------------- boot */
+// While a draft differs from its saved goal the list shows the draft: the fresh places get the draft's last preview
+// at once (never a render of the saved results in between, which made the counts flip every re-poll), and the
+// draft is judged again quietly over the fresh data. With no preview of this exact draft yet, the list is left as
+// it is until that answer comes.
 async function loadPlaces() {
   S.places = await api("api/places");
   const sc = $("#cards").scrollTop;  // a reload (after a compute run, or closing Verify) keeps the list where it was
-  if (S.draft && draftDirty()) previewDraft(); // a draft keeps showing over the fresh saved results
+  if (S.draft && draftDirty()) {
+    const pv = S.preview;
+    const shown = pv && pv.gid === S.draft.id && pv.body === JSON.stringify(goalBody(S.draft));
+    if (shown) applyGoalResults(pv.gid, pv.places);
+    previewDraft(true);
+    if (!shown) return;
+  }
   renderList();
   $("#cards").scrollTop = sc;
 }

@@ -17,7 +17,7 @@ APP_JS = pathlib.Path(__file__).resolve().parents[1] / "src/aptfinder/web/static
 
 
 def _function(src: str, name: str) -> str:
-    m = re.search(rf"^function {name}\(.*?^\}}$", src, re.M | re.S)
+    m = re.search(rf"^(?:async )?function {name}\(.*?^\}}$", src, re.M | re.S)
     assert m, f"no function {name} in app.js"
     return m.group(0)
 
@@ -102,3 +102,33 @@ def test_price_sort_is_per_person_under_a_goal_with_people():
     assert _sort_order(goal) == ["3BED & 2BATH", "Palmetto", "227 Church St"]
     # no people: price / bed (1,221 < 1,300 < 1,332)
     assert _sort_order({**goal, "people": None}) == ["3BED & 2BATH", "227 Church St", "Palmetto"]
+
+
+def test_reload_keeps_showing_the_draft_preview():
+    # the X-Updating re-poll (loadPlaces every 5 s) once rendered the saved goal's results and then the draft's again
+    # when the preview answered, so the counts flipped each poll; now every render after a reload shows the draft
+    if not shutil.which("node"):
+        pytest.skip("node not installed")
+    src = APP_JS.read_text()
+    script = f"""
+const S = {{ draft: {{ id: 'lease', rules: [1] }}, preview: null, places: [] }};
+const goalBody = (g) => ({{ rules: g.rules }});
+const draftDirty = () => true;
+const $ = () => ({{ scrollTop: 0 }});
+const api = async () => [{{ place_key: 'a', goals: {{ lease: 'saved' }} }}];
+const renders = []; let previews = 0;
+const renderList = () => renders.push(S.places[0].goals.lease);
+const previewDraft = () => {{ previews++; }};
+{_function(src, 'applyGoalResults')}
+{_function(src, 'loadPlaces')}
+(async () => {{
+  await loadPlaces();                       // no preview of this draft yet: nothing rendered, preview asked
+  S.preview = {{ gid: 'lease', body: JSON.stringify(goalBody(S.draft)), places: {{ a: 'draft' }} }};
+  await loadPlaces();                       // the last preview shows at once over the fresh places
+  S.draft.rules = [2];
+  await loadPlaces();                       // an edited draft the preview no longer matches: not rendered
+  console.log(JSON.stringify({{ renders, previews }}));
+}})();
+"""
+    out = json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout)
+    assert out == {"renders": ["draft"], "previews": 3}
