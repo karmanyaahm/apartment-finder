@@ -17,11 +17,20 @@ const MODE_LABEL = { walk: "walk", bike: "bike", transit: "transit", drive: "dri
 
 // Errors always name the request and its HTTP status: over HTTP/2 (Cloudflare) statusText is empty, and an
 // error page from the edge (502, 524 timeout, 530 tunnel down) is HTML, not JSON with a `detail`.
-async function api(path, opts = {}) {
+// A GET cut by a restart (a deploy stops the server and the tunnel for a few seconds: the edge answers 502/530 or
+// the connection drops) is retried twice, 3 and 6 s later, before it fails.
+const RETRY_STATUS = new Set([502, 503, 504, 520, 521, 522, 523, 524, 530]);
+async function api(path, opts = {}, attempt = 0) {
   const name = path.split("?")[0];
+  const retry = !opts.method && attempt < 2;
+  const again = () => new Promise((ok) => setTimeout(ok, 3000 * (attempt + 1))).then(() => api(path, opts, attempt + 1));
   let r;
   try { r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts }); }
-  catch (e) { throw new Error(`${name}: ${e.message || "network error"}`); }
+  catch (e) {
+    if (retry) return again();
+    throw new Error(`${name}: ${e.message || "network error"}`);
+  }
+  if (retry && RETRY_STATUS.has(r.status)) return again();
   if (!r.ok) {
     let detail = "";
     try { detail = (await r.json()).detail || ""; } catch (_) { /* not json: an edge error page */ }

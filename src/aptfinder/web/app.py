@@ -730,16 +730,16 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 finish_run(wconn, run, "error" if res["error"] else "ok", {**res, "api_calls": calls},
                            est_cost=round(calls * 0.005, 3) if body.provider == "google" else 0.0,
                            error=res["error"])
-                job.update(state="error" if res["error"] else "done", result={**res, "api_calls": calls})
+                final = {"state": "error" if res["error"] else "done", "result": {**res, "api_calls": calls}}
             except BaseException as e:  # SystemExit from make_source included
                 if run is not None:
                     finish_run(wconn, run, "error", {}, error=str(e))
-                job.update(state="error", result={"error": str(e)})
+                final = {"state": "error", "result": {"error": str(e)}}
             finally:
-                job["finished"] = time.time()
                 wconn.close()
-                with lock:
-                    memo.clear()  # the user's own run: show its trips now, not after SCRAPE_REFRESH_S
+            with lock:
+                memo.clear()  # the user's own run: show its trips now, not after SCRAPE_REFRESH_S
+                job.update(final, finished=time.time())  # published only after the cache is cleared
 
         threading.Thread(target=work, daemon=True).start()
         return {"started": True, "places": len(keys)}
