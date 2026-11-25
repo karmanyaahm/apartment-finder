@@ -164,3 +164,30 @@ def test_plan_drawings_are_served_from_the_store():
     plans = [{"image": "https://x/plan.png"}, {"image": "https://x/other.png"}, {"image": None}]
     out = local_plan_images(plans, {"https://x/plan.png": {"file": "ab" * 32}})
     assert [p["image"] for p in out] == [f"media/{'ab' * 32}.jpg", "https://x/other.png", None]
+
+
+def test_residential_hosts_go_through_the_proxy_smaller_variant_first(conn, monkeypatch, tmp_path):
+    full = "https://staticproperties.furnishedfinder.com/1001/1/1001_1_99-full.jpg"
+    assert media.smaller_variant(full) == "https://staticproperties.furnishedfinder.com/1001/1/1001_1_99-650-570.jpg"
+    assert media.smaller_variant("https://cdn1/a.jpg") is None
+    run = start_run(conn, "intake", "furnishedfinder")
+    append_observation(conn, run, "furnishedfinder", "f1", {"lat": 37.4, "lon": -122.1, "extra": {"images": [full]}},
+                       url="https://ff.example/f1")
+    finish_run(conn, run, "ok", {})
+    seen, made = [], []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(str(req.url))
+        return httpx.Response(200, content=picture(5)) if "-650-570" in str(req.url) else httpx.Response(403)
+
+    real = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kw: made.append(kw.get("proxy")) or real(
+        transport=httpx.MockTransport(handler), **{k: v for k, v in kw.items() if k != "proxy"}))
+    monkeypatch.setattr(media, "residential_proxy", lambda: ("http://user:s3cret@proxy.example:8000", "s3cret"))
+    monkeypatch.setattr(media, "DELAY_S", 0)
+    monkeypatch.setattr(settings, "MEDIA_DIR", tmp_path / "media")
+    c = media.fetch(conn, log=lambda m: None)
+    assert c["written"] == 1 and c["proxy_bytes"] > 0
+    assert seen == [media.smaller_variant(full)]  # the -full original was never fetched
+    assert "http://user:s3cret@proxy.example:8000" in made
+    assert conn.execute("SELECT url, status FROM media").fetchall()[0][:] == (full, 200)

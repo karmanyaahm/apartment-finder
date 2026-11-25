@@ -16,6 +16,7 @@ import hashlib
 import io
 import json
 import random
+import re
 import sqlite3
 import threading
 import time
@@ -36,6 +37,11 @@ FIRST_N = 12  # photos per listing fetched before any listing's later photos
 PER_HOST, DELAY_S, WORKERS = 4, 0.25, 24
 HOST_GIVE_UP = 20  # consecutive 401/403 from a host: skip its other URLs this run (they stay "to fetch")
 MAX_DOWNLOAD = 25 * 1024 * 1024
+# Hosts that refuse this machine's downloads go through Apify's residential proxy (config/media.toml
+# `residential_hosts`); it bills by traffic, so bytes through it are counted and capped (`residential_max_mb`).
+PROXY_USD_PER_GB = 8.0
+# a smaller variant the host serves, tried first (Furnished Finder: '-650-570' next to '-full' originals)
+SMALLER = [(re.compile(r"^(https://staticproperties\.furnishedfinder\.com/.+)-full(\.\w+)$"), r"\1-650-570\2")]
 UA = "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0"
 
 
@@ -61,6 +67,27 @@ def listing_images(data: dict[str, Any]) -> list[tuple[str, str]]:
     out += [(u, "photo") for u in _urls(data.get("media")) + _urls(extra.get("images"))]
     seen: set[str] = set()
     return [x for x in out if not (x[0] in seen or seen.add(x[0]))]
+
+
+def smaller_variant(url: str) -> str | None:
+    for rx, repl in SMALLER:
+        if rx.match(url):
+            return rx.sub(repl, url)
+    return None
+
+
+def residential_proxy() -> tuple[str, str]:
+    """(proxy URL, password) for Apify's US residential proxy; the password is read from the Apify API with
+    APIFY_TOKEN at run time and never printed or stored."""
+    import httpx
+
+    token = settings.secret("APIFY_TOKEN")
+    if not token:
+        raise SystemExit("APIFY_TOKEN is not set in .env (needed for residential_hosts)")
+    r = httpx.get("https://api.apify.com/v2/users/me", headers={"Authorization": f"Bearer {token}"}, timeout=30)
+    r.raise_for_status()
+    pw = r.json()["data"]["proxy"]["password"]
+    return f"http://groups-RESIDENTIAL,country-US:{pw}@proxy.apify.com:8000", pw
 
 
 def distance(a: str, b: str) -> int:
@@ -185,29 +212,47 @@ def status(conn: sqlite3.Connection) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------------------------------- fetch
+def _get(client: Any, url: str, referer: str | None, sem: threading.Semaphore,
+         meter: dict[str, Any] | None) -> tuple[int, str | None, bytes]:
+    """GET with retries on 429/5xx/network errors. `meter`: bytes through the residential proxy, capped."""
+    err, code, body = None, 0, b""
+    for attempt in range(4):
+        if attempt:
+            time.sleep(min(60, 2 ** attempt + random.random()))
+        if meter is not None and meter["bytes"] >= meter["cap"]:
+            return -1, "residential proxy cap reached", b""
+        with sem:
+            try:
+                r = client.get(url, headers={"Referer": referer} if referer else {})
+                code, err, body = r.status_code, None, r.content
+            except Exception as e:  # network error: retried, then recorded as status 0
+                code, err, body = 0, f"{type(e).__name__}: {e}"[:300], b""
+            finally:
+                time.sleep(DELAY_S)
+        if meter is not None:
+            with meter["lock"]:
+                meter["bytes"] += len(body) + 500  # body plus about 500 bytes of headers
+        if not (code == 429 or code >= 500 or code == 0):
+            break
+    return code, err, body
+
+
 def _download(client: Any, job: dict[str, Any], sems: dict[str, threading.Semaphore],
-              sem_lock: threading.Lock, given_up: set[str]) -> dict[str, Any]:
-    """One URL: GET (retrying 429/5xx/network errors with backoff), then encode. Runs in a worker thread."""
+              sem_lock: threading.Lock, given_up: set[str], meter: dict[str, Any] | None = None) -> dict[str, Any]:
+    """One URL (its smaller variant first, if the host has one), then encode. Runs in a worker thread."""
     h = host(job["url"])
     if h in given_up:
         return {"skipped": True}
     with sem_lock:
         sem = sems.setdefault(h, threading.Semaphore(PER_HOST))
     referer = job["page"] if job["page"] and job["page"].startswith("http") else None
-    err, code, body = None, 0, b""
-    for attempt in range(4):
-        if attempt:
-            time.sleep(min(60, 2 ** attempt + random.random()))
-        with sem:
-            try:
-                r = client.get(job["url"], headers={"Referer": referer} if referer else {})
-                code, err, body = r.status_code, None, r.content
-            except Exception as e:  # network error: retried, then recorded as status 0
-                code, err, body = 0, f"{type(e).__name__}: {e}"[:300], b""
-            finally:
-                time.sleep(DELAY_S)
-        if not (code == 429 or code >= 500 or code == 0):
-            break
+    code = 0
+    if small := smaller_variant(job["url"]):
+        code, err, body = _get(client, small, referer, sem, meter)
+    if code != 200:
+        code, err, body = _get(client, job["url"], referer, sem, meter)
+    if code == -1:
+        return {"skipped": True}
     if code != 200:
         return {"status": code, "error": err or f"HTTP {code}"}
     if len(body) > MAX_DOWNLOAD:
@@ -242,7 +287,8 @@ def write_file(res: dict[str, Any], root: Path | None = None) -> None:
 
 
 def fetch(conn: sqlite3.Connection, *, retry_failed: bool = False, limit: int | None = None,
-          max_distance: int | None = None, root: Path | None = None, log=print) -> dict[str, Any]:
+          max_distance: int | None = None, root: Path | None = None, hosts: list[str] | None = None,
+          log=print) -> dict[str, Any]:
     """Download every image URL not yet stored, in priority order; resumable (fetched URLs are skipped)."""
     import httpx
 
@@ -262,7 +308,8 @@ def fetch(conn: sqlite3.Connection, *, retry_failed: bool = False, limit: int | 
         if f and f["file"] in phash_of:
             for g in j["groups"]:
                 by_group[g][f["file"]] = (phash_of[f["file"]], f["kind"])
-    todo = [j for j in jobs if j["url"] not in files and (retry_failed or j["url"] not in failed)]
+    todo = [j for j in jobs if j["url"] not in files and (retry_failed or j["url"] not in failed)
+            and (not hosts or host(j["url"]) in hosts)]
     if limit:
         todo = todo[:limit]
     cap, disk = max_bytes(), stored_bytes(conn)
@@ -277,18 +324,33 @@ def fetch(conn: sqlite3.Connection, *, retry_failed: bool = False, limit: int | 
     sems: dict[str, threading.Semaphore] = {}
     sem_lock = threading.Lock()
     t0, full = time.monotonic(), False
-    client = httpx.Client(headers={"User-Agent": UA, "Accept": "image/*,*/*;q=0.8"}, timeout=30,
-                          follow_redirects=True)
+    from .config import load_media
+
+    hdrs = {"User-Agent": UA, "Accept": "image/*,*/*;q=0.8"}
+    client = httpx.Client(headers=hdrs, timeout=30, follow_redirects=True)
+    res_hosts = set(load_media().get("residential_hosts", []))
+    meter: dict[str, Any] = {"bytes": 0, "cap": float(load_media().get("residential_max_mb", 300)) * 1e6,
+                             "lock": threading.Lock()}
+    proxied, secret = None, None
+    if any(host(j["url"]) in res_hosts for j in todo):
+        proxy_url, secret = residential_proxy()
+        proxied = httpx.Client(headers=hdrs, timeout=60, follow_redirects=True, proxy=proxy_url)
+        log(f"media: {sum(host(j['url']) in res_hosts for j in todo)} URLs on {sorted(res_hosts)} go through "
+            f"Apify's residential proxy (cap {meter['cap'] / 1e6:.0f} MB, about ${PROXY_USD_PER_GB:.0f}/GB)")
     pool = ThreadPoolExecutor(WORKERS)
     try:
-        futs = {pool.submit(_download, client, j, sems, sem_lock, given_up): j for j in todo}
+        futs = {pool.submit(_download, *((proxied, j, sems, sem_lock, given_up, meter) if host(j["url"]) in res_hosts
+                                         else (client, j, sems, sem_lock, given_up))): j for j in todo}
         for fut in as_completed(futs):
             j, res = futs[fut], fut.result()
             h = host(j["url"])
             if res.get("skipped"):
                 n["skipped"] += 1
                 continue
-            row: dict[str, Any] = {"status": res["status"], "error": res.get("error")}
+            err = res.get("error")
+            if err and secret:
+                err = err.replace(secret, "***")
+            row: dict[str, Any] = {"status": res["status"], "error": err}
             if "sha256" in res:
                 same, dist = decide(res, j["kind"], by_group[j["group"]], root)
                 if not same and disk + len(res["jpeg"]) > cap:
@@ -336,6 +398,11 @@ def fetch(conn: sqlite3.Connection, *, retry_failed: bool = False, limit: int | 
         raise
     pool.shutdown(wait=False, cancel_futures=True)
     client.close()
+    if proxied:
+        proxied.close()
+        n["proxy_bytes"] = meter["bytes"]
+        log(f"media: residential proxy {meter['bytes'] / 1e6:.1f} MB, about "
+            f"${meter['bytes'] / 1e9 * PROXY_USD_PER_GB:.2f}" + (" (cap reached)" if meter["bytes"] >= meter["cap"] else ""))
     counts = {**n, "full": full, "disk_bytes": disk, "hosts": {k: dict(v) for k, v in per_host.items()},
               "given_up": sorted(given_up)}
     finish_run(conn, run, "ok", counts, est_cost=0.0)
@@ -352,6 +419,7 @@ def main(argv: list[str] | None = None) -> None:
     f = sub.add_parser("fetch", help="download every image URL not stored yet (resumable)")
     f.add_argument("--retry-failed", action="store_true", help="also retry URLs that failed before")
     f.add_argument("--limit", type=int, help="at most this many URLs (a pilot)")
+    f.add_argument("--host", action="append", help="only URLs on this host (repeatable)")
     f.add_argument("--max-distance", type=int, help=f"pHash bits for near-duplicate photos (default "
                                                     f"{PHOTO_MAX_DISTANCE}; 0 = exact copies only)")
     sub.add_parser("status", help="downloaded / failed / to fetch, per host")
@@ -359,7 +427,7 @@ def main(argv: list[str] | None = None) -> None:
     conn = connect(args.db)
     init_db(conn)
     if args.cmd == "fetch":
-        fetch(conn, retry_failed=args.retry_failed, limit=args.limit, max_distance=args.max_distance,
+        fetch(conn, retry_failed=args.retry_failed, limit=args.limit, max_distance=args.max_distance, hosts=args.host,
               log=lambda m: print(time.strftime("%H:%M:%S"), m, flush=True))
     else:
         s = status(conn)
