@@ -162,6 +162,9 @@ def test_knn_cells_and_sampling_endpoints(tmp_path, monkeypatch):
     d = c.get("/api/knn/cells").json()
     assert d["cells"] == [] and "drive" in d["modes"] and "transit" not in d["modes"]
     assert any(r["id"] == META for r in d["rows"])
+    cal = next(r for r in d["rows"] if r["id"] == "set:caltrain_stations")
+    assert cal["k"] >= 1 and cal["points"] >= cal["k"] and d["k_stations"] == trips.K_STATIONS
+    assert "matrix_cap" in d and "matrix_free" in d
     assert c.post("/api/knn/cells", json={"cells": [["set:caltrain_stations", "bike_train_bike"]]}).status_code == 400
     assert c.post("/api/knn/cells", json={"cells": [[META, "drive"]]}).status_code == 200
     assert c.get("/api/knn/cells").json()["cells"] == [[META, "drive"]]

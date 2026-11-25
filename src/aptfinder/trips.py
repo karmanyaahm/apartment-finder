@@ -162,9 +162,14 @@ def route_anchors(conn, db_path: str, provider: str, max_calls: int, dry_run: bo
     return {"routed": out, "api_calls": getattr(source, "calls", None)}
 
 
+# bike+train tries the K_STATIONS stations nearest the place and the destination (straight line); the KNN grid's
+# labels read it, so the text and the routing agree
+K_STATIONS = 2
+
+
 def build_commute(cache_db: str, source) -> Commute:
     stations = [Station(p.name, p.lat, p.lon) for p in load_points().get("caltrain_stations", [])]
-    return Commute(cache_db, source, stations, load_caltrain())
+    return Commute(cache_db, source, stations, load_caltrain(), k_stations=K_STATIONS)
 
 
 def latest_trip(conn: sqlite3.Connection, place_key: str, point_id: str, mode: str, provider: str):

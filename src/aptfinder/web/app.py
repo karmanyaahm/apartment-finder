@@ -1054,12 +1054,18 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
     def knn_cells_get() -> dict[str, Any]:
         from ..filter.knn import RADIUS_M, cells
 
-        sets = load_point_sets()
+        from ..trips import K_STATIONS, load_google_caps
+
+        sets, pts = load_point_sets(), load_points()
         rows = [{"id": p.id, "label": p.name, "kind": "target", "paid": True}
-                for p in load_points().get("commute_targets", [])]
-        rows += [{"id": f"set:{k}", "label": v.label or k, "kind": "set", "paid": v.paid}
-                 for k, v in sets.items() if k != "commute_targets"]
-        return {"cells": [list(c) for c in cells(conn)], "rows": rows, "modes": KNN_MODES, "radius_m": RADIUS_M}
+                for p in pts.get("commute_targets", [])]
+        # k and points: how many routes one place costs (k nearest by straight line; k = 0: every point)
+        rows += [{"id": f"set:{k}", "label": v.label or k, "kind": "set", "paid": v.paid, "k": v.k,
+                  "points": len(pts.get(k, []))} for k, v in sets.items() if k != "commute_targets"]
+        caps = load_google_caps()
+        return {"cells": [list(c) for c in cells(conn)], "rows": rows, "modes": KNN_MODES, "radius_m": RADIUS_M,
+                "k_stations": K_STATIONS, "matrix_cap": caps.get("matrix_monthly_element_cap", 0),
+                "matrix_free": caps.get("matrix_free_elements_per_month", 0)}
 
     @app.post("/api/knn/cells")
     def knn_cells_set(body: CellsIn) -> dict[str, Any]:

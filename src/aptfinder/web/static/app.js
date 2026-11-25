@@ -1353,19 +1353,45 @@ function computeBlock() {
     <details id="c-log-box"><summary>Recent computations (each Google call and matrix element is also logged)</summary><div id="c-log">…</div></details></div>`;
 }
 const cellParts = (k) => { const i = k.lastIndexOf("|"); return [k.slice(0, i), k.slice(i + 1)]; };
+let KNN_META = null;  // the last /api/knn/cells answer: rows (with each set's k), k_stations, matrix cap and free tier
+// Google routes one place costs in a grid cell, from config: a target by a plain mode 1; bike+train up to
+// k_stations + 1 (engine._bike_train_bike); a point set its k nearest (k = 0: every point)
+function cellRoutes(rowId, mode, d = KNN_META) {
+  const r = d?.rows.find((x) => x.id === rowId);
+  if (mode === "bike_train_bike") return { n: (d?.k_stations ?? 2) + 1, upTo: true };
+  if (!r || r.kind !== "set") return { n: 1, upTo: false };
+  return { n: r.k > 0 ? Math.min(r.k, r.points || r.k) : r.points, upTo: false };
+}
+function rowNote(r) {
+  if (r.kind !== "set") return "1 route per place per mode";
+  const n = r.k > 0 ? Math.min(r.k, r.points || r.k) : r.points;
+  const pick = r.k > 0 ? `${r.k} nearest by straight line` : `all ${r.points} points`;
+  if (!r.paid) return `estimate only (paid = false): ${pick}, no Google routes`;
+  if (r.k === 1) return "route to the nearest point only (straight line) — 1 route per place";
+  return `routes to the ${pick}; shows the fastest — ${n} routes per place`;
+}
+const btbNote = (ks) => `per place: bike to the ${ks} nearest stations + bike the whole way for comparison = up to ${ks + 1} routes
+  (the whole-way leg is the bike column's route); train time from the timetable plus wait; station→destination bike legs
+  are shared by every place (routed once, then reused)`;
 async function drawKnnGrid() {
   const box = $("#k-grid");
   const d = await api("api/knn/cells").catch((e) => { box.textContent = "Cells failed to load: " + e.message; return null; });
   if (!d) return;
+  KNN_META = d;
   $("#k-radius").textContent = d.radius_m;
   const on = new Set(d.cells.map(([p, m]) => `${p}|${m}`));
-  box.innerHTML = `<table class="knn-grid"><tr><th></th>${d.modes.map((m) => `<th>${esc(MODE_LABEL[m] || m)}</th>`).join("")}</tr>
-    ${d.rows.map((r) => `<tr><th>${esc(r.label)}</th>${d.modes.map((m) => {
+  const num = (x) => Number(x).toLocaleString("en-US");
+  const bill = `All sampling bills as Google Route Matrix Essentials: 1 element = 1 place × 1 destination; ${num(d.matrix_free)} free a month, `
+    + (d.matrix_cap ? `cap ${num(d.matrix_cap)}.` : "no cap set in google.toml, so no matrix calls.");
+  box.innerHTML = `<table class="knn-grid"><tr><th></th>${d.modes.map((m) => `<th${m === "bike_train_bike" ? ` title="${esc(btbNote(d.k_stations))}"` : ""}>${esc(MODE_LABEL[m] || m)}${
+      m === "bike_train_bike" ? `<div class="muted small knn-note">${esc(btbNote(d.k_stations))}</div>` : ""}</th>`).join("")}</tr>
+    ${d.rows.map((r) => `<tr><th title="${esc(rowNote(r))}">${esc(r.label)}<div class="muted small knn-note">${esc(rowNote(r))}</div></th>${d.modes.map((m) => {
       if (m === "bike_train_bike" && r.kind === "set") return "<td></td>";
-      const why = r.paid ? "" : "paid = false in point_sets.toml: no Google routing for this set";
-      return `<td title="${esc(why)}"><input type="checkbox" data-cell="${esc(r.id)}|${esc(m)}"
+      const why = !r.paid ? "paid = false in point_sets.toml: no Google routing for this set"
+        : m === "bike_train_bike" ? btbNote(d.k_stations) : rowNote(r);
+      return `<td title="${esc(why)}"><input type="checkbox" data-cell="${esc(r.id)}|${esc(m)}" title="${esc(why)}"
         ${on.has(`${r.id}|${m}`) ? "checked" : ""} ${r.paid ? "" : "disabled"}></td>`;
-    }).join("")}</tr>`).join("")}</table>`;
+    }).join("")}</tr>`).join("")}</table><p class="muted small">${esc(bill)}</p>`;
   $$("#k-grid input[data-cell]").forEach((cb) => cb.addEventListener("change", async () => {
     const cells = $$("#k-grid input[data-cell]:checked").map((x) => cellParts(x.dataset.cell));
     try { await post("api/knn/cells", { cells }); toast(`${cells.length} cell${cells.length === 1 ? "" : "s"} saved`); await loadPlaces(); }
@@ -1407,12 +1433,16 @@ function wireCompute() {
         : `refine over ${d.scope} places: ${places} places`;
       const rows = Object.entries(d.pairs).map(([k, v]) => {
         const [p, m] = cellParts(k);
+        // places x routes per place = the nominal elements; fewer are billed when legs are cached or shared
+        const c = cellRoutes(p, m), nominal = v.places * c.n;
+        const el = v.elements === nominal ? `${v.elements}` : `${v.elements} <span class="muted">(${nominal - v.elements > 0
+          ? `${nominal - v.elements} cached or shared` : `${v.elements - nominal} shared legs not cached yet`})</span>`;
         return `<tr><td>${esc(p.replace(/^commute_targets:/, "").replace(/^set:/, "nearest "))} × ${esc(MODE_LABEL[m] || m)}</td>
-          <td>${v.places}</td><td>${v.elements}</td><td>${v.covered_before} → ${v.covered_after} of ${d.scope}</td></tr>`;
+          <td>${v.places} × ${c.upTo ? "up to " : ""}${c.n} = ${nominal}</td><td>${el}</td><td>${v.covered_before} → ${v.covered_after} of ${d.scope}</td></tr>`;
       }).join("");
       out.innerHTML = `${esc(head)}, <b>${d.elements}</b> Route Matrix elements (${esc(d.modes.join(", ") || "none")})
         · this month ${u.matrix_elements}/${u.matrix_cap} elements used
-        <div class="scroll-x"><table><tr><th>cell</th><th>places</th><th>elements</th><th>with a routed place within ${d.radius_m} m</th></tr>${rows}</table></div>
+        <div class="scroll-x"><table><tr><th>cell</th><th>places × routes per place</th><th>elements (uncached)</th><th>with a routed place within ${d.radius_m} m</th></tr>${rows}</table></div>
         ${d.skipped.length ? `<span class="reason needs_check">Skipped: ${esc(d.skipped.join("; "))}</span>` : ""}
         ${d.elements > d.left ? `<br><span class="reason fail">Over the monthly matrix cap (${d.left} left): the run stops at the cap.</span>` : ""}`;
       if (d.elements > 0) {

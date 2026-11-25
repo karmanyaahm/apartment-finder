@@ -189,5 +189,6 @@ input[type=number] { padding-right: 2px; }
 .compute { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
 .compute #c-out, .compute #c-job, .compute #k-grid, .compute > p, .compute > div { flex: 1 1 100%; }
 .knn-grid td { text-align: center; } .knn-grid th { text-align: left; font-weight: 500; }
+.knn-grid .knn-note { font-weight: 400; max-width: 18em; white-space: normal; margin-top: 2px; }
 .src-google { color: var(--src-google); } .src-knn { color: var(--src-knn); } .src-estimate { color: var(--muted); }
 .src-key { white-space: nowrap; }
