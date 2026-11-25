@@ -110,7 +110,7 @@ All code lives in one Python package `aptfinder` (`src/aptfinder/`), one subpack
   | Airbnb | `tri_angle/airbnb-scraper` | $1.25 / 1k | Apify-maintained; had an empty-price bug; fallback `tri_angle/airbnb-fast-scraper`. Used 2026-11-24, replaced 2026-11-25 by `kaix/airbnb-listing-scraper` (see the decision log) |
   | Furnished Finder | `rigelbytes/furnishedfinder` or `datascrapers/furnishedfinder` | about $1.20 / 1k | community-built; site behind Cloudflare, may need residential proxy |
 
-  For Airbnb, query with real check-in and check-out dates at least 28 days apart so the returned price is the monthly-discounted total (`price_basis = stay`, query dates recorded on the observation). Blueground has no known actor yet.
+  For Airbnb, query with real check-in and check-out dates at least 28 days apart so the returned price is the monthly-discounted one; Airbnb quotes a stay of 28+ nights per month ("monthly"), so `price_basis = month`, with the query dates recorded on the observation. Blueground has no known actor yet.
 
 ### identity (`aptf-identity`)
 - Goal: decide which listings are the same place and unit.
