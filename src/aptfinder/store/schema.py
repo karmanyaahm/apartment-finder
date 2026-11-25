@@ -171,7 +171,7 @@ def _overridden(field: str) -> str:
 PLAIN_DATA_FIELDS = ["city", "zip", "floor_plan", "property_name", "operator", "title"]
 
 VIEW_NAMES = [
-    "operators", "places", "units", "listings", "listings_base", "field_overrides", "current_checks",
+    "operators", "places", "units", "listings", "listings_base", "withdrawals", "field_overrides", "current_checks",
     "obs_history", "current_links", "latest_obs", "listing_stats", "source_last_full_run",
 ]
 
@@ -229,9 +229,55 @@ FROM (
            c.observation_id, c.queue, c.ts,
            ROW_NUMBER() OVER (PARTITION BY o.source, o.source_id, c.field ORDER BY c.id DESC) AS rn
     FROM checks c JOIN observations o ON o.id = c.observation_id
+    WHERE c.field != 'active'  -- the 'no longer for rent' mark is withdrawal evidence (view withdrawals)
 ) x
 JOIN latest_obs lo ON lo.source = x.source AND lo.source_id = x.source_id
 WHERE x.rn = 1 AND json_extract(x.stored_value, '$') IS {current_value};
+
+-- Off the market: the newest withdrawal evidence of a listing says gone. Evidence, newest wins:
+--   * the user's 'no longer for rent' mark: a checks row, field 'active', true_value "gone" (an undo is a later
+--     'active' row whose true_value is "offered");
+--   * a Zillow detail page (runs of source zillow_detail, counts.home_status / counts.last_event per zpid):
+--     SOLD or RECENTLY_SOLD, or any other non-rental status whose newest price-history event is
+--     'Listing removed', says gone; FOR_RENT says offered; an ambiguous page (FOR_SALE with 'Listed for rent',
+--     no event) says nothing and stays a Verify item;
+--   * a fresh scrape that saw the listing (an intake run that is not a reparse) says offered. Extract and
+--     reparse runs re-append observations of old data, so they prove nothing.
+CREATE VIEW withdrawals AS
+WITH zl AS (
+    SELECT DISTINCT source_id, substr(source_id, 1, instr(source_id || ':', ':') - 1) AS zpid
+    FROM observations WHERE source = 'zillow'
+),
+ev AS (
+    SELECT o.source, o.source_id, c.ts, json_extract(c.true_value, '$') = 'gone' AS gone, 'user' AS by_,
+           NULL AS why
+    FROM checks c JOIN observations o ON o.id = c.observation_id
+    WHERE c.field = 'active' AND c.observation_id IS NOT NULL
+    UNION ALL
+    SELECT 'zillow', zl.source_id, d.ts, d.gone, 'zillow_detail', d.why
+    FROM (
+        SELECT h.key AS zpid, r.started_at AS ts,
+               h.value AS status, json_extract(r.counts, '$.last_event."' || h.key || '"') AS why,
+               CASE WHEN h.value = 'FOR_RENT' THEN 0
+                    WHEN h.value IN ('SOLD', 'RECENTLY_SOLD') THEN 1
+                    WHEN json_extract(r.counts, '$.last_event."' || h.key || '"') LIKE '% Listing removed%' THEN 1
+               END AS gone
+        FROM runs r, json_each(r.counts, '$.home_status') h
+        WHERE r.component = 'intake' AND r.source = 'zillow_detail' AND r.status = 'ok'
+    ) d JOIN zl ON zl.zpid = d.zpid
+    WHERE d.gone IS NOT NULL
+),
+newest AS (
+    SELECT * FROM (
+        SELECT ev.*, ROW_NUMBER() OVER (PARTITION BY source, source_id ORDER BY ts DESC, by_ = 'user' DESC) AS rn
+        FROM ev
+    ) WHERE rn = 1 AND gone = 1
+)
+SELECT n.source, n.source_id, n.ts AS gone_at, n.by_ AS gone_by, n.why AS gone_why FROM newest n
+WHERE NOT EXISTS (
+    SELECT 1 FROM observations o JOIN runs r ON r.id = o.run_id
+    WHERE o.source = n.source AND o.source_id = n.source_id AND o.observed_at > n.ts
+      AND r.component = 'intake' AND json_extract(r.params, '$.reparse_of') IS NULL);
 
 -- A current 'wrong' check overrides the scraped value.
 CREATE VIEW field_overrides AS
@@ -242,7 +288,8 @@ SELECT lo.source, lo.source_id, lo.url, lo.id AS obs_id, lo.run_id, lo.observed_
        ls.first_seen, ls.last_seen, ls.n_obs, ls.n_versions,
        -- inactive: absent from a newer whole-area run, or from a newer run that completed this listing's
        -- intake area (counts.areas.<id>.state). Partial or failed reruns prove nothing.
-       CASE WHEN sl.run_id IS NOT NULL AND lo.run_id < sl.run_id THEN 0
+       CASE WHEN wd.source IS NOT NULL THEN 0  -- off the market (view withdrawals)
+            WHEN sl.run_id IS NOT NULL AND lo.run_id < sl.run_id THEN 0
             WHEN json_extract(lo.data, '$.extra.area') IS NOT NULL AND EXISTS (
                 SELECT 1 FROM runs r
                 WHERE r.source = lo.source AND r.component = 'intake' AND r.status = 'ok' AND r.id > lo.run_id
@@ -264,11 +311,13 @@ SELECT lo.source, lo.source_id, lo.url, lo.id AS obs_id, lo.run_id, lo.observed_
        json_extract(lo.data, '$.amenities') AS amenities,
        json_extract(lo.data, '$.media') AS media,
        ov.fields AS overridden,
-       lo.data AS data, lo.raw_path
+       lo.data AS data, lo.raw_path,
+       wd.gone_at, wd.gone_by, wd.gone_why
 FROM latest_obs lo
 JOIN listing_stats ls ON ls.source = lo.source AND ls.source_id = lo.source_id
 LEFT JOIN source_last_full_run sl ON sl.source = lo.source
 LEFT JOIN current_links cl ON cl.source = lo.source AND cl.source_id = lo.source_id
+LEFT JOIN withdrawals wd ON wd.source = lo.source AND wd.source_id = lo.source_id
 LEFT JOIN (SELECT source, source_id, json_group_object(field, json(true_value)) AS o,
                   group_concat(field) AS fields
            FROM field_overrides GROUP BY source, source_id) ov

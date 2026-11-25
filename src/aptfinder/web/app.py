@@ -218,6 +218,13 @@ class CheckIn(BaseModel):
     note: str | None = None
 
 
+class GoneIn(BaseModel):
+    source: str
+    source_id: str
+    gone: bool = True  # false: undo (the listing is still for rent)
+    queue: str = "adhoc"  # 'conflict' from a Verify stale item, 'adhoc' from the drawer
+
+
 class CellsIn(BaseModel):
     cells: list[tuple[str, str]]  # (point id or `set:<name>`, mode): the KNN grid's checked cells
 
@@ -491,6 +498,8 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 "source": l["source"], "source_id": l["source_id"], "url": l["url"], "obs_id": l["obs_id"],
                 "unit_key": l["unit_key"], "first_seen": l["first_seen"], "last_seen": l["last_seen"],
                 "active": l["active"], "n_obs": l["n_obs"],
+                # off the market (view withdrawals): since when, by whom ('user' or 'zillow_detail'), the page's event
+                "gone_at": l.get("gone_at"), "gone_by": l.get("gone_by"), "gone_why": l.get("gone_why"),
                 "fields": {f: l.get(f) for f in LISTING_FIELDS},
                 "overridden": (l["overridden"] or "").split(",") if l["overridden"] else [],
                 "checks": checks,
@@ -762,6 +771,24 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         with lock:
             cid = append_check(conn, AUTHOR, c.queue, c.field, c.verdict, observation_id=c.observation_id,
                                trip_id=c.trip_id, stored_value=stored, true_value=tv, note=c.note)
+        return {"id": cid}
+
+    @app.post("/api/listings/gone")
+    def post_gone(g: GoneIn) -> dict[str, Any]:
+        """The user's 'no longer for rent' mark on a listing (gone), or its undo: an appended checks row on field
+        `active` against the listing's newest observation. The listings view treats the listing as inactive while
+        this is its newest withdrawal evidence (view withdrawals); a later fresh scrape that sees it brings it back."""
+        if g.queue not in ("conflict", "adhoc"):
+            raise HTTPException(400, "queue must be 'conflict' or 'adhoc'")
+        rows = q("SELECT id FROM observations WHERE source = ? AND source_id = ? ORDER BY observed_at DESC, id DESC "
+                 "LIMIT 1", (g.source, g.source_id))
+        if not rows:
+            raise HTTPException(404, "no such listing")
+        with lock:
+            cid = append_check(conn, AUTHOR, g.queue, "active", "wrong", observation_id=rows[0]["id"],
+                               stored_value="offered" if g.gone else "gone",
+                               true_value="gone" if g.gone else "offered",
+                               note=None if g.gone else "undo: still for rent")
         return {"id": cid}
 
     # ------------------------------------------------------------------ other writes

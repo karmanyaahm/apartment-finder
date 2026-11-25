@@ -49,6 +49,7 @@ def accuracy(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
             FROM checks c
             LEFT JOIN observations o ON o.id = c.observation_id
             LEFT JOIN trips t ON t.id = c.trip_id
+            WHERE c.field != 'active'  -- the 'no longer for rent' mark is not a field reading (view withdrawals)
         ) WHERE rn = 1 AND verdict != 'cannot_tell'
     """).fetchall()
     tally: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
@@ -101,7 +102,7 @@ def sample_queue(conn: sqlite3.Connection, seed: int = 0, include_trips: bool = 
     checked = current_checks(conn)
     ever: dict[tuple[str, str], set[str]] = defaultdict(set)
     for r in conn.execute("SELECT DISTINCT o.source, o.source_id, c.field FROM checks c "
-                          "JOIN observations o ON o.id = c.observation_id"):
+                          "JOIN observations o ON o.id = c.observation_id WHERE c.field != 'active'"):
         ever[(r["source"], r["source_id"])].add(r["field"])
     groups: dict[str, list[Any]] = defaultdict(list)
     for r in conn.execute("SELECT source, source_id, obs_id, place_key FROM listings WHERE kind IS NOT 'site_info' "
@@ -227,8 +228,10 @@ def cheap_queue(conn: sqlite3.Connection, min_per_bed: float | None = None) -> l
 def stale_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Active Zillow listings whose newest detail page (`aptf-intake zillow-detail`) states a non-rental status
     (FOR_SALE, SOLD, OFF_MARKET, ...): probably no longer for rent. One-listing items on the price (✓ still offered
-    at this price, ✗ or ? if gone); a building's bedroom rows share one page, so each row is an item. Drops out once
-    the price has a current check or a newer page says FOR_RENT. A page without a status flags nothing."""
+    at this price, or 'no longer for rent'); a building's bedroom rows share one page, so each row is an item. Drops
+    out once the price has a current check, a newer page says FOR_RENT, or the listing is off the market (view
+    withdrawals: the user's 'no longer for rent' mark, or a page whose newest event is 'Listing removed' or a sale,
+    which retires it without an item). A page without a status flags nothing."""
     from ..intake.zillow_detail import RENTAL, latest_status
 
     bad = {z: (s, ev) for z, (s, ev) in latest_status(conn).items() if s not in RENTAL}

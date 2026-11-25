@@ -827,6 +827,14 @@ function attributesBlock(d, pk) {
   }).join("") + `<form id="new-attr" class="row small" style="display:flex;gap:6px;margin-top:6px"><input name="a" placeholder="new attribute (e.g. parking)" style="flex:1"><button>Add attribute</button></form>`;
 }
 
+// off the market (view withdrawals): the user's mark, with its undo, or a Zillow page that says removed or sold
+function goneNote(l) {
+  if (!l.gone_at) return "";
+  const who = l.gone_by === "user" ? `you marked it gone on ${esc(l.gone_at.slice(0, 10))}`
+    : `Zillow's page: ${esc(l.gone_why || "removed")} (read ${esc(l.gone_at.slice(0, 10))})`;
+  return `<br><span class="small">${who} <a href="#" data-gone="${esc(l.source)}|${esc(l.source_id)}" data-gone-set="0">${l.gone_by === "user" ? "undo" : "still for rent"}</a></span>`;
+}
+
 async function openPlace(pk) {
   S.selected = pk;
   $$(".card").forEach((c) => c.classList.toggle("sel", c.dataset.pk === pk));
@@ -879,8 +887,9 @@ async function openPlace(pk) {
       <td>${fmtField("sqft", f.sqft)}${c("sqft")}</td>
       <td>${fmtField("price", f.price)}${f.price_basis && f.price_basis !== "month" ? ` <span class="muted">/${esc(f.price_basis)}</span>` : ""}${c("price")}</td>
       <td>${esc(f.available_from || "")}${c("available_from")}</td>
-      <td class="muted">${esc((l.first_seen || "").slice(5, 10))}→${esc((l.last_seen || "").slice(5, 10))}${l.active ? "" : " inactive"}</td>
+      <td class="muted">${esc((l.first_seen || "").slice(5, 10))}→${esc((l.last_seen || "").slice(5, 10))}${l.active ? "" : " inactive"}${goneNote(l)}</td>
       <td class="nowrap"><button class="small" data-raw="${i}" title="Show what we parsed and what the source sent">raw</button>
+        ${l.active && f.kind !== "site_info" ? `<button class="small" data-gone="${esc(l.source)}|${esc(l.source_id)}" data-gone-set="1" title="Record that this listing is withdrawn: it leaves the list until a newer scrape sees it again">no longer for rent</button>` : ""}
         <button class="small" data-split="${esc(l.source)}|${esc(l.source_id)}" title="Record that this listing is a different place">split</button></td>
     </tr>
     <tr class="raw-row hidden" data-raw-row="${i}"><td colspan="9">
@@ -965,6 +974,14 @@ function wireDrawer(pk) {
       toast(`Merged ${r.merged} listings`); await loadPlaces(); openPlace(into);
     } catch (err) { toast("Merge failed: " + err.message, 6000); }
   }));
+  $$("#drawer [data-gone]").forEach((b) => b.addEventListener("click", async (ev) => {
+    ev.preventDefault();
+    const [source, ...rest] = b.dataset.gone.split("|"), gone = b.dataset.goneSet === "1";
+    try {
+      await post("api/listings/gone", { source, source_id: rest.join("|"), gone, queue: "adhoc" });
+      toast(gone ? "Marked no longer for rent" : "Undone: back on the list"); await loadPlaces(); openPlace(pk);
+    } catch (err) { toast("Failed: " + err.message, 6000); }
+  }));
   $$("#drawer [data-split]").forEach((b) => b.addEventListener("click", async () => {
     const [source, source_id] = b.dataset.split.split("|");
     if (!confirm(`Record that ${source} ${source_id} is a different place from the others here?`)) return;
@@ -1020,7 +1037,7 @@ function conflictBlock(e) {
     it.cheap ? `<span class="chip needs_check">too cheap?</span>` : "",
     it.stale ? `<span class="chip needs_check">no longer for rent?</span>` : "",
   ].join("");
-  const cheap = it.cheap ? `<div class="small">${money(it.price_month)} for ${it.beds ? `${num(it.beds)} bd` : "a studio"} = <b>${money(it.per_bed)}/bed</b> · ${esc(it.reason)}</div>` : it.stale ? `<div class="small">${esc(it.reason)}</div>` : "";
+  const cheap = it.cheap ? `<div class="small">${money(it.price_month)} for ${it.beds ? `${num(it.beds)} bd` : "a studio"} = <b>${money(it.per_bed)}/bed</b> · ${esc(it.reason)}</div>` : it.stale ? `<div class="small">${esc(it.reason)} <button class="small" data-gone="${esc(obs[0].source)}|${esc(obs[0].source_id)}" title="Record that this listing is withdrawn: it leaves the list until a newer scrape sees it again">no longer for rent</button></div>` : "";
   const textTh = it.text ? `<th>${esc(it.text_label)}<br><span class="muted">read from the text</span></th>` : "";
   const textTd = (f) => (it.text ? `<td>${fmtField(f, it.text[f])}</td>` : "");
   return `<div class="vconf${it.pending_render ? " pending" : ""}">
@@ -1060,7 +1077,7 @@ async function renderConflicts() {
     <span class="muted">Showing ${d.total} of ${d.all_total} conflicts${hid ? `: ${hid}` : ""}. A goal keeps a conflict only if picking a different source's value for the disputed fields could change the listing's result for that goal (pass, needs check or fail; its commute limits included).</span></p>`;
   body.innerHTML = `<h2>${d.total} conflicts: ${d.actionable} to check (${d.cheap} priced too low per bedroom), ${d.pending} waiting for an own-site render</h2>
     ${filterBar}
-    <p class="small">Sources disagree on these units. Open each listing, then mark every stored value: ✓ correct, ✗ wrong (type the true value), ? cannot tell. Listings tagged <i>too cheap?</i> are priced below the per-bedroom floor: a per-room or misread price? Mark the price ✓ if it is real, ✗ with the true monthly rent if not. Conflicts tagged <i>own-site render pending</i> come last: the building's own site will be read again and will likely settle them.</p>
+    <p class="small">Sources disagree on these units. Open each listing, then mark every stored value: ✓ correct, ✗ wrong (type the true value), ? cannot tell. Listings tagged <i>no longer for rent?</i>: ✓ the price if still offered, else <b>no longer for rent</b>. Listings tagged <i>too cheap?</i> are priced below the per-bedroom floor: a per-room or misread price? Mark the price ✓ if it is real, ✗ with the true monthly rent if not. Conflicts tagged <i>own-site render pending</i> come last: the building's own site will be read again and will likely settle them.</p>
     <p class="muted small">Showing ${from}–${to} of ${d.total} · <a href="#" id="v-dups">possible duplicate buildings (${S.status?.queues?.duplicates ?? "…"})</a></p>
     ${d.items.map(conflictBlock).join("")}
     <p style="margin-top:14px"><button id="v-prev" ${S.conflictSkip ? "" : "disabled"}>Previous ${CONFLICT_PAGE}</button>
@@ -1068,12 +1085,22 @@ async function renderConflicts() {
       <button id="v-rest" class="${more ? "" : "accent"}">${more ? "Skip to" : "Continue:"} possible duplicate buildings, then own sites and the sample</button></p>`;
   $$(".vbtns", body).forEach(wireVbtns);
   $$("[data-goto]", body).forEach((a) => a.addEventListener("click", (ev) => { ev.preventDefault(); gotoPlace(a.dataset.goto); }));
+  // a stale item answered "it's gone": a user check on `active` (POST api/listings/gone); the item leaves the queue
+  $$("[data-gone]", body).forEach((b) => b.addEventListener("click", async () => {
+    const [source, ...rest] = b.dataset.gone.split("|");
+    try {
+      await post("api/listings/gone", { source, source_id: rest.join("|"), gone: true, queue: "conflict" });
+      b.closest(".vconf").classList.add("gone");
+      b.replaceWith(Object.assign(document.createElement("b"), { textContent: "marked no longer for rent (undo in the place drawer)" }));
+      loadStatus();
+    } catch (err) { toast("Failed: " + err.message, 6000); }
+  }));
   $("#v-goal").addEventListener("change", (ev) => { lsSet("aptf.conflictGoal", ev.target.value); S.conflictSkip = 0; renderConflicts(); });
   $("#v-zone").addEventListener("change", (ev) => { lsSet("aptf.conflictZone", ev.target.checked ? "walk" : ""); S.conflictSkip = 0; renderConflicts(); });
   $("#v-prev").addEventListener("click", () => { S.conflictSkip = Math.max(0, S.conflictSkip - CONFLICT_PAGE); renderConflicts(); loadStatus(); });
   $("#v-more")?.addEventListener("click", () => {
     // a conflict whose every value got a verdict has left the queue, so the next page starts that much earlier
-    const done = $$(".vconf", body).filter((b) => $$(".vbtns:not(.opt)", b).every((v) => $("button.on", v))).length;
+    const done = $$(".vconf", body).filter((b) => b.classList.contains("gone") || $$(".vbtns:not(.opt)", b).every((v) => $("button.on", v))).length;
     S.conflictSkip += d.items.length - done; renderConflicts(); loadStatus();
   });
   const toDups = (ev) => { ev?.preventDefault(); S.verifyMode = "dup"; S.dupSkip = 0; renderVerify(); loadStatus(); };
