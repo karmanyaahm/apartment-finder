@@ -312,6 +312,9 @@ function ruleTemplates() {
     ["furnished", { type: "equals", field: "furnished", value: true }],
     ["private bath", { type: "equals", field: "private_bath", value: true }],
     ["no restrictions (who may rent)", { type: "equals", field: "restriction", value: "none" }],
+    ["parking included", { type: "equals", field: "parking_included", value: true }],
+    ["parking spots at least", { type: "min", field: "parking_spots", value: 1 }],
+    ["parking cost at most ($/month)", { type: "max", field: "parking_usd_month", value: 100 }],
     ["available for dates", { type: "dates_cover", start: new Date().toISOString().slice(0, 10), end: new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10) }],
     ["field known", { type: "known", field: "sqft" }],
     ["net commute (the must-have commute rules)", { type: "net_commute", agg: $("#agg").value || "total", max: 90 }],
@@ -319,7 +322,8 @@ function ruleTemplates() {
 }
 const opt = (v, label, sel) => `<option value="${esc(v)}"${String(v) === String(sel) ? " selected" : ""}>${esc(label)}</option>`;
 const FIELD_LABEL = { price: "price", price_month: "price / month", price_per_bed: "price / bed", beds: "beds", baths: "baths",
-  sqft: "sqft", term: "term", furnished: "furnished", private_bath: "private bath", kind: "kind", restriction: "who may rent" };
+  sqft: "sqft", term: "term", furnished: "furnished", private_bath: "private bath", kind: "kind", restriction: "who may rent",
+  parking_included: "parking included", parking_spots: "parking spots", parking_usd_month: "parking $/month" };
 const fieldName = (f) => FIELD_LABEL[f] || f.replace(/_/g, " ");
 // one rule row's inputs; each input names the path it sets in data-p ("value", "options.0.max", ...)
 function ruleInputs(r) {
@@ -703,6 +707,23 @@ function whoMayRent(d, p) {
     <span class="muted">${mine ? "your answer" : esc(read)}</span></div>`;
 }
 
+// Parking as the most informative listing here states it (filter.place_parking): "🅿 1 covered, $75/mo", the quotes on
+// hover; red / amber when the selected goal's parking rule fails or needs a check on it (`fails`, like other facts)
+const PARKING_KIND = { off_street: "off-street", uncovered: "open", ev_charging: "EV" };
+function parkingText(pk) {
+  const kinds = (pk.kinds || []).filter((k) => k !== "street").map((k) => PARKING_KIND[k] || k).join("/");
+  if (pk.offered === "no") return (pk.kinds || []).includes("street") ? "street parking only" : "no parking";
+  const what = [pk.spots != null ? pk.spots : "", kinds].filter((x) => x !== "").join(" ") || "parking";
+  const cost = pk.cost === "included" ? "included" : pk.cost === "paid" ? (pk.usd_month != null ? `${money(pk.usd_month)}/mo` : "paid")
+    : "cost unspecified";
+  return `${what}, ${cost}${pk.offered == null ? " (offered?)" : ""}`;
+}
+function parkingFact(pk, fails = []) {
+  const mk = markFor(fails, (x) => x.f.startsWith("parking_"));
+  if (!pk) return mk ? `<span${mk}>🅿 ?</span>` : "";
+  return `<span${mk || ` title="${esc(`"${(pk.evidence || []).join(" | ")}" (${pk.source})`)}"`}>🅿 ${esc(parkingText(pk))}</span>`;
+}
+
 function stars(n) { return n ? `<span class="stars" title="${n}/5">${"★".repeat(n)}${"☆".repeat(5 - n)}</span>` : ""; }
 
 function renderList() {
@@ -723,7 +744,7 @@ function renderList() {
       : `<span${bm || am}>beds ?</span>`;
     const facts = `${priceFacts(p, fails)}
         <span>${bb}</span>
-        ${limitFacts(p, fails)}${netFact(p, fails)}`;
+        ${limitFacts(p, fails)}${netFact(p, fails)}${parkingFact(p.parking, fails)}`;
     const rxb = restrictionBadge(p.restriction, fails);
     const extra = rxb + fails.filter((x) => !x.used).map(failChip).join("");
     return `<div class="card ${st === "fail" ? "dim" : ""} ${S.selected === p.place_key ? "sel" : ""}" data-pk="${esc(p.place_key)}">
@@ -922,6 +943,7 @@ async function openPlace(pk) {
     <h2>${esc(label)} ${restrictionBadge(p.restriction)} ${stars(d.annotations.filter((a) => a.attribute === "overall" && a.rating).slice(-1)[0]?.rating)}</h2>
     ${(d.websites || []).length ? `<div class="website">${d.websites.map((w) => `<a href="${esc(w.url)}" target="_blank" rel="noopener noreferrer">🌐 ${esc(w.site)} ↗</a>`).join(" ")}</div>` : '<div class="website muted small">no website found yet</div>'}
     <div class="muted small">${esc(p.address || "address unknown")} ${p.city ? "· " + esc(p.city) : ""} · ${esc(pk)}</div>
+    ${p.parking ? `<div class="small facts">${parkingFact(p.parking)}</div>` : ""}
     <h3>Goals</h3>${goals}
     ${whoMayRent(d, p)}
     ${photos.length ? `<h3>Photos (${photos.length})</h3><div class="media">${photos.join("")}</div>` : '<p class="muted small">No photos from any source.</p>'}

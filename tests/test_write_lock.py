@@ -63,7 +63,7 @@ def test_render_commits_each_site_before_the_next_claude_call(conn, tmp_path, mo
 
     def ask(name, text, model, cap):
         open_during_ask.append(conn.in_transaction)  # a pending write here would hold the lock for the whole call
-        return [], {"value": "income", "evidence": "This community is income restricted."}, 0.0
+        return [], {"value": "income", "evidence": "This community is income restricted."}, 0.0, None
 
     monkeypatch.setattr(render, "load_sites", lambda **k: sites)
     monkeypatch.setattr(render, "run_actor", lambda *a, **k: ActorRun(

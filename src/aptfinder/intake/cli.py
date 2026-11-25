@@ -7,7 +7,7 @@
   aptf-intake discover-sites [--limit 5] [--dry-run]   # find websites of buildings in a station walk zone
   aptf-intake promote-sites [--limit 100] [--retry-failed] [--dry-run]
   aptf-intake render [--site ID] [--retry-failed] [--dry-run]   # every site in the list by default
-  aptf-intake render-restriction [--site ID] [--dry-run]   # who may rent, re-read from rendered pages (no Apify)
+  aptf-intake render-restriction [--site ID] [--parking] [--dry-run]   # who may rent (or parking), re-read from rendered pages (no Apify)
   aptf-intake prometheus [--site ID] [--dry-run]   # Prometheus sites: one availability-JSON request each, free
   aptf-intake precheck [--site ID] [--dry-run]   # free: DNS + one plain GET per site; records dead / challenge
   aptf-intake extract <text source>|all [--workers 8] [--dry-run]   # Haiku reads each listing's whole entry
@@ -149,6 +149,7 @@ def main(argv: list[str] | None = None) -> None:
     rr.add_argument("--max-usd", type=float, default=1.0, help="cap on Claude spend")
     rr.add_argument("--workers", type=int, default=4, help="parallel Claude calls")
     rr.add_argument("--dry-run", action="store_true")
+    rr.add_argument("--parking", action="store_true", help="read the community's parking instead (extra.page_parking)")
     pm = sub.add_parser("prometheus", help="Prometheus own sites: units and prices from Prometheus's availability "
                                            "JSON, one direct request per site (no Apify, no page scraping)")
     pm.add_argument("--site", action="append", default=[], help="site id (repeatable); default every Prometheus site")
@@ -199,7 +200,7 @@ def main(argv: list[str] | None = None) -> None:
         from .render import reread_restrictions
 
         res = reread_restrictions(conn, sites=args.site or None, model=args.model, max_usd=args.max_usd,
-                                  workers=args.workers, dry_run=args.dry_run)
+                                  workers=args.workers, dry_run=args.dry_run, parking=args.parking)
         print(json.dumps(res, indent=1, default=str))
         if res.get("error"):
             raise SystemExit(f"BLOCKED: render-restriction {res['error']} (sites read before it are stored)")

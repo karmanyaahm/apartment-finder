@@ -93,12 +93,24 @@ def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> dic
     # render): a limit any listing or site_info row states ('PBV - Belovida (VASH)') holds for every listing at the
     # place; otherwise each listing's own reading ('none'), or None when it has not been read (unknown: an `equals
     # restriction none` rule says needs_check). Your answer in Verify (annotation place / restriction) beats both.
+    # parking: a row's own reading (extract's, then its site's pages) first, field by field; what it leaves unknown
+    # comes from a building statement at the place (an own site's pages, a building-level source: `parking_pool`)
     pooled: dict[str, set[str]] = {}
     rx_of: dict[tuple[str, str], dict[str, Any]] = {}
     limits: dict[str, list[dict[str, Any]]] = {}
+    pk_of: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    pk_place: dict[str, list[dict[str, Any]]] = {}
     for r in conn.execute("SELECT source, source_id, place_key, amenities, "
                           "json_extract(data, '$.extra.extracted.restriction') AS rx, "
-                          "json_extract(data, '$.extra.page_restriction') AS prx FROM listings"):
+                          "json_extract(data, '$.extra.page_restriction') AS prx, "
+                          "json_extract(data, '$.extra.extracted.parking') AS pkx, "
+                          "json_extract(data, '$.extra.page_parking') AS ppk FROM listings"):
+        own_pk, building = row_parking(json.loads(r["pkx"]) if r["pkx"] else None,
+                                       json.loads(r["ppk"]) if r["ppk"] else None, r["source"], r["source_id"])
+        if own_pk:
+            pk_of[(r["source"], r["source_id"])] = own_pk
+        if building and r["place_key"]:
+            pk_place.setdefault(r["place_key"], []).extend(building)
         pk, am = r["place_key"], r["amenities"]
         if pk and am and am != "[]":
             pooled.setdefault(pk, set()).update(json.loads(am) if isinstance(am, str) else am)
@@ -117,6 +129,8 @@ def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None) -> dic
         rx = annotated_restriction(anns.get(r["place_key"] or "", {})) or rx
         r["restriction"] = rx.get("value")
         r["restriction_evidence"] = restriction_note(rx)
+        r.update(parking_fields(pk_of.get((r["source"], r["source_id"]), []) +
+                                sorted(pk_place.get(r["place_key"] or "", []), key=lambda x: not x["page"])))
     return {"listings": listings, "trips": trips, "anns": anns, "low": low, "own": own}
 
 
@@ -127,6 +141,71 @@ def row_restriction(extracted: dict[str, Any] | None, page: dict[str, Any] | Non
     got = [({**x, "source": src}) for x, src in ((extracted, source), (page, f"{source} page"))
            if isinstance(x, dict) and x.get("value")]
     return next((x for x in got if x["value"] != "none"), got[0] if got else None)
+
+
+# sources whose text describes a whole building or community, so their parking holds for every unit there; a
+# Craigslist, Airbnb, Zumper or PadMapper post (or a Zillow unit) speaks for its own home only
+BUILDING_SOURCES = {"apartments_com", "rentcafe", "direct", "google_places", "portfolio"}
+PARKING_FIELDS = ("parking_included", "parking_spots", "parking_usd_month")
+
+
+def row_parking(extracted: dict[str, Any] | None, page: dict[str, Any] | None, source: str, source_id: str
+                ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """(this row's parking readings, those that pool to its place). Each reading is the checked `parking` object
+    plus `source` ('direct page' for an own site's pages) and `page`. A page reading always pools (a community's
+    site); extract's reading pools when the source describes a building (`BUILDING_SOURCES`, Zillow building rows
+    '<zpid>:2bd')."""
+    got = [{**x, "source": src, "page": is_page} for x, src, is_page in
+           ((extracted, source, False), (page, f"{source} page", True)) if isinstance(x, dict) and x.get("evidence")]
+    building = source in BUILDING_SOURCES or (source == "zillow" and ":" in source_id)
+    return got, [x for x in got if x["page"] or building]
+
+
+def parking_values(p: dict[str, Any]) -> dict[str, Any]:
+    """The rule fields of one parking reading. included: True when a space comes with the rent at no extra charge,
+    False when the text says no parking, street only or paid, None when the cost is not stated. spots: the stated
+    number (0 for no parking). usd_month: 0 when included, the price when paid, else None."""
+    if p.get("offered") == "no":
+        return {"parking_included": False, "parking_spots": p.get("spots") or 0, "parking_usd_month": None}
+    if p.get("offered") != "yes":
+        return dict.fromkeys(PARKING_FIELDS)
+    cost = p.get("cost")
+    return {"parking_included": True if cost == "included" else False if cost == "paid" else None,
+            "parking_spots": p.get("spots"),
+            "parking_usd_month": 0 if cost == "included" else p.get("usd_month") if cost == "paid" else None}
+
+
+def parking_note(p: dict[str, Any]) -> str:
+    """'"Garage parking $75/month" (direct page)': the quotes and their source, for reasons and hovers."""
+    return f'"{" | ".join(p.get("evidence") or [])}" ({p.get("source")})'
+
+
+def parking_fields(readings: list[dict[str, Any]]) -> dict[str, Any]:
+    """Each parking rule field from the first reading that knows it (the row's own first, then its place's
+    building statements), with that reading's quote as `<field>_evidence`; None (unknown) when none does."""
+    out: dict[str, Any] = dict.fromkeys(PARKING_FIELDS)
+    for p in readings:
+        for k, v in parking_values(p).items():
+            if out[k] is None and v is not None:
+                out[k], out[f"{k}_evidence"] = v, parking_note(p)
+    return out
+
+
+def place_parking(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The place's parking for its card: the most informative reading of any listing there (cost stated, then a
+    number of spaces, then offered yes / no; an own site's pages first on a tie), or None when none says anything.
+    `rows`: listings with `data` parsed."""
+    best, rank = None, None
+    for x in rows:
+        extra = (x.get("data") or {}).get("extra") or {}
+        mine, _ = row_parking((extra.get("extracted") or {}).get("parking"), extra.get("page_parking"),
+                              x["source"], x["source_id"])
+        for p in mine:
+            r = (p.get("cost") is not None or p.get("offered") == "no", p.get("spots") is not None,
+                 p.get("offered") is not None, p["page"])
+            if rank is None or r > rank:
+                best, rank = p, r
+    return best
 
 
 def annotated_restriction(anns: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
@@ -252,4 +331,4 @@ def routing_candidates(conn: sqlite3.Connection, cfg: GoalsConfig | None = None,
     return out
 
 
-__all__ = ["evaluate_all", "evaluate_goal", "goal_inputs", "place_restriction", "routing_candidates", "amenity_flags", "AMENITY_FLAGS", "best_trips", "nearest_by_set", "PASS", "FAIL", "CHECK"]
+__all__ = ["evaluate_all", "evaluate_goal", "goal_inputs", "place_restriction", "place_parking", "routing_candidates", "amenity_flags", "AMENITY_FLAGS", "best_trips", "nearest_by_set", "PASS", "FAIL", "CHECK"]
