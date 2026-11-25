@@ -344,10 +344,15 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
         cmds.append(f"{INTAKE} run direct")
     if sc["stale"]:
         cmds.append(f"{INTAKE} run direct --reload")
-    if any((r["render"] or {}).get("retry") for r in site_rows):
+    # Prometheus sites are read from their availability JSON (`aptf-intake prometheus`), never rendered
+    rend = [r for r in site_rows if r["platform"] != "prometheus"]
+    if any((r["render"] or {}).get("retry") for r in rend):
         cmds.append(f"{INTAKE} render --retry-failed")
-    if any(not r["render"] or r["render"].get("stale") for r in site_rows):
+    if any(not r["render"] or r["render"].get("stale") for r in rend):
         cmds.append(f"{INTAKE} render")
+    if any(not r["render"] or r["render"].get("retry") or r["render"].get("stale") for r in site_rows
+           if r["platform"] == "prometheus"):
+        cmds.append(f"{INTAKE} prometheus")
     rc = Counter((r["render"] or {"outcome": "never"})["outcome"] for r in site_rows)
     stage("sites", "Own-site scrapes", _roll([r["state"] for r in site_rows]),
           f"{sc['done']} fresh, {sc['stale']} stale, {sc['todo']} never scraped "

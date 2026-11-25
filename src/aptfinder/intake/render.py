@@ -42,7 +42,8 @@ from .discover import SECRET_ENV, Blocker
 from .lease import _avail
 
 ACTOR = "apify/playwright-scraper"
-SKIP_PLATFORMS = {"avalon"}  # exact units from the page data already
+SKIP_PLATFORMS = {"avalon",  # exact units from the page data already
+                  "prometheus"}  # read from Prometheus's availability JSON instead (intake/prometheus.py)
 
 MAX_UNIT_PAGES = 5  # per site: per-plan "view apartments" pages followed (about $0.003 a page)
 PAGES_PER_SITE = 2 + MAX_UNIT_PAGES  # start page, its floor-plans page, the plans' unit pages

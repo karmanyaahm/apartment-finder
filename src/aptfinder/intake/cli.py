@@ -7,6 +7,7 @@
   aptf-intake discover-sites [--limit 5] [--dry-run]   # find websites of buildings in a station walk zone
   aptf-intake promote-sites [--limit 100] [--retry-failed] [--dry-run]
   aptf-intake render [--site ID] [--retry-failed] [--dry-run]   # every site in the list by default
+  aptf-intake prometheus [--site ID] [--dry-run]   # Prometheus sites: one availability-JSON request each, free
   aptf-intake extract <text source>|all [--workers 8] [--dry-run]   # Haiku reads each listing's whole entry
   aptf-intake zillow-detail --max-usd 1.0 [--batch 150] [--limit N] [--dry-run]   # Zillow detail pages (raw only)
   (`run` of a text source then reads its rows automatically, `--no-extract` skips; `reparse` applies cached readings)
@@ -131,6 +132,10 @@ def main(argv: list[str] | None = None) -> None:
     rd.add_argument("--residential", action="store_true", help="through Apify's residential proxy (sites that block "
                                                               "the datacenter one; billed by traffic, images skipped)")
     rd.add_argument("--dry-run", action="store_true")
+    pm = sub.add_parser("prometheus", help="Prometheus own sites: units and prices from Prometheus's availability "
+                                           "JSON, one direct request per site (no Apify, no page scraping)")
+    pm.add_argument("--site", action="append", default=[], help="site id (repeatable); default every Prometheus site")
+    pm.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
 
     conn = connect(args.db)
@@ -160,6 +165,12 @@ def main(argv: list[str] | None = None) -> None:
         except Blocker as e:
             raise SystemExit(f"BLOCKED: {e}")
         print(json.dumps(res, indent=1, default=str))
+        return
+
+    if args.cmd == "prometheus":
+        from .prometheus import read
+
+        print(json.dumps(read(conn, sites=args.site or None, dry_run=args.dry_run), indent=1, default=str))
         return
 
     if args.cmd == "zillow-detail":
