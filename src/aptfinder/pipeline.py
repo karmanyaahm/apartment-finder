@@ -16,7 +16,7 @@ from .config import CHECK_LABEL, CHECK_RETRY, check_outcome, load_areas, load_go
 from .verify import is_named_building
 
 STALE_DAYS = 7
-TEXT_SOURCES = ("craigslist", "furnishedfinder")  # listings whose text Haiku reads (`extract`)
+from .intake.extract import HAS_TEXT_SQL, READ_SQL, TEXT_SOURCES  # listings whose entry Haiku reads
 WEB_STATES = {  # website state -> label, in display order
     "priced": "own site, priced units",
     "scraped": "own site scraped, no prices",
@@ -262,20 +262,21 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
           + (["nix run .#identity -- duplicates"] if dups else []),
           duplicates=dups[:20])
 
-    # 4. text extraction (Haiku reads listing text); mirrors extract._pending (active, text of 40+ chars)
+    # 4. text reading (Haiku reads each listing's whole entry); mirrors extract._pending (active, has text, read
+    # under the current schema)
     ex_rows, ex_states = [], []
     for s in TEXT_SOURCES:
         r = conn.execute(
-            "SELECT COUNT(*) AS n, SUM(json_extract(data, '$.extra.extracted') IS NOT NULL) AS read FROM listings "
-            "WHERE source = ? AND active = 1 AND length(trim(COALESCE(json_extract(data, '$.description'), ''))) >= 40",
-            (s,)).fetchone()
+            f"SELECT COUNT(*) AS n, SUM(json_extract(data, '$.extra.extracted') IS NOT NULL AND {READ_SQL}) AS read "
+            f"FROM listings WHERE source = ? AND active = 1 AND {HAS_TEXT_SQL}", (s,)).fetchone()
         n_, read = r["n"] or 0, r["read"] or 0
         st = "done" if n_ == read else ("todo" if not read else "partial")
         ex_states.append(st)
         ex_rows.append({"source": s, "listings": n_, "read": read, "state": st, **_run_info(runs, "extract", s)})
-    stage("extract", "Text extraction (Haiku)", _roll(ex_states),
-          "; ".join(f"{r['source']} {r['read']}/{r['listings']} read" for r in ex_rows),
-          [f"{INTAKE} extract {r['source']}" for r in ex_rows if r["state"] != "done"],
+    ex_cmds = [f"{INTAKE} extract {r['source']}" for r in ex_rows if r["state"] != "done"]
+    stage("extract", "Text reading (Haiku)", _roll(ex_states),
+          "; ".join(f"{r['source']} {r['read']} read, {r['listings'] - r['read']} to read" for r in ex_rows),
+          ([f"{INTAKE} extract all"] if len(ex_cmds) > 1 else []) + ex_cmds,
           rows=ex_rows, cost=round(sum(r["cost"] for r in ex_rows), 2))
 
     # 5. website finding, over named buildings (verify.is_named_building)

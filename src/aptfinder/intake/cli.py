@@ -7,6 +7,8 @@
   aptf-intake discover-sites [--limit 5] [--dry-run]   # find websites of buildings in a station walk zone
   aptf-intake promote-sites [--limit 100] [--retry-failed] [--dry-run]
   aptf-intake render [--site ID] [--retry-failed] [--dry-run]   # every site in the list by default
+  aptf-intake extract <text source>|all [--workers 8] [--dry-run]   # Haiku reads each listing's whole entry
+  (`run` of a text source then reads its rows automatically, `--no-extract` skips; `reparse` applies cached readings)
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from ..config import load_areas
 from ..store import connect, init_db
 from . import ADAPTERS
 from .base import coverage, done, reparse, run_source
+from .extract import TEXT_SOURCES
 
 SHORT = {"direct": "direct", "zillow": "zillow", "apartments_com": "apts.com", "craigslist": "craigsl", "furnishedfinder": "ff",
          "airbnb": "airbnb", "google_places": "g.places", "zumper": "zumper", "padmapper": "padmapper",
@@ -68,6 +71,9 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--max-items", type=int)
     r.add_argument("--max-usd", type=float)
     r.add_argument("--dry-run", action="store_true", help="show which areas would run, spend nothing")
+    r.add_argument("--no-extract", action="store_true", help="do not read the new rows' text with Haiku afterwards")
+    r.add_argument("--workers", type=int, default=8, help="parallel Claude calls for the text reading")
+    r.add_argument("--extract-max-usd", type=float, default=1.0, help="cap on Claude spend for the text reading")
     rp = sub.add_parser("reparse", help="re-ingest a saved raw file with the current parser (no new scrape)")
     rp.add_argument("source", choices=sorted(ADAPTERS))
     rp.add_argument("raw_file")
@@ -91,10 +97,11 @@ def main(argv: list[str] | None = None) -> None:
                                                           "cheap fetch); one page per site")
     ps.add_argument("--residential", action="store_true", help="--browser through Apify's residential proxy")
     ps.add_argument("--dry-run", action="store_true")
-    ex = sub.add_parser("extract", help="read facts from listing text with Claude Haiku (address, name, website, "
-                                        "furnished, private bath, minimum stay, utilities)")
-    ex.add_argument("source", choices=["craigslist", "furnishedfinder"])
-    ex.add_argument("--limit", type=int, default=1000)
+    ex = sub.add_parser("extract", help="read each listing's whole entry with Claude Haiku (address, name, website, "
+                                        "amenities, laundry, parking, pets, fees, furnished, private bath, ...)")
+    ex.add_argument("source", choices=[*TEXT_SOURCES, "all"])
+    ex.add_argument("--limit", type=int, default=100000)
+    ex.add_argument("--workers", type=int, default=8, help="parallel Claude calls")
     ex.add_argument("--batch", type=int, default=10, help="listings per Claude call")
     ex.add_argument("--model", default="haiku")
     ex.add_argument("--max-usd", type=float, default=1.0, help="cap on Claude spend for this command")
@@ -119,7 +126,13 @@ def main(argv: list[str] | None = None) -> None:
         print_coverage(conn)
         return
     if args.cmd == "reparse":
-        print(json.dumps(reparse(conn, ADAPTERS[args.source], args.raw_file, args.covers), indent=1))
+        res = reparse(conn, ADAPTERS[args.source], args.raw_file, args.covers)
+        print(json.dumps(res, indent=1))
+        from .extract import after_intake  # the new rows hide earlier readings: apply cached ones (free)
+
+        ex = after_intake(conn, args.source, res["observations"], cached_only=True)
+        if ex:
+            print(json.dumps({"extract (cached)": ex}, indent=1, default=str))
         return
 
     if args.cmd == "render":
@@ -135,16 +148,29 @@ def main(argv: list[str] | None = None) -> None:
         print(json.dumps(res, indent=1, default=str))
         return
 
-    if args.cmd in ("promote-sites", "extract"):
-        from .discover import Blocker, promote
+    if args.cmd == "extract":
+        from .discover import Blocker
         from .extract import extract
 
+        left = args.max_usd
+        for src in (TEXT_SOURCES if args.source == "all" else [args.source]):
+            try:
+                res = extract(conn, src, limit=args.limit, batch=args.batch, model=args.model, max_usd=left,
+                              workers=args.workers, dry_run=args.dry_run, reread=args.reread)
+            except Blocker as e:
+                raise SystemExit(f"BLOCKED: extract {e}")
+            print(json.dumps(res, indent=1, default=str), flush=True)
+            left -= res.get("claude_usd", 0)
+            if left <= 0:
+                raise SystemExit(f"stopped: --max-usd {args.max_usd} spent; run again to continue")
+        return
+
+    if args.cmd == "promote-sites":
+        from .discover import Blocker, promote
+
         try:
-            res = (promote(conn, limit=args.limit, dry_run=args.dry_run, fetch=not args.no_fetch,
-                           retry_failed=args.retry_failed, browser=args.browser, residential=args.residential)
-                   if args.cmd == "promote-sites" else
-                   extract(conn, args.source, limit=args.limit, batch=args.batch, model=args.model,
-                           max_usd=args.max_usd, dry_run=args.dry_run, reread=args.reread))
+            res = promote(conn, limit=args.limit, dry_run=args.dry_run, fetch=not args.no_fetch,
+                          retry_failed=args.retry_failed, browser=args.browser, residential=args.residential)
         except Blocker as e:
             raise SystemExit(f"BLOCKED: {e}")
         print(json.dumps(res, indent=1, default=str))
@@ -177,6 +203,17 @@ def main(argv: list[str] | None = None) -> None:
                      indent=1))
     if res.warnings:
         print("\nWARNINGS (check before relying on this run):\n  " + "\n  ".join(res.warnings))
+    # core pipeline: the run's rows supersede earlier readings, so read them (unchanged text is cached, free)
+    from .discover import Blocker
+    from .extract import after_intake
+
+    try:
+        ex = after_intake(conn, args.source, res.counts.get("observations", 0), skip=args.no_extract,
+                          workers=args.workers, max_usd=args.extract_max_usd)
+    except Blocker as e:
+        raise SystemExit(f"BLOCKED: extract {e} (the intake run above is stored)")
+    if ex:
+        print(json.dumps({"extract": ex}, indent=1, default=str))
 
 
 if __name__ == "__main__":
