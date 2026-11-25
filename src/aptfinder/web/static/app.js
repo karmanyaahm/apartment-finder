@@ -1271,7 +1271,7 @@ async function renderVerify() {
   if (S.verifyMode === "own") return renderOwnSites();
   if (S.verifyMode === "dup") return renderDuplicates();
   const body = $("#verify-body");
-  const d = await vLoad(`api/verify/next?seed=${S.verifySeed}&skip=${S.verifySkip}&conflicts=false`);
+  const d = await vLoad(`api/verify/next?seed=${S.verifySeed}&skip=${S.verifySkip}`);
   if (!d) return;
   if (d.done) { body.innerHTML = "<h2>Queue empty</h2><p>Nothing left to check. 🎉</p>"; return; }
   const it = d.item;

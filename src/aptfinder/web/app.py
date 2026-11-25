@@ -735,17 +735,16 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 "by_reason": dict(Counter(r["kind"] for e in items for r in e["reasons"]))}
 
     @app.get("/api/verify/next")
-    def verify_next(seed: int = 0, skip: int = 0, conflicts: bool = True) -> dict[str, Any]:
-        """One item at a time: conflicts (unless conflicts=false: the dashboard pages them with /batch), then the
-        sample. Buildings whose own site gave nothing usable are a list of their own (/api/verify/own_sites)."""
+    def verify_next(seed: int = 0, skip: int = 0) -> dict[str, Any]:
+        """The sample, one item at a time. Conflicts are paged by /api/verify/batch, possible duplicates and
+        buildings whose own site gave nothing usable are lists of their own (/api/verify/duplicates, /own_sites)."""
         with lock:
-            items = ((cached("all_conflicts", lambda: verify.all_conflicts(conn)) if conflicts else [])
-                     + verify.sample_queue(conn, seed))
+            items = verify.sample_queue(conn, seed)
         if skip >= len(items):
             return {"done": True, "remaining": 0}
         item = items[skip]
         out: dict[str, Any] = {"done": False, "remaining": len(items), "item": item}
-        if item["kind"] in ("conflict", "listing"):
+        if item["kind"] == "listing":
             out.update(_listing_detail(item))
         else:
             t = q("SELECT * FROM trips WHERE id = ?", (item["trip_id"],))[0]

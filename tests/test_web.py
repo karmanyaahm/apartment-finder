@@ -51,9 +51,9 @@ def test_rating_appends_annotation_and_survives_rederive(client):
     assert conn.execute("SELECT COUNT(*) FROM annotations").fetchone()[0] == 1
 
 
-def test_verify_flow_conflict_first_and_override(client):
+def test_verify_conflict_override(client):
     c, _ = client
-    d = c.get("/api/verify/next").json()
+    (d,) = c.get("/api/verify/batch?kind=conflict").json()["items"]
     assert d["item"]["kind"] == "conflict"
     assert set(d["fields"]) == {"price", "baths", "available_from"}
     apt = next(o for o in d["observations"] if o["source"] == "apartments_com")
@@ -91,8 +91,8 @@ def test_verify_batch_of_conflicts(client):
     assert c.get("/api/verify/batch?kind=sample").status_code == 400
     q = c.get("/api/status").json()["queues"]
     assert (q["conflict"], q["conflict_pending"]) == (1, 0)
-    # the one-at-a-time flow without conflicts starts at the rest of the queue
-    assert c.get("/api/verify/next?conflicts=false").json()["item"]["kind"] != "conflict"
+    # the one-at-a-time flow is the sample only: conflicts are paged here
+    assert c.get("/api/verify/next").json()["item"]["kind"] != "conflict"
 
 
 def test_trip_check(client):
