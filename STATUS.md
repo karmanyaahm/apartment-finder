@@ -1,5 +1,7 @@
 # Apartment finder: status, 2026-11-24
 
+> Historical snapshot of 2026-11-24, kept as written. Current state: [README.md](README.md) and [design.md](design.md) ('Still open' and the decision log).
+
 `design.md` is the full reference: architecture, schema and a dated decision log. This page is the short version: how it works, what changed today, what's blocked, and what's next.
 
 Dashboard (real data): http://127.0.0.1:8766
