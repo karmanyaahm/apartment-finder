@@ -46,14 +46,16 @@ from ..store.models import ObservationData
 from .discover import SECRET_ENV, Blocker, clean_url
 
 TEXT_SOURCES = ("craigslist", "furnishedfinder", "airbnb", "apartments_com", "zillow", "zumper", "padmapper")
-RAW_SOURCES = ("apartments_com", "zumper", "zillow")  # raw item holds text the parser does not store
+RAW_SOURCES = ("apartments_com", "zumper")  # raw item holds text the parser does not store
 VERSION = 2  # schema version: answers and 'read' marks of an older schema are read again
 # a listing has text to read: a description or an amenity list as stored (shared with the Pipeline panel)
 HAS_TEXT_SQL = ("(length(trim(COALESCE(json_extract(data, '$.description'), ''))) >= 40 "
-                "OR json_array_length(COALESCE(json_extract(data, '$.amenities'), '[]')) > 0)")
+                "OR json_array_length(COALESCE(json_extract(data, '$.amenities'), '[]')) > 0 "
+                "OR json_extract(data, '$.extra.required_monthly_fees') IS NOT NULL)")
 READ_SQL = f"COALESCE(json_extract(data, '$.extra.extracted.v'), 1) >= {VERSION}"
 UNREAD_SQL = f"(json_extract(data, '$.extra.extracted') IS NULL OR NOT {READ_SQL})"
 MAX_TEXT = 5000
+TEXT_EXTRAS = ("pets", "laundry", "housing_type", "required_monthly_fees")  # source extras sent as text
 CACHE = "extract_cache.json"
 SYSTEM = ("You extract facts from rental listing text. Use only what the text states; never guess or infer from "
           "typical listings, and never infer that something is absent because it is not mentioned. Answer null for "
@@ -212,15 +214,6 @@ def raw_lines(source: str, item: dict[str, Any]) -> list[str]:
                ("Parking", item.get("detail_entity_data_parking_data")),
                ("Specials", item.get("detail_entity_data_specials")),
                ("Unit features", item.get("amenity_tags")), ("Building features", item.get("building_amenity_tags"))]
-    elif source == "zillow":
-        p = (item.get("rawData") or {}).get("property") or {}
-        p = json.loads(p) if isinstance(p, str) else p
-        rec = p.get("listCardRecommendation") or {}
-        rental = p.get("rental") or {}
-        lo, hi = rental.get("totalRequiredMonthlyMinFee"), rental.get("totalRequiredMonthlyMaxFee")
-        out = [("Highlights", [r.get("displayString") for r in rec.get("flexFieldRecommendations") or []]
-                + [(rec.get("zovInsight") or {}).get("displayString")]),
-               ("Required monthly fees", (f"${lo}" if lo == hi or not hi else f"${lo} to ${hi}") if lo else None)]
     return [f"{k}: {s}" for k, v in out if (s := _flat(v))]
 
 
@@ -232,7 +225,7 @@ def entry_text(data: dict[str, Any], raw: list[str] | None = None) -> str:
              f"Name: {data['property_name']}" if data.get("property_name") else "",
              (data.get("description") or "").strip()[:3000],
              f"Amenities: {'; '.join(am)}" if am else "",
-             *(f"{k.replace('_', ' ').capitalize()}: {_flat(extra[k])}" for k in ("pets", "laundry", "housing_type")
+             *(f"{k.replace('_', ' ').capitalize()}: {_flat(extra[k])}" for k in TEXT_EXTRAS
                if _flat(extra.get(k))),
              *(raw or [])]
     seen, out = set(), []

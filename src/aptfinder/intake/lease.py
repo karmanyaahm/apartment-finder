@@ -81,6 +81,27 @@ ZILLOW_KIND = {"apartment": "apartment", "condo": "apartment", "singlefamily": "
                "townhouse": "townhome", "townhome": "townhome", "multifamily": "apartment"}
 
 
+# The search card's `flexFieldRecommendations` are mostly badges ('Apply instantly', '13 days ago', 'Waitlisted',
+# '3D Tour', '2 available units', '$1,000 Off'); only `homeInsight` ('Swimming pool', 'Designer finishes') and the
+# card's `zovInsight` ('Clubhouse', 'Fitness center') name features. Allowlisted, so a new badge type never counts.
+AMENITY_TYPES = ("homeInsight",)
+
+
+def zillow_amenities(p: dict[str, Any]) -> list[str]:
+    rec = p.get("listCardRecommendation") or {}
+    out = [r.get("displayString") for r in rec.get("flexFieldRecommendations") or []
+           if r.get("contentType") in AMENITY_TYPES and r.get("displayString")]
+    zov = (rec.get("zovInsight") or {}).get("displayString")
+    return out + ([zov] if zov and zov not in out else [])
+
+
+def zillow_fees(p: dict[str, Any]) -> str | None:
+    """The card's required monthly fees ('$100', '$50 to $75'), a line the text reading reads."""
+    rental = p.get("rental") or {}
+    lo, hi = rental.get("totalRequiredMonthlyMinFee"), rental.get("totalRequiredMonthlyMaxFee")
+    return (f"${lo}" if lo == hi or not hi else f"${lo} to ${hi}") if lo else None
+
+
 def zillow_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] | None:
     p = (item.get("rawData") or {}).get("property") or {}
     zpid = p.get("zpid")
@@ -93,13 +114,13 @@ def zillow_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] | No
     price = price.get("value") if isinstance(price, dict) else price
     price = price or (p.get("hdpView") or {}).get("price")
     kind = ZILLOW_KIND.get(str(p.get("propertyType", "")).lower().replace(" ", ""), "apartment")
-    amen = [r.get("displayString") for r in ((p.get("listCardRecommendation") or {})
-                                              .get("flexFieldRecommendations") or []) if r.get("displayString")]
+    amen = zillow_amenities(p)
     base = dict(city=a.get("city"), zip=a.get("zipcode"), lat=loc.get("latitude") or item.get("latitude"),
                 lon=loc.get("longitude") or item.get("longitude"), kind=kind, term="long",
                 property_name=p.get("title"), amenities=amen or None)
     extra = {"zpid": zpid, "group_type": p.get("groupType"), "days_on_zillow": p.get("daysOnZillow"),
              "rent_zestimate": item.get("rentZestimate"), "special_offer": item.get("specialOffer"),
+             **({"required_monthly_fees": fees} if (fees := zillow_fees(p)) else {}),
              # the whole gallery (up to 24), not just the cover photo
              "images": ([u for u in ((p.get("media") or {}).get("allPropertyPhotos") or {}).get("highResolution") or []
                          if u][:24]

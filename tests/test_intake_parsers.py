@@ -221,3 +221,31 @@ def test_zillow_unit_floor_plan_drawing():
     (p,) = ADAPTERS["zillow"].parse(item, {})
     assert p.data.extra["floorplan_image"] == \
         "https://www.zillowstatic.com/floor_map/b3ae4c27-8976-428b-8b44-accd62cf4a59/hero.png"
+
+
+def test_zillow_amenities_skip_card_badges():
+    # the search card's flex fields as stored in the raw files: badges, a time stamp, one real feature
+    item = {"rawData": {"property": {"zpid": 8, "address": {"streetAddress": "1 A St", "city": "Mountain View",
+            "state": "CA", "zipcode": "94041"}, "bedrooms": 1, "bathrooms": 1, "price": 3000,
+            "listCardRecommendation": {"flexFieldRecommendations": [
+                {"contentType": "frZillowApplication", "displayString": "Apply instantly"},
+                {"contentType": "timeOnInfo", "displayString": "227 days ago"},
+                {"contentType": "frWaitlisted", "displayString": "Waitlisted"},
+                {"contentType": "homeInsight", "displayString": "Swimming pool"}],
+                "zovInsight": {"displayString": "Clubhouse"}}}}}
+    assert ADAPTERS["zillow"].parse(item, {})[0].data.amenities == ["Swimming pool", "Clubhouse"]
+    item["rawData"]["property"]["listCardRecommendation"]["flexFieldRecommendations"] = [
+        {"contentType": "frZillowApplication", "displayString": "Apply instantly"}]
+    del item["rawData"]["property"]["listCardRecommendation"]["zovInsight"]
+    assert ADAPTERS["zillow"].parse(item, {})[0].data.amenities is None  # badges only: unknown, not a list
+
+
+def test_zillow_required_fees_are_text_to_read():
+    from aptfinder.intake.extract import entry_text
+
+    item = {"rawData": {"property": {"zpid": 9, "address": {"streetAddress": "1 A St", "city": "Mountain View",
+            "state": "CA", "zipcode": "94041"}, "bedrooms": 1, "bathrooms": 1, "price": 3000,
+            "rental": {"totalRequiredMonthlyMinFee": 40, "totalRequiredMonthlyMaxFee": 40}}}}
+    (p,) = ADAPTERS["zillow"].parse(item, {})
+    assert p.data.extra["required_monthly_fees"] == "$40"
+    assert entry_text(p.data.model_dump()) == "Required monthly fees: $40"
