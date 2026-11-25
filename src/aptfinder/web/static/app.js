@@ -310,6 +310,7 @@ function ruleTemplates() {
     ["lease term", { type: "equals", field: "term", value: "long" }],
     ["furnished", { type: "equals", field: "furnished", value: true }],
     ["private bath", { type: "equals", field: "private_bath", value: true }],
+    ["no restrictions (who may rent)", { type: "equals", field: "restriction", value: "none" }],
     ["available for dates", { type: "dates_cover", start: new Date().toISOString().slice(0, 10), end: new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10) }],
     ["field known", { type: "known", field: "sqft" }],
     ["net commute (all commute rules)", { type: "net_commute", agg: $("#agg").value || "total", max: 90 }],
@@ -1039,7 +1040,7 @@ async function vLoad(path) {
   } finally { if (my === V.seq) body.classList.remove("loading"); }
 }
 // a move to another screen (asked for): wait for answers in flight, fetch it, start at its top, update the header counts
-async function vPage(go) { await vSettle(); await go(); $("#verify").scrollTop = 0; loadStatus().catch(() => {}); }
+async function vPage(go) { await vSettle(); await go(); $("#verify").scrollTop = 0; loadQueueStatus().catch(() => {}); }
 async function openVerify() {
   const ov = $("#verify");
   ov.classList.remove("hidden");
@@ -1053,7 +1054,7 @@ function closeVerify() {
   if (ov.classList.contains("hidden")) return;
   V.scroll = ov.scrollTop;
   ov.classList.add("hidden");
-  if (V.dirty) { V.dirty = false; loadPlaces().catch(() => {}); loadStatus().catch(() => {}); }  // the list and map pick up the answers
+  if (V.dirty) { V.dirty = false; loadPlaces().catch(() => {}); loadQueueStatus().catch(() => {}); }  // the list and map pick up the answers
 }
 // an inline error right after an item's buttons ("" clears it)
 function vErr(after, msg) {
@@ -1162,7 +1163,7 @@ async function renderConflicts() {
       await post("api/annotations", { entity_type: "place", entity_key: pk, attribute: "restriction", comment: value });
       $$("[data-rx]", body).filter((x) => x.dataset.rx.split("|")[0] === pk).forEach((x) => x.closest(".vconf").classList.add("gone"));
       b.parentElement.replaceChildren(Object.assign(document.createElement("b"), { textContent: `marked ${value === "income" ? "income-restricted" : "restricted (other)"}: this place's restriction is now ${value}` }));
-      loadStatus();
+      loadQueueStatus();
     } catch (err) { toast("Not saved: " + err.message, 6000); }
   }));
   $$(".vbtns", body).forEach(wireVbtns);
@@ -1174,7 +1175,7 @@ async function renderConflicts() {
       await post("api/listings/gone", { source, source_id: rest.join("|"), gone: true, queue: "conflict" });
       b.closest(".vconf").classList.add("gone");
       b.replaceWith(Object.assign(document.createElement("b"), { textContent: "marked no longer for rent (undo in the place drawer)" }));
-      loadStatus();
+      loadQueueStatus();
     } catch (err) { toast("Failed: " + err.message, 6000); }
   }));
   $("#v-goal").addEventListener("change", (ev) => { lsSet("aptf.conflictGoal", ev.target.value); S.conflictSkip = 0; renderConflicts(); });
@@ -1385,7 +1386,7 @@ async function openPipeline() {
   body.innerHTML = '<p class="muted">Loading…</p>';
   let d;
   try { d = await api("api/pipeline"); } catch (e) { body.innerHTML = `<p class="reason fail">Failed: ${esc(e.message)}</p>`; return; }
-  await loadStatus().catch(() => {});
+  await loadQueueStatus().catch(() => {});
   const stages = `<p class="small">${apifyCredit(d.apify)}</p><div class="scroll-x"><table class="stages">
     <tr><th>stage</th><th>state</th><th>where it stands</th><th>last run</th><th>cost</th><th>to run the rest</th></tr>
     ${d.stages.map((s) => `<tr><td><b>${esc(s.label)}</b></td><td>${stChip(s.state)}</td><td>${esc(s.summary)}</td>
@@ -1504,7 +1505,7 @@ function statusHtml(d) {
     route 0; KNN range: leave-one-out error of ranges as wide; estimate only: measured estimate vs Google). Undecided: places
     whose goal status waits only on this commute. Done = 0 undecided and p99 ≤ ${d.done_p99} min.</p>`;
 }
-async function loadStatus() {
+async function loadKnnStatus() {
   const box = $("#k-status");
   if (!box) return;
   box.textContent = "checking what still needs a sample…";
@@ -1643,7 +1644,7 @@ async function drawKnnGrid() {
     }).join("")}</tr>`).join("")}</table><p class="muted small">${esc(bill)}</p>`;
   $$("#k-grid input[data-cell]").forEach((cb) => cb.addEventListener("change", async () => {
     const cells = $$("#k-grid input[data-cell]:checked").map((x) => cellParts(x.dataset.cell));
-    try { await post("api/knn/cells", { cells }); toast(`${cells.length} cell${cells.length === 1 ? "" : "s"} saved`); loadAccuracy(); loadStatus(); await loadPlaces(); }
+    try { await post("api/knn/cells", { cells }); toast(`${cells.length} cell${cells.length === 1 ? "" : "s"} saved`); loadAccuracy(); loadKnnStatus(); await loadPlaces(); }
     catch (e) { toast("Saving cells failed: " + e.message, 6000); cb.checked = !cb.checked; }
   }));
 }
@@ -1664,7 +1665,7 @@ function wireCompute() {
   };
   ["#c-n", "#c-left"].forEach((id) => $(id).addEventListener("input", lock));
   $("#k-help").addEventListener("click", openKnnHelp);
-  drawKnnGrid().then(() => { loadAccuracy(); loadStatus(); });
+  drawKnnGrid().then(() => { loadAccuracy(); loadKnnStatus(); });
   $$("input[name=s-scope]").forEach((el) => el.addEventListener("change", loadAccuracy));
   loadComputeLog();
   ["#s-radius", "#s-pct", ...$$("input[name=s-method]"), ...$$("input[name=s-scope]")].forEach((el) =>
@@ -1852,7 +1853,7 @@ function pipelineBlock(ps) {
 /* ---------------------------------------------------------------- status strip */
 // The header shows only the counts; each source's last run, spend, Google usage, errors and hand-check accuracy
 // live at the top of the Pipeline panel (statusBlock).
-async function loadStatus() {
+async function loadQueueStatus() {
   const s = await api("api/status");
   S.status = s;
   const parts = [`<span>${s.counts.places} places · ${s.counts.active}/${s.counts.listings} listings active</span>`];
@@ -1927,7 +1928,7 @@ async function boot() {
   S.points = await api("api/points");
   buildPointLayers();
   // the header counts are secondary: a failed /api/status says so in the strip instead of failing the page
-  await Promise.all([loadPlaces(), loadStatus().catch((e) => {
+  await Promise.all([loadPlaces(), loadQueueStatus().catch((e) => {
     $("#status-strip").innerHTML = `<span class="err">status not loaded: ${esc(e.message)}</span>`;
   })]);
   const pts = S.places.filter((p) => p.lat != null).map((p) => [p.lat, p.lon]);
