@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from .models import CHECKABLE_FIELDS
 
-LOG_TABLES = ["runs", "observations", "links", "trips", "checks", "annotations", "api_calls"]
+LOG_TABLES = ["runs", "observations", "links", "trips", "checks", "annotations", "api_calls", "media"]
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -106,6 +106,29 @@ CREATE TABLE IF NOT EXISTS api_calls (
     note     TEXT
 );
 CREATE INDEX IF NOT EXISTS api_calls_ts ON api_calls(provider, ts);
+
+-- Every photo or floor-plan download (aptfinder.media): one row per attempt. A stored file is
+-- data/media/<sha256[:2]>/<sha256>.jpg (re-encoded JPEG; the name is the hash of its bytes). `same_as` set: this
+-- download was an exact or near (pHash) copy of a file already stored for the same place, so nothing was written
+-- and the URL is served from that file. The served file is COALESCE(same_as, sha256). width/height/bytes are the
+-- original download's; stored_bytes is the written file (NULL when nothing was written).
+CREATE TABLE IF NOT EXISTS media (
+    id           INTEGER PRIMARY KEY,
+    fetched_at   TEXT NOT NULL,
+    url          TEXT NOT NULL,
+    kind         TEXT NOT NULL CHECK (kind IN ('photo', 'plan')),
+    status       INTEGER NOT NULL,
+    error        TEXT,
+    sha256       TEXT,
+    phash        TEXT,
+    same_as      TEXT,
+    distance     INTEGER,
+    width        INTEGER,
+    height       INTEGER,
+    bytes        INTEGER,
+    stored_bytes INTEGER
+);
+CREATE INDEX IF NOT EXISTS media_url ON media(url);
 """
 
 

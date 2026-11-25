@@ -1,0 +1,4 @@
+# Photo store (aptf-media fetch): our own small JPEG copy of every listing photo and floor-plan drawing,
+# content-addressed under data/media/. The run stops before a write would take the store past this size.
+[media]
+max_gb = 5

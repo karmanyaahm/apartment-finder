@@ -117,24 +117,35 @@ def _by_source(ls: list[dict[str, Any]]) -> dict[str, list[float | None]]:
 
 
 # Image hosts that refuse hotlinked requests (Chrome: ERR_BLOCKED_BY_ORB on every images1.apartments.com URL,
-# 2026-11-24). Their photos are listed last; showing them needs mirroring through Apify (not done).
+# 2026-11-24). Their photos are listed last unless we hold our own copy (aptfinder.media).
 HOTLINK_BLOCKED = ("images1.apartments.com",)
 
 
-def gather_photos(listings: list[dict[str, Any]], limit: int = 30) -> list[dict[str, str]]:
-    """Photo URLs from every listing (not mirrored: the browser loads them from the listing site's CDN).
-    The community's own website comes first; hosts known to block hotlinking go last, so loadable photos fill
-    the limit first."""
-    seen, out = set(), []
-    listings = sorted(listings, key=lambda l: (any(
-        h in u for u in (l["data"].get("extra") or {}).get("images") or [] for h in HOTLINK_BLOCKED),
-        l["source"] != "direct"))
-    for l in listings:
-        for u in (l["data"].get("extra") or {}).get("images") or []:
-            if u and u not in seen:
-                seen.add(u)
-                # `page`: the listing or site page the photo was found on; `site`: that page's host, for the overlay
-                out.append({"url": u, "source": l["source"], "page": l.get("url"), "site": site_name(l.get("url"))})
+def gather_photos(listings: list[dict[str, Any]], limit: int = 30,
+                  files: dict[str, dict[str, Any]] | None = None) -> list[dict[str, str]]:
+    """Photos from every listing. A photo we have downloaded (`files`: url -> stored file, media.url_files) is
+    served from our copy (`media/<sha>.jpg`, relative so it works under the base path), and photos that share one
+    stored file (the same picture on several sites: the store maps near-duplicates of a place to one file) show
+    once. Others fall back to the source's URL. The community's own website comes first; hotlink-blocked URLs
+    without a local copy go last, so loadable photos fill the limit first."""
+    from ..media import listing_images
+
+    files = files or {}
+    seen, seen_files, out = set(), set(), []
+    for l in sorted(listings, key=lambda l: l["source"] != "direct"):
+        for u, kind in listing_images(l["data"]):
+            if kind != "photo" or u in seen:
+                continue
+            seen.add(u)
+            f = files.get(u)
+            if f and f["file"] in seen_files:
+                continue  # a duplicate of a photo already shown
+            if f:
+                seen_files.add(f["file"])
+            # `page`: the listing or site page the photo was found on; `site`: that page's host, for the overlay
+            out.append({"url": f"media/{f['file']}.jpg" if f else u, "source": l["source"], "page": l.get("url"),
+                        "site": site_name(l.get("url")), "original": u})
+    out.sort(key=lambda p: p["url"].startswith("http") and any(h in p["url"] for h in HOTLINK_BLOCKED))
     return out[:limit]
 
 
@@ -250,7 +261,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             "SELECT (SELECT MAX(id) FROM links WHERE author = 'user'), (SELECT MAX(id) FROM checks), "
             "(SELECT MAX(id) FROM annotations), (SELECT MAX(id) FROM links WHERE author <> 'user'), "
             "(SELECT MAX(id) FROM observations), (SELECT MAX(id) FROM trips), (SELECT MAX(id) FROM runs), "
-            "(SELECT finished_at FROM runs ORDER BY id DESC LIMIT 1)").fetchone()
+            "(SELECT finished_at FROM runs ORDER BY id DESC LIMIT 1), (SELECT MAX(id) FROM media)").fetchone()
         cfg = tuple(f.stat().st_mtime_ns for f in sorted(settings.CONFIG_DIR.rglob("*")) if f.is_file())
         return tuple(row[:3]) + cfg, tuple(row[3:])
 
@@ -270,6 +281,12 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
     def all_places() -> dict[str, dict[str, Any]]:
         """The places view by key, read once per data version (the view is computed over everything)."""
         return cached("places_by_key", lambda: {r["place_key"]: dict(r) for r in conn.execute("SELECT * FROM places")})
+
+    def media_files() -> dict[str, dict[str, Any]]:
+        """url -> our stored copy, read once per data version."""
+        from ..media import url_files
+
+        return cached("media_files", lambda: url_files(conn))
 
     def q(sql: str, args: tuple = ()) -> list[dict[str, Any]]:
         with lock:
@@ -320,6 +337,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             pk: {f"{s}|{m}": {"minutes": t["minutes"], "provider": t["provider"], "point": t["point_id"].split(":", 1)[1]}
                  for (s, m), t in nearest_by_set(tr).items() if s != "commute_targets"}
             for pk, tr in trips.items()})
+        files = media_files()
         out = []
         for p in q("SELECT * FROM places"):
             pk = p["place_key"]
@@ -333,7 +351,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                                   "unit_key": r["unit_key"], "source": r["source"],
                                   "source_id": r["source_id"]}
             title = next((x["title"] for x in rows if x.get("title")), None)
-            cover = gather_photos([{**x, "data": json.loads(x["data"])} for x in rows], limit=1)
+            cover = gather_photos([{**x, "data": json.loads(x["data"])} for x in rows], limit=1, files=files)
             a = anns.get(pk, {})
             out.append({
                 **p,
@@ -423,7 +441,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             "place": place,
             "goals": {gid: res["places"][gid].get(place_key) for gid in res["places"]},
             "plans": group_plans(out_listings),
-            "photos": gather_photos(out_listings),
+            "photos": gather_photos(out_listings, files=media_files()),
             "websites": websites(out_listings),
             "listings": out_listings,
             "matrix": matrix,
@@ -750,6 +768,18 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
 
     # ------------------------------------------------------------------ static
     settings.MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+
+    @app.get("/media/{sha}.jpg")
+    def media_file(sha: str) -> FileResponse:
+        """A stored photo (aptfinder.media): the name is the hash of the bytes, so it is cacheable forever.
+        Registered before the /media mount, which keeps serving the flat seed files."""
+        from ..media import media_path
+
+        if not re.fullmatch(r"[0-9a-f]{64}", sha) or not media_path(sha).exists():
+            raise HTTPException(404, "no such media file")
+        return FileResponse(media_path(sha), media_type="image/jpeg",
+                            headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
     app.mount("/media", StaticFiles(directory=settings.MEDIA_DIR), name="media")
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 

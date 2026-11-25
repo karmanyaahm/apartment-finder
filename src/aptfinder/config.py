@@ -74,6 +74,12 @@ def load_redactions(config_dir: Path | None = None) -> dict[str, str]:
     return {str(k): str(v) for k, v in _toml(path).get("replace", {}).items()} if path.exists() else {}
 
 
+def load_media(config_dir: Path | None = None) -> dict[str, Any]:
+    """config/media.toml `[media]` (photo store, aptfinder.media): max_gb. Missing file: defaults."""
+    path = (config_dir or settings.CONFIG_DIR) / "media.toml"
+    return _toml(path).get("media", {}) if path.exists() else {}
+
+
 def load_goals(config_dir: Path | None = None) -> GoalsConfig:
     return GoalsConfig.model_validate(_toml((config_dir or settings.CONFIG_DIR) / "goals.toml"))
 

@@ -424,6 +424,18 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
                     for g, c in per_goal.items()),
           [f"nix run .#filter -- --goal {g} --status pass" for g in per_goal], counts=per_goal)
 
+    # photos: our own copies of listing photos and floor-plan drawings (aptfinder.media)
+    from .media import status as media_status
+
+    ms = media_status(conn)
+    full = f"; media store full ({ms['max_bytes'] / 1e9:.1f} GB)" if ms["full"] else ""
+    stage("photos", "Photos", "blocked" if ms["full"] else "todo" if not ms["downloaded"] else
+          "done" if not ms["to_fetch"] else "partial",
+          f"{ms['downloaded']} downloaded ({ms['files']} files after dedupe), {ms['failed']} failed, "
+          f"{ms['to_fetch']} to fetch; {ms['disk_bytes'] / 1e9:.2f} of {ms['max_bytes'] / 1e9:.1f} GB{full}",
+          ["nix run .#media -- fetch", "nix run .#media -- fetch --retry-failed"],
+          counts={k: ms[k] for k in ("downloaded", "files", "failed", "to_fetch", "disk_bytes", "full")})
+
     stuck = [dict(r) for r in conn.execute(
         "SELECT id, component, source, started_at FROM runs WHERE status = 'running' ORDER BY id")
         if (_days(r["started_at"], now) or 0) > 1 / 24]  # running for over an hour

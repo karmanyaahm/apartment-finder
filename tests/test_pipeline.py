@@ -12,7 +12,7 @@ from aptfinder.store.seed import seed_db
 from aptfinder.web.app import create_app
 
 STAGES = ["configure", "intake", "identity", "duplicates", "extract", "websites", "sites", "estimates", "anchors", "google",
-          "verify", "filter"]
+          "verify", "filter", "photos"]
 
 
 @pytest.fixture
