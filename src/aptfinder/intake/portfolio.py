@@ -30,7 +30,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from ..store.models import ObservationData
-from .apify import ActorRun, run_actor
+from .apify import ActorRun, browser_proxy, run_actor
 from .base import Adapter, Parsed
 from .direct import SITE_INFO
 from .discover import SECRET_ENV, Blocker
@@ -132,23 +132,42 @@ def _slug(city: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", city.lower()).strip("-")
 
 
-def build_input(cfg: dict[str, Any], areas: list) -> dict[str, Any]:
+def build_input(cfg: dict[str, Any], areas: list, residential: bool = False) -> dict[str, Any]:
+    """Pages of the operators on one proxy: `proxy = "residential"` in an operator's config entry puts its pages
+    in the residential run (operators that refuse Apify's datacenter proxy), the rest go through the default."""
+    ops = [op for op in cfg["operators"] if (op.get("proxy") == "residential") == residential]
     reqs = [{"url": op["url"].format(slug=_slug(a.id)), "userData": {"operator": op["name"], "city": a.id}}
-            for a in areas for op in cfg["operators"]]
-    return {"startUrls": reqs, "pageFunction": PAGE_FUNCTION, "proxyConfiguration": {"useApifyProxy": True},
+            for a in areas for op in ops]
+    return {"startUrls": reqs, "pageFunction": PAGE_FUNCTION, **browser_proxy(residential),
             "maxRequestsPerCrawl": len(reqs), "maxRequestRetries": 1, "headless": True, "pageLoadTimeoutSecs": 90,
             "pageFunctionTimeoutSecs": 150, "waitUntil": "domcontentloaded"}
 
 
 def fetch(cfg: dict[str, Any], areas: list, cap_each: int, max_usd: float, conn) -> ActorRun:
-    inp = build_input(cfg, areas)
-    run = run_actor(cfg["actor"], inp, max_items=len(inp["startUrls"]), max_charge_usd=max_usd, timeout_s=1800,
-                    memory_mb=cfg.get("memory_mb", 2048))
-    got = {it.get("requested") for it in run.items}
-    for r in inp["startUrls"]:  # a page the actor gave up on: keep a stub so it shows as failed, not as nothing
-        if r["url"] not in got:
-            run.items.append({**r["userData"], "requested": r["url"], "url": r["url"], "status": None,
-                              "page_state": "failed"})
+    run: ActorRun | None = None
+    for residential in (False, True):  # one actor run per proxy (a run has one proxy configuration)
+        inp = build_input(cfg, areas, residential)
+        if not inp["startUrls"]:
+            continue
+        part = run_actor(cfg["actor"], inp, max_items=len(inp["startUrls"]), max_charge_usd=max_usd,
+                         timeout_s=1800, memory_mb=cfg.get("memory_mb", 2048))
+        got = {it.get("requested") for it in part.items}
+        for r in inp["startUrls"]:  # a page the actor gave up on: keep a stub so it shows as failed, not as nothing
+            if r["url"] not in got:
+                part.items.append({**r["userData"], "requested": r["url"], "url": r["url"], "status": None,
+                                   "page_state": "failed"})
+        for it in part.items:
+            it["proxy"] = "residential" if residential else "datacenter"
+        if run is None:
+            run = part
+        else:
+            run.items += part.items
+            run.cost_usd = round((run.cost_usd or 0.0) + (part.cost_usd or 0.0), 4)
+            run.run_id = f"{run.run_id},{part.run_id}"
+            if part.status != "SUCCEEDED":
+                run.status = part.status
+    if run is None:
+        raise ValueError("no operator pages to fetch (config/sources.toml [portfolio] operators)")
     claude_usd = 0.0
     for it in run.items:
         if it.get("page_state") == "failed":

@@ -51,3 +51,27 @@ def test_portfolio_input_is_every_operator_by_city():
     assert [r["url"] for r in inp["startUrls"]] == ["https://a.example/mountain-view-apartments",
                                                      "https://b.example/s/mountain-view-ca"]
     assert inp["startUrls"][0]["userData"] == {"operator": "A", "city": "Mountain View"}
+
+
+def test_residential_operators_get_their_own_run(monkeypatch):
+    from aptfinder.intake.apify import ActorRun
+
+    cfg = {"actor": "x", "operators": [{"name": "A", "url": "https://a.example/{slug}"},
+                                       {"name": "B", "url": "https://b.example/{slug}", "proxy": "residential"}],
+           "max_claude_usd": 0}
+    area = [Area(kind="city", id="Mountain View", label="", chunks=[])]
+    assert [r["url"] for r in portfolio.build_input(cfg, area)["startUrls"]] == ["https://a.example/mountain-view"]
+    res = portfolio.build_input(cfg, area, residential=True)
+    assert [r["url"] for r in res["startUrls"]] == ["https://b.example/mountain-view"]
+    assert res["proxyConfiguration"]["apifyProxyGroups"] == ["RESIDENTIAL"] and "preNavigationHooks" in res
+    runs = []
+
+    def fake(actor, inp, **kw):
+        runs.append(inp["proxyConfiguration"])
+        return ActorRun(actor=actor, run_id=str(len(runs)), status="SUCCEEDED", items=[], cost_usd=0.01,
+                        charged_events=None, console_url="")
+
+    monkeypatch.setattr(portfolio, "run_actor", fake)
+    run = portfolio.fetch(cfg, area, 0, 1.0, None)
+    assert len(runs) == 2 and runs[0] == {"useApifyProxy": True}
+    assert {it["proxy"] for it in run.items} == {"datacenter", "residential"} and run.cost_usd == 0.02

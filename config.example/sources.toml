@@ -74,11 +74,11 @@ memory_mb = 2048
 model = "haiku"
 max_claude_usd = 0.5     # per run
 operators = [
-  { name = "Equity Residential", url = "https://www.equityapartments.com/san-francisco-bay/{slug}-apartments" },
-  { name = "Essex", url = "https://www.essexapartmenthomes.com/apartments/{slug}" },
-  { name = "Irvine Company", url = "https://www.irvinecompanyapartments.com/locations/northern-california/{slug}.html" },
+  { name = "Equity Residential", url = "https://www.equityapartments.com/san-francisco-bay/{slug}-apartments", proxy = "residential" },
+  { name = "Essex", url = "https://www.essexapartmenthomes.com/apartments/{slug}", proxy = "residential" },
+  { name = "Irvine Company", url = "https://www.irvinecompanyapartments.com/locations/northern-california/{slug}.html", proxy = "residential" },
   { name = "Greystar", url = "https://www.greystar.com/s/{slug}-ca" },
   { name = "UDR", url = "https://www.udr.com/san-francisco-bay-area-apartments/{slug}" },
-  { name = "Prometheus", url = "https://prometheusapartments.com/ca/{slug}-apartments/" },
+  { name = "Prometheus", url = "https://prometheusapartments.com/ca/{slug}-apartments/", proxy = "residential" },
   { name = "AvalonBay", url = "https://www.avaloncommunities.com/california/{slug}-apartments" },
 ]

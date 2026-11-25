@@ -36,7 +36,7 @@ from ..areas import chunk_of
 from ..config import load_sites
 from ..store import append_observation, finish_run, start_run
 from ..store.models import ObservationData
-from .apify import classify_failure, failed_requests, log_errors, run_actor, same_url
+from .apify import browser_proxy, classify_failure, failed_requests, log_errors, run_actor, same_url
 from .discover import SECRET_ENV, Blocker
 from .lease import _avail
 
@@ -316,7 +316,7 @@ def site_text(pages: list[dict[str, Any]]) -> str:
 
 def render(conn, chunks: list[str], *, sites: list[str] | None = None, model: str = "haiku",
            max_claude_usd: float = 1.0, max_apify_usd: float = 1.0, dry_run: bool = False,
-           retry_failed: bool = False) -> dict[str, Any]:
+           retry_failed: bool = False, residential: bool = False) -> dict[str, Any]:
     all_sites = load_sites()
     cands = []
     for sid, s in all_sites.items():
@@ -341,10 +341,11 @@ def render(conn, chunks: list[str], *, sites: list[str] | None = None, model: st
                 "estimated_claude_usd": round(0.006 * len(pick), 2)}
     areas = {f"{sid}#render": sid for sid in pick}
     run = start_run(conn, "intake", "direct", {"areas": list(areas), "render": True, "scope": "partial",
-                                               "actor": ACTOR, "model": model})
+                                               "actor": ACTOR, "model": model,
+                                               "proxy": "residential" if residential else "datacenter"})
     n_req = PAGES_PER_SITE * len(pick)
     res = run_actor(ACTOR, {"startUrls": [{"url": s["url"], "userData": {"site": sid}} for sid, s in pick.items()],
-                            "pageFunction": PAGE_FUNCTION, "proxyConfiguration": {"useApifyProxy": True},
+                            "pageFunction": PAGE_FUNCTION, **browser_proxy(residential),
                             "maxRequestsPerCrawl": n_req, "maxRequestRetries": 2, "headless": True,
                             "pageLoadTimeoutSecs": 120, "pageFunctionTimeoutSecs": 240, "waitUntil": "domcontentloaded"},
                     max_items=2 * n_req, max_charge_usd=max_apify_usd, timeout_s=1800, memory_mb=2048,

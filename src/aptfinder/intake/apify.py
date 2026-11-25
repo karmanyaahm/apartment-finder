@@ -39,6 +39,23 @@ def _client() -> httpx.Client:
     return httpx.Client(base_url=API, headers={"Authorization": f"Bearer {token}"}, timeout=60)
 
 
+DATACENTER = {"useApifyProxy": True}
+# Apify's residential group, US exits: for sites that refuse the datacenter proxy (403/429 even in a browser).
+# Billed by traffic, so pages through it skip images, fonts and video (RESIDENTIAL_HOOKS).
+RESIDENTIAL = {"useApifyProxy": True, "apifyProxyGroups": ["RESIDENTIAL"], "apifyProxyCountry": "US"}
+RESIDENTIAL_HOOKS = """[async ({ page }) => {
+  await page.route(/\\.(png|jpe?g|gif|webp|avif|svg|ico|woff2?|ttf|otf|mp4|webm|m3u8)(\\?|$)/i, (r) => r.abort());
+}]"""
+
+
+def browser_proxy(residential: bool) -> dict[str, Any]:
+    """Proxy fields of a web/playwright-scraper input: the datacenter default, or the residential group with
+    heavy files blocked."""
+    if not residential:
+        return {"proxyConfiguration": DATACENTER}
+    return {"proxyConfiguration": RESIDENTIAL, "preNavigationHooks": RESIDENTIAL_HOOKS}
+
+
 def run_actor(actor: str, run_input: dict[str, Any], *, max_items: int, max_charge_usd: float,
               timeout_s: int = 900, poll_s: int = 10, memory_mb: int | None = None, clean: bool = True,
               with_log: bool = False) -> ActorRun:

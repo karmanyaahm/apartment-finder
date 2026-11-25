@@ -110,6 +110,8 @@ def main(argv: list[str] | None = None) -> None:
     rd.add_argument("--max-usd", type=float, default=1.0, help="cap for each of Apify and Claude")
     rd.add_argument("--retry-failed", action="store_true", help="only sites whose last render failed (blocked, "
                                                                "timed out, empty, not returned)")
+    rd.add_argument("--residential", action="store_true", help="through Apify's residential proxy (sites that block "
+                                                              "the datacenter one; billed by traffic, images skipped)")
     rd.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
 
@@ -128,7 +130,8 @@ def main(argv: list[str] | None = None) -> None:
 
         try:
             res = render(conn, args.chunk, sites=args.site or None, model=args.model, max_claude_usd=args.max_usd,
-                         max_apify_usd=args.max_usd, dry_run=args.dry_run, retry_failed=args.retry_failed)
+                         max_apify_usd=args.max_usd, dry_run=args.dry_run, retry_failed=args.retry_failed,
+                         residential=args.residential)
         except Blocker as e:
             raise SystemExit(f"BLOCKED: {e}")
         print(json.dumps(res, indent=1, default=str))
