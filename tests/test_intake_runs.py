@@ -175,3 +175,21 @@ def test_area_of_overrides_single_area_tagging(conn, fake, monkeypatch):
     assert res.counts["areas"]["94040"]["items"] == 1
     tags = dict(conn.execute("SELECT source_id, json_extract(data, '$.extra.area') FROM observations").fetchall())
     assert tags == {"in": "94040", "out": None}
+
+
+def test_skipped_source_is_refused_and_left_out_of_coverage(conn, monkeypatch, tmp_path, capsys):
+    from aptfinder import pipeline
+    from aptfinder.intake import cli
+
+    monkeypatch.setattr(base, "load_sources", lambda: {"spend": {"max_usd_per_run": 1.0},
+                                                       "padmapper": {"actor": "a/b", "skip": True}})
+    assert base.skipped("padmapper") and not base.skipped("zumper")
+    monkeypatch.setattr(base, "run_actor", lambda *a, **k: pytest.fail("a skipped source must not reach Apify"))
+    with pytest.raises(SystemExit, match="padmapper is skipped"):
+        cli.main(["--db", str(tmp_path / "t.db"), "run", "padmapper", "--area", "Sunnyvale"])
+    cli.print_coverage(conn)
+    out = capsys.readouterr().out
+    assert "zumper" in out and "padmapper" not in out
+    d = pipeline.overview(conn)
+    assert "padmapper" not in d["intake"]["sources"]["city"] and "zumper" in d["intake"]["sources"]["city"]
+    assert not any("padmapper" in c for c in next(s for s in d["stages"] if s["id"] == "intake")["commands"])

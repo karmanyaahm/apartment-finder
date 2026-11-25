@@ -175,7 +175,7 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
     from . import verify
     from .filter import evaluate_all, routing_candidates
     from .intake import ADAPTERS
-    from .intake.base import coverage
+    from .intake.base import coverage, skipped
     from .trips import google_usage
 
     now = now or datetime.now(timezone.utc)
@@ -199,7 +199,7 @@ def overview(conn: sqlite3.Connection, now: datetime | None = None) -> dict[str,
 
     # 2. intake: per area kind, area x source, like `aptf-intake coverage`
     cov = coverage(conn)
-    srcs = {k: [s for s, ad in ADAPTERS.items() if ad.area_kind == k] for k in ("zip", "city", "box")}
+    srcs = {k: [s for s, ad in ADAPTERS.items() if ad.area_kind == k and not skipped(s)] for k in ("zip", "city", "box")}
     rows, todo_cmds = [], {}
     for kind, ss in srcs.items():
         for a in areas:

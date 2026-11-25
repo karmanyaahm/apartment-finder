@@ -66,6 +66,11 @@ def load_sources() -> dict[str, Any]:
         return tomllib.load(f)
 
 
+def skipped(source: str) -> bool:
+    """`skip = true` in a source's sources.toml section: left out of routine runs, coverage and the pipeline."""
+    return bool(load_sources().get(source, {}).get("skip"))
+
+
 def money(text: Any) -> float | None:
     if text is None:
         return None

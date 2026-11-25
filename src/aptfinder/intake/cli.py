@@ -22,7 +22,7 @@ from .. import settings
 from ..config import load_areas
 from ..store import connect, init_db
 from . import ADAPTERS
-from .base import coverage, done, reparse, run_source
+from .base import coverage, done, reparse, run_source, skipped
 from .extract import TEXT_SOURCES
 
 SHORT = {"direct": "direct", "zillow": "zillow", "apartments_com": "apts.com", "craigslist": "craigsl", "furnishedfinder": "ff",
@@ -35,7 +35,7 @@ def print_coverage(conn) -> None:
     cov = coverage(conn)
     left = n_done = 0
     for kind in ("zip", "city", "box", "site"):
-        srcs = [s for s, a in ADAPTERS.items() if a.area_kind == kind]
+        srcs = [s for s, a in ADAPTERS.items() if a.area_kind == kind and not skipped(s)]
         mine = [a for a in areas if a.kind == kind]
         if not srcs or not mine:
             continue
@@ -193,6 +193,8 @@ def main(argv: list[str] | None = None) -> None:
         print(json.dumps(res, indent=1))
         return
 
+    if skipped(args.source):
+        raise SystemExit(f"{args.source} is skipped (skip = true in config/sources.toml); set it to false to run it")
     adapter = ADAPTERS[args.source]
     areas = load_areas()
     pick = [a for a in areas if a.kind == adapter.area_kind and (not args.area or a.id in args.area)]
