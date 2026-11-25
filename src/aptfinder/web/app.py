@@ -439,7 +439,6 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             a = anns.get(pk, {})
             out.append({
                 **p,
-                "in_zone": in_walk_zone(p["lat"], p["lon"]),
                 "label": place_label(p) or title or pk,
                 "title": title,
                 "photo": cover[0]["url"] if cover else None,  # map hover
