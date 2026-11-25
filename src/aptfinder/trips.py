@@ -288,7 +288,7 @@ def compute_all(conn: sqlite3.Connection, commute: Commute, place_keys: list[str
     return {"places": len(places), "places_done": done, "new_trips": total, "error": error}
 
 
-def estimate_missing(conn: sqlite3.Connection, db_path: str) -> dict[str, Any]:
+def estimate_missing(conn: sqlite3.Connection, db_path: str, after: str = "intake") -> dict[str, Any]:
     """Free straight-line trips for the places missing one their current nearest points need (`missing_estimates`,
     the Pipeline panel's rule), logged as a `commute`/`estimate` run. Complete places are not routed again
     (`compute_all` would walk every place)."""
@@ -297,7 +297,7 @@ def estimate_missing(conn: sqlite3.Connection, db_path: str) -> dict[str, Any]:
     todo = missing_estimates(conn)
     if not todo:
         return {"places": 0, "places_done": 0, "new_trips": 0, "error": None}
-    run = start_run(conn, "commute", "estimate", {"places": len(todo), "after": "intake"})
+    run = start_run(conn, "commute", "estimate", {"places": len(todo), "after": after})
     res = compute_all(conn, build_commute(db_path, make_source("estimate")), todo)
     finish_run(conn, run, "error" if res["error"] else "ok", {**res, "api_calls": 0}, est_cost=0.0, error=res["error"])
     return res

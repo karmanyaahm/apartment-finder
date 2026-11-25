@@ -1691,7 +1691,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 return
             from ..trips import estimate_missing
 
-            if estimate_missing(conn, db_path)["new_trips"]:
+            if estimate_missing(conn, db_path, after="point files changed")["new_trips"]:
                 invalidate()
             seen_points[0] = sig
 
