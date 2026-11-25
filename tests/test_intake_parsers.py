@@ -113,6 +113,22 @@ def test_craigslist():
     assert p.data.available_from == "2026-12-13"
 
 
+def test_zero_price_is_unknown():
+    # real items, trimmed: Craigslist posts with no price come back as priceUsd 0 (Overlook at Walnut Creek,
+    # 2026-11-24), FurnishedFinder as "$0.00/month" (Sonesta ES Suites Sunnyvale); 0 means no price given
+    cl = {"url": "https://www.craigslist.org/view/d/walnut-creek-convenient-computer-desks/mL9bUtN7qKcVzvx5ucJHRo",
+          "postId": "8006083734", "title": "Convenient computer desks and dry bars, EV charging stations",
+          "priceUsd": 0, "currency": "USD", "postedAt": "2026-11-24T17:19:19-0800", "location": "walnut creek",
+          "latitude": 37.929723, "longitude": -122.053973,
+          "attributes": {"bedrooms": "1", "bathrooms": "1", "sqft": "676", "rent_period": "monthly",
+                         "housing_type": "apartment", "laundry": "w/d in unit"}}
+    p = ADAPTERS["craigslist"].parse(cl, {})
+    assert p.price is None and p.price_basis == "month" and p.data.beds == 1
+    ff = {"listing_id": "252654_1", "title": "Sonesta ES Suites Sunnyvale California", "rent_amount": "$0.00/month",
+          "rent_currency": "USD", "bedrooms": 1, "latitude": 37.37, "longitude": -122.03, "city": "sunnyvale"}
+    assert ADAPTERS["furnishedfinder"].parse(ff, {}).price is None
+
+
 def test_avail_and_numbers():
     ref = date(2026, 11, 24)
     assert _avail("now", ref) == "2026-11-24"

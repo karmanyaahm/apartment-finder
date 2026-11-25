@@ -141,6 +141,29 @@ def test_reparse_supersedes_listings_it_no_longer_produces(conn, tmp_path):
     assert active == {"old-id": 0, "new-id": 1}
 
 
+def test_reparse_tags_areas_and_a_zero_price_stays_unknown(conn, tmp_path):
+    import json as _json
+
+    from aptfinder.intake.base import reparse
+
+    raw = tmp_path / "run7_94041.json"
+    raw.write_text(_json.dumps({"actor": "a/b", "areas": ["94041"], "items": [{"id": "a", "p": 0}, {"id": "b"}]}))
+    adapter = Adapter(name="fake", build_input=lambda cfg, areas: {}, parse=lambda item, cfg: Parsed(
+        item["id"], None, ObservationData(lat=37.4, lon=-122.1, beds=2), price=item.get("p", 2500.0),
+        price_basis="month"))
+    import aptfinder.intake.base as b
+
+    orig = b.load_sources
+    b.load_sources = lambda: {"spend": {}}
+    try:
+        reparse(conn, adapter, str(raw))
+    finally:
+        b.load_sources = orig
+    rows = {r[0]: r[1:] for r in conn.execute(
+        "SELECT source_id, price, price_month, price_per_bed, json_extract(data, '$.extra.area') FROM listings")}
+    assert rows == {"a": (None, None, None, "94041"), "b": (2500.0, 2500.0, 1250.0, "94041")}
+
+
 def test_unparseable_run_is_not_coverage_and_empty_marker_is_empty(conn, fake, monkeypatch):
     calls, plan = fake
     adapter = Adapter(name="fake", build_input=lambda cfg, areas: {"areas": [a.id for a in areas]},

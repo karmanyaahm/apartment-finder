@@ -28,6 +28,18 @@ class Parsed:
     query_checkin: str | None = None
     query_checkout: str | None = None
 
+    def __post_init__(self) -> None:
+        # a source's 0 means "no price given" (Craigslist's priceUsd 0, FurnishedFinder's "$0.00/month"):
+        # unknown, never a $0 rent that sorts first and passes every budget
+        if self.price is not None and self.price <= 0:
+            self.price = None
+
+
+def area_for(adapter: "Adapter", item: dict[str, Any], gids: list[str]) -> str | None:
+    """The intake area an item counts for. area_of (when the adapter has one) decides even for single-area runs:
+    an Airbnb box search returns listings outside the box, which must not be tagged with (or retired by) that box."""
+    return adapter.area_of(item, gids) if adapter.area_of else (gids[0] if len(gids) == 1 else None)
+
 
 @dataclass
 class Adapter:
@@ -196,9 +208,7 @@ def run_source(conn: sqlite3.Connection, adapter: Adapter, areas: list[Area], *,
             run.items = [i for i in run.items if not (adapter.skip and adapter.skip(i))]
             counts["skipped"] = counts.get("skipped", 0) + len(skipped)
             for item in run.items:
-                # area_of (when the adapter has one) decides even for single-area runs: an Airbnb box search
-                # returns listings outside the box, which must not be tagged with (or retired by) that box
-                aid = adapter.area_of(item, gids) if adapter.area_of else (gids[0] if len(gids) == 1 else None)
+                aid = area_for(adapter, item, gids)
                 if aid in per_area:
                     per_area[aid] += 1
                 p = adapter.parse(item, cfg)
@@ -345,6 +355,7 @@ def reparse(conn: sqlite3.Connection, adapter: Adapter, raw_file: str, covers: s
     run_id = start_run(conn, "intake", adapter.name, params)
     counts = {"items": len(blob["items"]), "observations": 0, "unparsed": 0, "skipped": 0}
     seen: set[str] = set()
+    gids = blob.get("areas") or []
     try:
         for item in blob["items"]:
             if adapter.skip and adapter.skip(item):
@@ -354,10 +365,13 @@ def reparse(conn: sqlite3.Connection, adapter: Adapter, raw_file: str, covers: s
             if not p:
                 counts["unparsed"] += 1
                 continue
+            aid = area_for(adapter, item, gids)  # tagged as the original run tagged it, so area runs still retire it
             for q in p if isinstance(p, list) else [p]:
                 if q.source_id in seen:
                     continue
                 seen.add(q.source_id)
+                if aid:
+                    q.data.extra = {**(q.data.extra or {}), "area": aid}
                 append_observation(conn, run_id, adapter.name, q.source_id, q.data, url=q.url, price=q.price,
                                    price_basis=q.price_basis, query_checkin=q.query_checkin,
                                    query_checkout=q.query_checkout, raw_path=raw_file, commit=False)
