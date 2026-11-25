@@ -88,8 +88,9 @@ def _run_info(runs: dict, component: str, source: str = "") -> dict[str, Any]:
 
 def website_status(conn: sqlite3.Connection, place_key: str | None = None) -> dict[str, dict[str, Any]]:
     """place_key -> {state, detail, url?}; state is a key of WEB_STATES. A place not in the result has not been
-    searched. `place_key` limits the queries to one place (the drawer)."""
-    from .intake.discover import _records
+    searched. `place_key` limits the queries to one place (the drawer). A URL on an aggregator host (vrent.com,
+    turbotenant.com, ...) is not a website here."""
+    from .intake.discover import _records, is_aggregator
 
     w, args = ("", ()) if place_key is None else (" AND place_key = ?", (place_key,))
     mine = (lambda pk: True) if place_key is None else (lambda pk: pk == place_key)
@@ -103,6 +104,8 @@ def website_status(conn: sqlite3.Connection, place_key: str | None = None) -> di
     for pk, url in conn.execute(
             "SELECT place_key, MIN(json_extract(data, '$.extra.website')) FROM listings WHERE place_key IS NOT NULL "
             "AND json_extract(data, '$.extra.website') IS NOT NULL" + w + " GROUP BY place_key", args):
+        if is_aggregator(url):
+            continue
         out[pk] = {"state": "known", "url": url, "detail": "named by a listing; promote-sites fetches it"}
     for s in load_sites().values():
         if s.get("place_key") and mine(s["place_key"]):
@@ -118,7 +121,8 @@ def website_status(conn: sqlite3.Connection, place_key: str | None = None) -> di
     # a found site's latest check: rejected (fetched, no address) or not fetched yet (blocked, timed out: retried)
     for f in rec.get("found", []):
         c = checks.get(f["id"])
-        if not (mine(f.get("place_key")) and c) or out.get(f["place_key"], {}).get("state") == "none_confirmed":
+        if not (mine(f.get("place_key")) and c) or is_aggregator(f["url"]) \
+                or out.get(f["place_key"], {}).get("state") == "none_confirmed":
             continue
         oc = check_outcome(c)
         if oc == "rejected":
@@ -130,6 +134,8 @@ def website_status(conn: sqlite3.Connection, place_key: str | None = None) -> di
     for r in conn.execute(
             "SELECT place_key, MAX(last_seen) AS seen, SUM(price IS NOT NULL) AS priced, MIN(url) AS url "
             "FROM listings WHERE source = 'direct' AND place_key IS NOT NULL" + w + " GROUP BY place_key", args):
+        if is_aggregator(r["url"]):
+            continue
         out[r["place_key"]] = {"state": "priced" if r["priced"] else "scraped", "url": r["url"], "seen": r["seen"],
                                "detail": "own site gives units with prices" if r["priced"]
                                else "own site scraped: plans, photos or link, no prices"}

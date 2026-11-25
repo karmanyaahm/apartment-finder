@@ -256,7 +256,7 @@ def own_site_urls(conn: sqlite3.Connection, place_key: str, *, sites: dict | Non
     no_plans, priced, failed or pending, `label` says what happened and when. Several URLs per place are normal:
     the hand list, sites found by search or named by listings, and any you added in Verify."""
     from ..config import CHECK_RETRY, check_outcome, last_checks, load_sites
-    from ..intake.discover import _records, clean_url, is_form
+    from ..intake.discover import _records, clean_url, is_aggregator, is_form
     from ..intake.render import TRANSIENT, describe, last_outcomes
 
     sites = load_sites() if sites is None else sites
@@ -271,7 +271,7 @@ def own_site_urls(conn: sqlite3.Connection, place_key: str, *, sites: dict | Non
 
     def add(url: str, via: str, sid: str | None = None, check: dict | None = None) -> None:
         key = (clean_url(url)[0] or url).rstrip("/").lower().replace("://www.", "://").replace("http://", "https://")
-        if key in seen_urls:
+        if key in seen_urls or is_aggregator(url):  # a vrent.com / turbotenant.com page is not an own site
             return
         seen_urls.add(key)
         e: dict[str, Any] = {"url": url, "via": via, "site": sid}
@@ -336,9 +336,11 @@ def own_site_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     from ..intake.discover import _records
     from ..intake.render import last_outcomes
 
+    from ..intake.discover import is_aggregator
+
     priced = {r[0] for r in conn.execute(
-        "SELECT DISTINCT place_key FROM listings WHERE source = 'direct' AND active = 1 AND price IS NOT NULL "
-        "AND kind IS NOT 'site_info' AND place_key IS NOT NULL")}
+        "SELECT DISTINCT place_key, url FROM listings WHERE source = 'direct' AND active = 1 AND price IS NOT NULL "
+        "AND kind IS NOT 'site_info' AND place_key IS NOT NULL") if not is_aggregator(r[1])}
     last_ann: dict[tuple[str, str], dict[str, Any]] = {}
     for r in conn.execute("SELECT entity_key, attribute, comment, id FROM annotations WHERE entity_type = 'place' "
                           "AND attribute IN ('website', 'own_site') ORDER BY id"):
