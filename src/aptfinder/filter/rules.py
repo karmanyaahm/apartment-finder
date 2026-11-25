@@ -36,20 +36,43 @@ class Ctx:
 AGGS = ["total", "mean", "median", "spread"]  # spread: standard deviation, low = everyone's commute is alike
 
 
-def commute_terms(rules: list[dict[str, Any]], trips: dict[tuple[str, str], dict[str, Any]],
-                  nearest: dict[tuple[str, str], dict[str, Any]]) -> list[tuple[float | None, bool]]:
-    """(minutes or None, is an estimate) per commute rule, in rule order."""
-    out: list[tuple[float | None, bool]] = []
+def commute_trips(rules: list[dict[str, Any]], trips: dict[tuple[str, str], dict[str, Any]],
+                  nearest: dict[tuple[str, str], dict[str, Any]]) -> list[dict[str, Any]]:
+    """The trip behind each commute rule's term, in rule order: {rule (its label), mode, point (the destination's
+    point id, None when no trip), set (a near rule's point set), minutes (None: skipped, `why` says so), provider, est
+    (an estimate: estimate or knn), min / max (a KNN range; `minutes` is its neighbours' median)}. The one place a term is chosen: commute_terms,
+    the net_commute rule and the dashboard's trip list all read it."""
+    out: list[dict[str, Any]] = []
     for r in rules:
         if r["type"] == "commute_any":
-            ts = [t for o in r["options"] if (t := trips.get((r["target"], o["mode"]))) and t.get("minutes") is not None]
+            ts = [(o["mode"], t) for o in r["options"]
+                  if (t := trips.get((r["target"], o["mode"]))) and t.get("minutes") is not None]
+            why = f"no time yet for {' or '.join(o['mode'] for o in r['options'])}"
+            d: dict[str, Any] = {"point": r["target"]}
         elif r["type"] == "near":
-            ts = [t for t in [nearest.get((r["set"], r["mode"]))] if t and t.get("minutes") is not None]
+            ts = [(r["mode"], t) for t in [nearest.get((r["set"], r["mode"]))] if t and t.get("minutes") is not None]
+            why = f"no {r['mode']} time yet to any point of {r['set']}"
+            d = {"set": r["set"], "point": None}
         else:
             continue
-        best = min(ts, key=lambda t: t["minutes"]) if ts else None
-        out.append((best["minutes"], best["provider"] in ("estimate", "knn")) if best else (None, False))
+        mode, best = min(ts, key=lambda mt: mt[1]["minutes"]) if ts else (None, None)
+        d.update(rule=_label(r), mode=mode or r.get("mode"), minutes=None, provider=None)
+        if best:
+            d.update(point=best.get("point_id") or d["point"],
+                     minutes=best["minutes"], provider=best["provider"])
+            if best["provider"] == "knn":
+                d.update(min=best.get("min"), max=best.get("max"), n=len(best.get("neighbors") or []))
+        else:
+            d["why"] = why
+        d["est"] = d["provider"] in ("estimate", "knn")
+        out.append(d)
     return out
+
+
+def commute_terms(rules: list[dict[str, Any]], trips: dict[tuple[str, str], dict[str, Any]],
+                  nearest: dict[tuple[str, str], dict[str, Any]]) -> list[tuple[float | None, bool]]:
+    """(minutes or None, is an estimate) per commute rule, in rule order (commute_trips)."""
+    return [(d["minutes"], d["est"]) for d in commute_trips(rules, trips, nearest)]
 
 
 def aggregate(values: list[float], agg: str) -> float | None:
@@ -276,20 +299,15 @@ def combine(statuses: list[str]) -> str:
 
 
 # ---------------------------------------------------------------- rule shapes (goals edited in the dashboard)
-# parking (extract's and render's `parking` reading, filter.parking_values): spaces that come with the home (0 when
-# the text says no parking) and the monthly price of one (0 when included)
-NUMERIC_FIELDS = ["price", "price_month", "price_per_bed", "beds", "baths", "sqft", "parking_spots",
-                  "parking_usd_month"]
+NUMERIC_FIELDS = ["price", "price_month", "price_per_bed", "beds", "baths", "sqft"]
 EQUALS_FIELDS: dict[str, list[Any]] = {"term": ["short", "long"], "furnished": [True, False],
                                        "private_bath": [True, False],
                                        "kind": ["apartment", "house", "townhome", "entire_place", "room"],
                                        # who may rent (extract's reading, pooled per place); 'none' = no limit
                                        "restriction": ["none", "income", "senior", "veterans", "student", "employer",
-                                                       "other"],
-                                       # a space comes with the rent at no extra charge; false: none, street only, paid
-                                       "parking_included": [True, False]}
+                                                       "other"]}
 KNOWN_FIELDS = [*NUMERIC_FIELDS, "furnished", "private_bath", "term", "kind", "available_from", "address",
-                "property_name", "restriction", "parking_included"]
+                "property_name", "restriction"]
 # type -> (label, required keys, optional keys): what the editor offers and validate_rule checks
 RULE_TYPES: dict[str, tuple[str, list[str], list[str]]] = {
     "max": ("field at most", ["field", "value"], ["strict"]),

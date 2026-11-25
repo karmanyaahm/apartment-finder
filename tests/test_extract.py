@@ -72,7 +72,7 @@ def test_every_fact_needs_a_verbatim_quote_and_a_fee_its_number():
         "admin_fee": {"value": 300, "evidence": "Application fee: $45"},  # number not in its quote
         "dogs_allowed": {"value": False, "evidence": "No dogs"},
         "cats_allowed": {"value": True, "evidence": ""},                  # no quote
-        "parking": {"value": "garage", "evidence": "pool"},               # no longer a fact (the parking object)
+        "parking": {"value": "valet", "evidence": "pool"},                # not an allowed kind
     }}, text)["facts"]
     assert set(got) == {"gym", "application_fee", "dogs_allowed"}
     assert got["gym"] == {"value": True, "evidence": "24-hour Fitness Center"}
@@ -80,8 +80,9 @@ def test_every_fact_needs_a_verbatim_quote_and_a_fee_its_number():
 
 def test_positive_facts_become_amenity_words_negatives_do_not():
     from aptfinder.intake.extract import amenities_from
-    am = amenities_from({"gym": {"value": True}, "dogs_allowed": {"value": False}, "pool": {"value": False}})
-    assert am == ["Gym / fitness center (read from text)"]
+    am = amenities_from({"gym": {"value": True}, "dogs_allowed": {"value": False}, "parking": {"value": "garage"},
+                         "pool": {"value": False}})
+    assert am == ["Gym / fitness center (read from text)", "Parking: garage (read from text)"]
 
 
 def test_entry_text_uses_allowlisted_raw_fields_and_dedupes_units():

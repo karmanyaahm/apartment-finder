@@ -168,6 +168,19 @@ def test_commute_terms_use_each_rules_pair():
     assert commute_terms(ROOMMATES, {}, {}) == [(None, False)] * 3
 
 
+def test_commute_trips_name_each_terms_trip():
+    from aptfinder.filter.rules import commute_trips
+    trips = {("commute_targets:Googleplex", "drive"): _trip(20),
+             ("commute_targets:Meta HQ", "drive"): _trip(31),
+             ("commute_targets:Meta HQ", "bike"): {"minutes": 18, "provider": "knn", "min": 15, "max": 22,
+                                                   "neighbors": [{}, {}, {}]}}
+    d = commute_trips(ROOMMATES, trips, {})
+    assert [x["minutes"] for x in d] == [20, 18, None]
+    assert d[0]["mode"] == "drive" and d[0]["provider"] == "google" and d[0]["rule"].startswith("to Googleplex")
+    assert d[1]["mode"] == "bike" and (d[1]["min"], d[1]["max"], d[1]["n"]) == (15, 22, 3) and d[1]["est"]
+    assert d[2]["set"] == "caltrain_stations" and d[2]["why"] and d[2]["mode"] == "walk"
+
+
 @pytest.mark.parametrize("agg,want", [("total", 60), ("mean", 15), ("median", 12.5), ("spread", 9.3541435)])
 def test_aggregates(agg, want):
     from aptfinder.filter.rules import aggregate
@@ -206,6 +219,7 @@ def test_places_carry_the_goals_commute_terms(client):
         assert len(terms) == 2
         bike = p["minutes"].get("commute_targets:Downtown Palo Alto|bike")
         assert terms[0][0] == (bike["minutes"] if bike else None)
+        assert terms[0][2]["minutes"] == terms[0][0] and terms[0][2]["rule"]  # the trip behind the term
     prev = c.post("/api/goals/preview", json=body).json()["places"]
     assert all(prev[p["place_key"]]["commute"] == p["goals"]["roommates"]["commute"] for p in places)
     assert {p["goals"]["roommates"]["status"] for p in places} <= {"pass", "needs_check", "fail"}

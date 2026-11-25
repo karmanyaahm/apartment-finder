@@ -11,16 +11,14 @@ those raw fields, found by re-parsing the listing's raw file (`raw_path`). Unit-
 left out, so a building's units send the same text and are read once. Answers are in a fixed JSON schema:
 
 - address, building name and website, kept only if they appear in the text (street part / name / URL verbatim);
-- building and unit facts (gym, pool, laundry, EV charging, air conditioning, dishwasher, cats, dogs,
+- building and unit facts (gym, pool, laundry, parking, EV charging, air conditioning, dishwasher, cats, dogs,
   furnished, private bath, utilities included, minimum stay, lease term, application / admin / monthly fees), each
   with a short evidence quote that must appear verbatim in the text (a fee's number must also be in its quote),
   else the fact is dropped. Unknown stays null; absence is never inferred;
 - who may rent (`restriction`): income | senior | veterans | student | employer | other, kept only with a verbatim
   quote, or 'none' when the entry sets no such limit ('Section 8 welcome' is none). A claimed limit whose quote is
   not in the text is dropped (unknown). A RentCafe building under rentcafe.com/housing/ read as 'none' stays unknown:
-  that section holds income-restricted and market-rate buildings alike (Alta Torre $880, 6tenEast $3,841);
-- parking (`parking`, `check_parking`): offered yes / no, kinds, spots, cost included / paid with a monthly price,
-  each backed by verbatim quotes (a number only if a quote holds it); street parking alone is offered 'no'.
+  that section holds income-restricted and market-rate buildings alike (Alta Torre $880, 6tenEast $3,841).
 
 The result is a new observation of the same listing (append-only; run component `extract`): facts the source left
 empty are filled (address, name, furnished, private bath; website, minimum stay and utilities in `extra`), positive
@@ -55,7 +53,7 @@ from .discover import SECRET_ENV, Blocker, clean_url
 TEXT_SOURCES = ("craigslist", "furnishedfinder", "airbnb", "apartments_com", "zillow", "zumper", "padmapper",
                 "rentcafe", "direct", "google_places", "portfolio")  # every source: a name alone can state a limit
 RAW_SOURCES = ("apartments_com", "zumper")  # raw item holds text the parser does not store
-VERSION = 4  # schema version: answers and 'read' marks of an older schema are read again (4: parking object)
+VERSION = 3  # schema version: answers and 'read' marks of an older schema are read again
 # a listing has text to read: a description, an amenity list, or a name or title as stored (shared with the Pipeline
 # panel); a name alone is read for who may rent ('The Laurel at Mountain View (55+)')
 HAS_TEXT_SQL = ("(length(trim(COALESCE(json_extract(data, '$.description'), ''))) >= 40 "
@@ -84,6 +82,8 @@ FACTS: dict[str, dict[str, Any]] = {
     "pool": _fact(_B, "swimming pool"),
     "in_unit_laundry": _fact(_B, "washer and dryer inside the unit"),
     "shared_laundry": _fact(_B, "shared / on-site laundry room"),
+    "parking": _fact({"type": "string", "enum": ["garage", "covered", "lot", "street", "none"]},
+                     "kind of parking offered (garage, covered/carport, open lot, street only, none)"),
     "ev_charging": _fact(_B, "electric vehicle charging"),
     "air_conditioning": _fact(_B, "air conditioning"),
     "dishwasher": _fact(_B, "dishwasher"),
@@ -115,29 +115,6 @@ RESTRICTION = {
                    "near a campus or an employer. evidence: the exact words that state the limit, copied character "
                    "for character; empty for none.",
     "properties": {"value": {"type": "string", "enum": list(RESTRICTIONS)}, "evidence": {"type": "string"}}}
-PARKING_KINDS = ("garage", "carport", "covered", "assigned", "uncovered", "off_street", "street", "tandem",
-                 "ev_charging", "other")
-PARKING = {
-    "type": ["object", "null"], "required": ["offered", "evidence"],
-    "description": "parking for the renter, only as the entry states it; null when the entry says nothing about "
-                   "parking. offered: yes when a parking space comes with the home or can be rented there "
-                   "(garage, carport, assigned or open spot, driveway), free or for a fee; no when the entry says "
-                   "there is no parking, or street parking only. Street parking nearby is not an offered space. "
-                   "kinds: every kind named (garage, carport, covered, assigned, uncovered (open lot or surface), "
-                   "off_street, street, tandem, ev_charging, other). spots: number of spaces that come with this "
-                   "home, only if a number is stated ('1 assigned space', '2-car garage'), else null. cost: included "
-                   "when a space comes with the rent at no extra charge ('free parking', 'parking included'); paid "
-                   "when a space costs extra ('garage $150/month', 'parking available for rent', 'reserved parking "
-                   "fee') and none is said to be included; null when the entry does not say. usd_month: the monthly "
-                   "price of one space when paid and a number is stated (the lowest, if several), else null. "
-                   "evidence: the exact words about parking, one or more short quotes copied character for "
-                   "character.",
-    "properties": {"offered": {"type": ["string", "null"], "enum": ["yes", "no", None]},
-                   "kinds": {"type": "array", "items": {"type": "string", "enum": list(PARKING_KINDS)}},
-                   "spots": {"type": ["integer", "null"]},
-                   "cost": {"type": ["string", "null"], "enum": ["included", "paid", None]},
-                   "usd_month": {"type": ["number", "null"]},
-                   "evidence": {"type": "array", "items": {"type": "string"}}}}
 _STR = {"type": ["string", "null"]}
 SCHEMA = {"type": "object", "required": ["results"], "properties": {"results": {"type": "array", "items": {
     "type": "object", "required": ["key", "restriction"],
@@ -149,7 +126,6 @@ SCHEMA = {"type": "object", "required": ["results"], "properties": {"results": {
         "website": {**_STR, "description": "a URL in the text for the property or its manager"},
         "facts": {"type": "object", "properties": FACTS},
         "restriction": RESTRICTION,
-        "parking": PARKING,
     }}}}}
 MONEY = ("application_fee", "admin_fee", "monthly_fees")
 AMENITY = {"gym": "Gym / fitness center", "pool": "Pool", "in_unit_laundry": "In-unit laundry",
@@ -208,55 +184,7 @@ def check_answer(ans: dict[str, Any], text: str) -> dict[str, Any]:
     rx = check_restriction(ans.get("restriction"), text)
     if rx:
         out["restriction"] = rx
-    pk = check_parking(ans.get("parking"), text)
-    if pk:
-        out["parking"] = pk
     return out
-
-
-_NUM_WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
-
-
-def check_parking(p: Any, text: str) -> dict[str, Any] | None:
-    """{offered, kinds, spots, cost, usd_month, evidence} with only what the quotes back, else None (unknown).
-    Each quote must be in `text` (normalized, 3+ characters); none left = unknown. A number of spots or a monthly
-    price is kept only when a quote holds it ('2-car garage', 'one assigned space', '$75'). Shared by extract and
-    render's page reading. Street parking alone is no offered space: kinds ['street'] -> offered 'no'. A price
-    makes the cost paid, unless the space is said to be included (a second, paid space: cost stays included)."""
-    if not isinstance(p, dict):
-        return None
-    t = f" {_norm(text)} "
-    ev = p.get("evidence")
-    ev = [ev] if isinstance(ev, str) else ev if isinstance(ev, list) else []
-    quotes = [q for q in ev if isinstance(q, str) and len(_norm(q)) >= 3 and f" {_norm(q)} " in t]
-    if not quotes:
-        return None
-    qn = " ".join(_norm(q) for q in quotes)
-    digits = re.sub(r"[^\d.]", " ", re.sub(r"(?<=\d),(?=\d{3})", "", " ".join(quotes))).split()
-    kinds = sorted({k for k in p.get("kinds") or [] if k in PARKING_KINDS})
-    offered = p.get("offered") if p.get("offered") in ("yes", "no") else None
-    if kinds == ["street"]:
-        offered = "no"  # 'street parking available' is no space of one's own
-    spots = p.get("spots")
-    if not (isinstance(spots, int) and not isinstance(spots, bool) and 0 <= spots <= 10
-            and (str(spots) in digits or f" {_NUM_WORDS.get(spots, '#')} " in f" {qn} ")):
-        spots = None
-    usd = p.get("usd_month")
-    if not (isinstance(usd, (int, float)) and not isinstance(usd, bool) and 0 < usd <= 2000
-            and any(d.rstrip(".") in (str(int(usd)), f"{usd:.2f}") for d in digits)):
-        usd = None
-    cost = p.get("cost") if p.get("cost") in ("included", "paid") else None
-    if usd is not None and cost is None:
-        cost = "paid"
-    if cost != "paid":
-        usd = None
-    if offered == "no":
-        spots, cost, usd = (0 if spots is None else spots), None, None
-    if offered is None and cost is None and spots is None:
-        return None if not kinds else {"offered": None, "kinds": kinds, "spots": None, "cost": None,
-                                       "usd_month": None, "evidence": quotes}
-    return {"offered": offered or ("yes" if cost or spots else None), "kinds": kinds, "spots": spots, "cost": cost,
-            "usd_month": usd, "evidence": quotes}
 
 
 # labels of entry lines that are no description: a name, a title, an amenity list or a source extra says nothing about
@@ -290,16 +218,10 @@ def check_restriction(rx: Any, text: str) -> dict[str, Any] | None:
 def amenities_from(facts: dict[str, Any]) -> list[str]:
     """Positive facts in plain words, for the amenity rules (`match` words) and the place's pooled list."""
     out = [AMENITY[k] + FROM_TEXT for k in AMENITY if (facts.get(k) or {}).get("value") is True]
+    park = (facts.get("parking") or {}).get("value")
+    if park and park != "none":
+        out.append(f"Parking: {park}{FROM_TEXT}")
     return out
-
-
-def parking_amenity(pk: dict[str, Any] | None) -> list[str]:
-    """'Parking: garage, assigned (read from text)' for an offered space (the amenity rules and the list's parking
-    flag); nothing for street parking only, no parking or unknown."""
-    if not pk or pk.get("offered") != "yes":
-        return []
-    kinds = [k.replace("_", " ") for k in pk.get("kinds") or [] if k != "street"]
-    return [f"Parking: {', '.join(kinds) or 'offered'}{FROM_TEXT}"]
 
 
 # stored fields a text reading can contradict (all checkable in Verify)
@@ -593,22 +515,18 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
         filled: dict[str, int] = {}
         facts_n: dict[str, int] = {}
         restr: dict[str, int] = {}
-        parking: dict[str, int] = {}
         for t in todo:
             if t["hash"] not in cache:
                 continue  # budget ran out, or a blocker stopped the calls, before this one
             got_ = check_answer(cache[t["hash"]], t["text"])
             facts = got_.pop("facts", {})
             rx = got_.pop("restriction", None)
-            pk = got_.pop("parking", None)
             d = dict(t["data"])
             extra = dict(d.get("extra") or {})
             if rx == {"value": "none"} and source == "rentcafe" and extra.get("vertical") == "housing":
                 rx = None  # rentcafe.com/housing/ mixes income-restricted and market-rate buildings: unknown
             if rx:
                 restr[rx["value"]] = restr.get(rx["value"], 0) + 1
-            pkv = f"{pk['offered'] or '?'}/{pk['cost'] or 'unspecified'}" if pk else "unknown"
-            parking[pkv] = parking.get(pkv, 0) + 1
             flat = {**got_, **{k: facts[k]["value"] for k in ("furnished", "private_bath", "min_stay_days",
                                                               "utilities_included") if k in facts}}
             got, conflicts = [], {}
@@ -626,13 +544,12 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
                         v = f"{v}, {str(d['city']).title()}"  # "850 Calderon Ave" -> "..., Mountain View"
                     d[k] = v
                     got.append(k)
-            add = [a for a in amenities_from(facts) + parking_amenity(pk) if a not in (d.get("amenities") or [])]
+            add = [a for a in amenities_from(facts) if a not in (d.get("amenities") or [])]
             if add:  # only positives; a listing with no list keeps none (unknown, never 'not listed')
                 d["amenities"] = list(d.get("amenities") or []) + add
                 got.append("amenities")
             extra["extracted"] = {"v": VERSION, "fields": got, "model": model, "run_id": run, "facts": facts,
                                   **({"restriction": rx} if rx else {}),
-                                  **({"parking": pk} if pk else {}),
                                   **({"conflicts": conflicts} if conflicts else {})}
             d["extra"] = extra
             r = t["row"]
@@ -652,7 +569,7 @@ def extract(conn, source: str, *, limit: int = 100000, batch: int = 10, model: s
         raise
     err = res["error"]
     counts = {**plan, "calls": res["calls"], "observations": n_obs, "filled": filled, "facts": facts_n,
-              "restriction": restr, "parking": parking,
+              "restriction": restr,
               "not_asked": sum(1 for t in todo if t["hash"] not in cache)}
     finish_run(conn, run, "error" if err else "ok", counts, est_cost=round(res["spent"], 4),
                error=str(err)[:500] if err else None)

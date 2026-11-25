@@ -19,7 +19,7 @@ from .. import pipeline, settings, verify
 from ..areas import in_walk_zone
 from ..areas import zones as area_zones
 from ..config import Goal, load_goals, load_point_sets, load_points
-from ..filter import (AMENITY_FLAGS, amenity_flags, place_parking, place_restriction, best_trips, evaluate_all, evaluate_goal, goal_inputs, nearest_by_set,
+from ..filter import (AMENITY_FLAGS, amenity_flags, place_restriction, best_trips, evaluate_all, evaluate_goal, goal_inputs, nearest_by_set,
                       place_commute_terms)
 from ..filter import goals as goalstore
 from ..filter.rules import AGGS, EQUALS_FIELDS, KNOWN_FIELDS, NUMERIC_FIELDS, RULE_TYPES
@@ -279,10 +279,11 @@ class LinkIn(BaseModel):
     place_key: str | None = None  # None = split this listing into its own place
 
 
-def goal_view(r: dict[str, Any], commute: list[tuple[float | None, bool]] | None = None) -> dict[str, Any]:
+def goal_view(r: dict[str, Any], commute: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """A place's result for one goal as the list needs it. `commute`: the net-commute terms, [minutes or null,
-    estimate] per hard commute rule of the goal (filter.place_commute_terms), summed on the card."""
-    return {"commute": [[m, e] for m, e in commute or []],"status": r["status"], "nice_score": r["nice_score"],
+    estimate, trip] per hard commute rule of the goal (filter.place_commute_terms), combined on the card; `trip`
+    (rules.commute_trips) is what the card's hover lists, so the list and the number are the same terms."""
+    return {"commute": [[d["minutes"], d["est"], d] for d in commute or []],"status": r["status"], "nice_score": r["nice_score"],
             "reasons": [t for s, t, *_ in r["reasons"] if s != "pass"],
             "fails": r["fails"],  # the attribute of each reason, for red/amber facts
             "unit_key": r["unit_key"], "source": r["source"], "source_id": r["source_id"]}
@@ -452,8 +453,6 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                                                    for a in json.loads(x["amenities"])})),
                 # a limit on who may rent that any listing here states (income, senior, ...): the card's badge
                 "restriction": place_restriction(parsed, a),
-                # parking as the most informative listing here states it (filter.place_parking): the card's line
-                "parking": place_parking(parsed),
                 "rating": (a.get("overall") or {}).get("rating"),
                 "user_status": (a.get("status") or {}).get("comment"),
             })
@@ -485,9 +484,8 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         place["label"] = place_label(place)
         by_place = cached("listings_by_place", lambda: _group_listings(conn))
         listings = by_place.get(place_key, [])
-        parsed = [{**x, "data": json.loads(x["data"])} for x in listings]
-        place["restriction"] = place_restriction(parsed, latest_annotations("place", place_key).get(place_key, {}))
-        place["parking"] = place_parking(parsed)
+        place["restriction"] = place_restriction([{**x, "data": json.loads(x["data"])} for x in listings],
+                                                 latest_annotations("place", place_key).get(place_key, {}))
         res = cached("evaluate_all", lambda: evaluate_all(conn))
         trips = cached("best_trips", lambda: best_trips(conn)).get(place_key, {})
         out_listings = []

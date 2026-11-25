@@ -266,14 +266,37 @@ function netCommute(p) {
   return { v: aggregate(known, $("#agg").value), sd: aggregate(known, "spread"), n: terms.length, known: known.length,
     est: terms.some((t) => t[0] != null && t[1]) };
 }
+// the trips behind the net commute, one line each, from the same terms the number is computed from (the third
+// element of each term, filter.rules.commute_trips): "drive to Meta HQ 20 min (Google) · rule to Meta HQ: drive <= 30"
+function netTripLine(d) {
+  const where = d.set ? `nearest ${S.meta.point_sets?.[d.set]?.label || d.set}${d.point ? ` (${d.point.split(":").slice(1).join(":")})` : ""}`
+    : (d.point || "").split(":").slice(1).join(":");
+  const head = `${d.mode ? `${MODE_LABEL[d.mode] || d.mode} ` : ""}to ${where}`;
+  if (d.minutes == null) return `✗ ${head}: skipped, ${d.why || "no time"} (not counted) · rule ${d.rule}`;
+  const src = d.provider === "knn"
+    ? `KNN range ${mins(d.min)}–${mins(d.max)} of ${d.n || "?"} nearby Google route${d.n === 1 ? "" : "s"}; uses their median ${mins(d.minutes)}`
+    : d.provider === "google" ? "Google" : d.provider === "estimate" ? "straight-line estimate" : d.provider;
+  return `✓ ${head} ${mins(d.minutes)} min (${src}) · rule ${d.rule}`;
+}
+function netTrips(terms) {
+  return (terms || []).filter((t) => t[2]).map((t) => netTripLine(t[2]));
+}
+function netTip(p) {
+  const terms = S.goal === "all" ? null : p.goals[S.goal]?.commute;
+  const lines = netTrips(terms);
+  return lines.length ? `net commute (${$("#agg").value}) over these trips:\n${lines.join("\n")}` : "";
+}
 function netFact(p, fails) {
   const n = netCommute(p);
   if (!n) return "";
   const agg = $("#agg").value;
   // the rule's verdict colours the number only when the card shows the rule's own aggregate; else it stays a chip
-  const mk = markFor(fails, (x) => x.f === "net_commute" && x.agg === agg);
+  const mk0 = markFor(fails, (x) => x.f === "net_commute" && x.agg === agg);
+  // hover lists the trips that went into the number (the rule's verdict, if any, first)
+  const tip = esc(netTip(p));
+  const mk = mk0 ? mk0.replace(/title="([^"]*)"/, (_, t) => `title="${t}${tip ? `\n\n${tip}` : ""}"`) : (tip ? ` title="${tip}"` : "");
   const trips = `${n.n} trip${n.n > 1 ? "s" : ""}${n.est ? ", est." : ""}`;
-  if (n.v == null) return `<span${mk || ' data-ff="needs_check"'}>net commute: no times yet (${trips})</span>`;
+  if (n.v == null) return `<span${mk0 ? mk : `${mk} data-ff="needs_check"`}>net commute: no times yet (${trips})</span>`;
   const unk = n.known < n.n ? (agg === "total" ? ` + ? (${n.n - n.known} unknown)` : ` of ${n.known} known (${n.n - n.known} unknown)`) : "";
   const main = agg === "spread" ? `spread ±<b>${mins(n.v)}</b> min${unk}` : `${agg} <b>${mins(n.v)}</b> min${unk}${n.known > 1 ? ` · spread ±${mins(n.sd)}` : ""}`;
   return `<span${mk}>net commute ${main} (${trips})</span>`;
@@ -312,9 +335,6 @@ function ruleTemplates() {
     ["furnished", { type: "equals", field: "furnished", value: true }],
     ["private bath", { type: "equals", field: "private_bath", value: true }],
     ["no restrictions (who may rent)", { type: "equals", field: "restriction", value: "none" }],
-    ["parking included", { type: "equals", field: "parking_included", value: true }],
-    ["parking spots at least", { type: "min", field: "parking_spots", value: 1 }],
-    ["parking cost at most ($/month)", { type: "max", field: "parking_usd_month", value: 100 }],
     ["available for dates", { type: "dates_cover", start: new Date().toISOString().slice(0, 10), end: new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10) }],
     ["field known", { type: "known", field: "sqft" }],
     ["net commute (the must-have commute rules)", { type: "net_commute", agg: $("#agg").value || "total", max: 90 }],
@@ -322,8 +342,7 @@ function ruleTemplates() {
 }
 const opt = (v, label, sel) => `<option value="${esc(v)}"${String(v) === String(sel) ? " selected" : ""}>${esc(label)}</option>`;
 const FIELD_LABEL = { price: "price", price_month: "price / month", price_per_bed: "price / bed", beds: "beds", baths: "baths",
-  sqft: "sqft", term: "term", furnished: "furnished", private_bath: "private bath", kind: "kind", restriction: "who may rent",
-  parking_included: "parking included", parking_spots: "parking spots", parking_usd_month: "parking $/month" };
+  sqft: "sqft", term: "term", furnished: "furnished", private_bath: "private bath", kind: "kind", restriction: "who may rent" };
 const fieldName = (f) => FIELD_LABEL[f] || f.replace(/_/g, " ");
 // one rule row's inputs; each input names the path it sets in data-p ("value", "options.0.max", ...)
 function ruleInputs(r) {
@@ -707,23 +726,6 @@ function whoMayRent(d, p) {
     <span class="muted">${mine ? "your answer" : esc(read)}</span></div>`;
 }
 
-// Parking as the most informative listing here states it (filter.place_parking): "🅿 1 covered, $75/mo", the quotes on
-// hover; red / amber when the selected goal's parking rule fails or needs a check on it (`fails`, like other facts)
-const PARKING_KIND = { off_street: "off-street", uncovered: "open", ev_charging: "EV" };
-function parkingText(pk) {
-  const kinds = (pk.kinds || []).filter((k) => k !== "street").map((k) => PARKING_KIND[k] || k).join("/");
-  if (pk.offered === "no") return (pk.kinds || []).includes("street") ? "street parking only" : "no parking";
-  const what = [pk.spots != null ? pk.spots : "", kinds].filter((x) => x !== "").join(" ") || "parking";
-  const cost = pk.cost === "included" ? "included" : pk.cost === "paid" ? (pk.usd_month != null ? `${money(pk.usd_month)}/mo` : "paid")
-    : "cost unspecified";
-  return `${what}, ${cost}${pk.offered == null ? " (offered?)" : ""}`;
-}
-function parkingFact(pk, fails = []) {
-  const mk = markFor(fails, (x) => x.f.startsWith("parking_"));
-  if (!pk) return mk ? `<span${mk}>🅿 ?</span>` : "";
-  return `<span${mk || ` title="${esc(`"${(pk.evidence || []).join(" | ")}" (${pk.source})`)}"`}>🅿 ${esc(parkingText(pk))}</span>`;
-}
-
 function stars(n) { return n ? `<span class="stars" title="${n}/5">${"★".repeat(n)}${"☆".repeat(5 - n)}</span>` : ""; }
 
 function renderList() {
@@ -744,7 +746,7 @@ function renderList() {
       : `<span${bm || am}>beds ?</span>`;
     const facts = `${priceFacts(p, fails)}
         <span>${bb}</span>
-        ${limitFacts(p, fails)}${netFact(p, fails)}${parkingFact(p.parking, fails)}`;
+        ${limitFacts(p, fails)}${netFact(p, fails)}`;
     const rxb = restrictionBadge(p.restriction, fails);
     const extra = rxb + fails.filter((x) => !x.used).map(failChip).join("");
     return `<div class="card ${st === "fail" ? "dim" : ""} ${S.selected === p.place_key ? "sel" : ""}" data-pk="${esc(p.place_key)}">
@@ -879,11 +881,18 @@ async function openPlace(pk) {
   const d = await api(`api/places/${encodeURIComponent(pk)}`);
   const p = d.place;
   const label = p.label || d.listings.find((l) => l.fields.title)?.fields.title || pk;
-  const goals = Object.entries(d.goals).filter(([g, r]) => r && (S.goal === "all" || g === S.goal)).map(([g, r]) => `
+  // the net commute's trips (the list's own terms for this place, so the drawer and the card read the same list)
+  const lp = S.places.find((x) => x.place_key === pk);
+  const goals = Object.entries(d.goals).filter(([g, r]) => r && (S.goal === "all" || g === S.goal)).map(([g, r]) => {
+    const nt = netTrips(lp?.goals?.[g]?.commute);
+    const ntTip = nt.length ? ` title="${esc(`trips in the net commute:\n${nt.join("\n")}`)}"` : "";
+    return `
     <div><span class="chip ${r.status}">${esc(g)}: ${esc(STATUS_LABEL[r.status])}</span>${r.own_site ? ' <span class="small muted" title="The building\'s own website prices offers here, so only its listings decide the goals; other sources are shown as \'also listed\'.">judged on the own website</span>' : ""}
-      ${r.reasons.map(([s, t]) => `<div class="reason ${s}">${s === "pass" ? "✓" : s === "fail" ? "✗" : "?"} ${esc(t)}</div>`).join("")}
+      ${r.reasons.map(([s, t, ty]) => `<div class="reason ${s}"${ty === "net_commute" ? ntTip : ""}>${s === "pass" ? "✓" : s === "fail" ? "✗" : "?"} ${esc(t)}</div>`).join("")}
+      ${nt.length ? `<details class="net-trips small"><summary>net commute: ${nt.length} trip${nt.length > 1 ? "s" : ""}</summary>${nt.map((x) => `<div>${esc(x)}</div>`).join("")}</details>` : ""}
       ${r.nice.length ? `<div class="small muted">nice to have: ${r.nice.map(([s, t]) => `${s === "pass" ? "✓" : s === "fail" ? "✗" : "?"} ${esc(t)}`).join(" · ")}</div>` : ""}
-    </div>`).join("");
+    </div>`;
+  }).join("");
   const photos = (d.photos || []).map((ph) => `<figure class="ph"><a href="${esc(ph.page || ph.url)}" target="_blank" rel="noopener noreferrer" title="Open the ${esc(ph.site || ph.source)} page this photo is from"><img loading="lazy" src="${esc(ph.url)}" alt="photo from ${esc(ph.site || ph.source)}" onerror="this.closest('figure').remove()"></a>${ph.page ? `<a class="src" href="${esc(ph.page)}" target="_blank" rel="noopener noreferrer" title="Open the page this photo came from">${esc(ph.site || ph.source)} ↗</a>` : `<span class="src">${esc(ph.source)}</span>`}</figure>`)
     .concat(d.listings.flatMap((l) => l.media.map((f) => `<a href="media/${encodeURIComponent(f)}" target="_blank" rel="noopener"><img src="media/${encodeURIComponent(f)}" alt="file from ${esc(l.source)}"></a>`)));
   // other sources' prices beside the own site's: "also listed at $X on zillow"
@@ -943,7 +952,6 @@ async function openPlace(pk) {
     <h2>${esc(label)} ${restrictionBadge(p.restriction)} ${stars(d.annotations.filter((a) => a.attribute === "overall" && a.rating).slice(-1)[0]?.rating)}</h2>
     ${(d.websites || []).length ? `<div class="website">${d.websites.map((w) => `<a href="${esc(w.url)}" target="_blank" rel="noopener noreferrer">🌐 ${esc(w.site)} ↗</a>`).join(" ")}</div>` : '<div class="website muted small">no website found yet</div>'}
     <div class="muted small">${esc(p.address || "address unknown")} ${p.city ? "· " + esc(p.city) : ""} · ${esc(pk)}</div>
-    ${p.parking ? `<div class="small facts">${parkingFact(p.parking)}</div>` : ""}
     <h3>Goals</h3>${goals}
     ${whoMayRent(d, p)}
     ${photos.length ? `<h3>Photos (${photos.length})</h3><div class="media">${photos.join("")}</div>` : '<p class="muted small">No photos from any source.</p>'}

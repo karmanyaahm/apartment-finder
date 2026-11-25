@@ -205,3 +205,5 @@ input[type=number] { padding-right: 2px; }
 .src-google { color: var(--src-google); } .src-knn { color: var(--src-knn); } .src-estimate { color: var(--muted); }
 .src-key { white-space: nowrap; }
 .vconf.gone { opacity: .5; }
+/* the net commute's trips under a goal in the drawer: a plain line, not a section heading */
+.net-trips > summary { margin: 2px 0; font-size: inherit; text-transform: none; letter-spacing: 0; }
