@@ -290,6 +290,13 @@ def evaluate(rule: dict[str, Any], row: dict[str, Any], ctx: Ctx) -> tuple[str, 
 
     if t == "dates_cover":
         start, end = rule["start"], rule["end"]
+        # a stated minimum stay longer than the goal's stay fails whatever the dates (filter.min_stay); unknown: as before
+        ms = row.get("min_stay_days")
+        if ms is not None:
+            import datetime as _dt
+            days = (_dt.date.fromisoformat(end) - _dt.date.fromisoformat(start)).days
+            if ms > days:
+                return FAIL, f"{label}: minimum stay {ms:g} days ({row.get('min_stay_evidence')}), the stay is {days}"
         ci, co = row.get("query_checkin"), row.get("query_checkout")
         if ci and co and ci <= start and co >= end:
             return PASS, f"{label} (returned for query {ci} to {co})"

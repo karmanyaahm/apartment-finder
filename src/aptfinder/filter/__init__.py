@@ -138,6 +138,7 @@ def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None, trips:
     pk_place: dict[str, list[dict[str, Any]]] = {}
     places: set[str] = set()  # every place, site_info-only ones included: a place with no offer is 'no listings'
     gone: dict[tuple[str, str], str] = {}  # a row its source marks unavailable (unavailable_label)
+    min_stays: dict[tuple[str, str], tuple[float, str]] = {}  # the source's stated minimum stay (min_stay)
     for r in conn.execute("SELECT source, source_id, place_key, amenities, url, operator, floor_plan, "
                           "json_extract(data, '$.extra.availability') AS avail, "
                           "json_extract(data, '$.extra.available_label') AS avail_label, "
@@ -145,9 +146,16 @@ def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None, trips:
                           "json_extract(data, '$.extra.extracted.restriction') AS rx, "
                           "json_extract(data, '$.extra.page_restriction') AS prx, "
                           "json_extract(data, '$.extra.extracted.parking') AS pkx, "
-                          "json_extract(data, '$.extra.page_parking') AS ppk FROM listings"):
+                          "json_extract(data, '$.extra.page_parking') AS ppk, "
+                          "json_extract(data, '$.extra.min_stay_days') AS msd, "
+                          "json_extract(data, '$.extra.minimum_stay_days') AS mnsd, "
+                          "json_extract(data, '$.extra.min_lease_days') AS mld, "
+                          "json_extract(data, '$.extra.min_lease_months') AS mlm FROM listings"):
         if r["place_key"]:
             places.add(r["place_key"])
+        ms = min_stay(r["msd"], r["mnsd"], r["mld"], r["mlm"])
+        if ms:
+            min_stays[(r["source"], r["source_id"])] = ms
         why = unavailable_label(r["avail"], r["avail_label"], r["floor_plan"])
         if why:
             gone[(r["source"], r["source_id"])] = why
@@ -176,6 +184,7 @@ def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None, trips:
     bu = building_units_by_place(conn)
     for r in listings + unpriced:
         r["unavailable"] = gone.get((r["source"], r["source_id"]))
+        r["min_stay_days"], r["min_stay_evidence"] = min_stays.get((r["source"], r["source_id"]), (None, None))
         b = bu.get(r["place_key"] or "")
         r["building_units"] = b["value"] if b else None
         r["building_units_floor"] = bool(b and b["floor"])
@@ -208,6 +217,19 @@ def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None, trips:
 # plan name, an own site's "Unavailable on selected date", "Call for details", "Contact for Availability",
 # "WAITLIST CLOSED". Structured fields only, never a description ("parking is currently unavailable").
 UNAVAILABLE = re.compile(r"^0 available|^no availab|unavailable|waitlist|wait list|call for|contact for|sold out", re.I)
+
+
+def min_stay(min_stay_days: Any, minimum_stay_days: Any, min_lease_days: Any, min_lease_months: Any
+             ) -> tuple[float, str] | None:
+    """(days, which field) of the shortest stay the source allows, from its structured fields only: `min_stay_days`
+    (Airbnb, Furnished Finder, Zillow, Craigslist parsers), Furnished Finder's `minimum_stay_days`, Zumper's
+    `min_lease_days`, Apartments.com's `min_lease_months` (x 30). Haiku's `lease_term_months` is 'the lease length
+    offered', not a minimum, so it is not read. None when none is stated."""
+    for v, name, mult in ((min_stay_days, "min_stay_days", 1), (minimum_stay_days, "minimum_stay_days", 1),
+                          (min_lease_days, "min_lease_days", 1), (min_lease_months, "min_lease_months", 30)):
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+            return float(v) * mult, name
+    return None
 
 
 def unavailable_label(availability: str | None, label: str | None, floor_plan: str | None) -> str | None:

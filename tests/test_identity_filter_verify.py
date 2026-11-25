@@ -614,3 +614,19 @@ def test_goal_offer_is_the_cheapest_of_the_best_status_not_the_cheapest_unit():
     assert places["p1"]["offer"]["source_id"] == "3c"  # no pass: the needs_check one, though dearer
     _, places = _nl_eval([_nl_row("1bd", "p1", 1, 1, 3799), _nl_row("3x", "p1", 3, 2, 9500)])
     assert places["p1"]["offer"]["source_id"] == "1bd"  # all fail: the cheapest overall
+
+
+def test_dates_cover_fails_on_a_stated_minimum_stay_longer_than_the_goals_stay():
+    """Furnished Finder 829696_1 (2026-11-25): minimum_stay_days 180 ('6-Months Min Beginning March') passed temp's
+    35-day Jan 11 - Feb 15 stay. A known minimum longer than the stay fails; unknown stays as before."""
+    from aptfinder.filter import min_stay
+    from aptfinder.filter.rules import FAIL, PASS, Ctx, evaluate
+
+    rule = {"type": "dates_cover", "start": "2027-01-11", "end": "2027-02-15"}
+    row = {"available_from": "2026-12-01", "min_stay_days": 180.0, "min_stay_evidence": "minimum_stay_days"}
+    s, why = evaluate(rule, row, Ctx())
+    assert s == FAIL and "minimum stay 180 days (minimum_stay_days), the stay is 35" in why
+    assert evaluate(rule, {**row, "min_stay_days": 30.0}, Ctx())[0] == PASS
+    assert evaluate(rule, {**row, "min_stay_days": None}, Ctx())[0] == PASS
+    assert min_stay(None, 180, None, None) == (180.0, "minimum_stay_days")
+    assert min_stay(None, None, None, 1) == (30.0, "min_lease_months") and min_stay(None, None, None, None) is None
