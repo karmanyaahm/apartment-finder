@@ -34,6 +34,8 @@ def main(argv: list[str] | None = None) -> None:
     rp.add_argument("--datacenter", action="store_true", help="fetch through the datacenter proxy, not residential")
     rp.add_argument("--workers", type=int, default=4)
     rp.add_argument("--model", default="sonnet")
+    rp.add_argument("--kind", action="append", choices=["cross", "text", "cheap", "pending"],
+                    help="only these conflict kinds (repeatable)")
     rp.add_argument("--dry-run", action="store_true", help="decide and report, write no checks")
     rp.add_argument("--out", help="append one JSON line per conflict to this file")
     args = ap.parse_args(argv)
@@ -47,7 +49,7 @@ def main(argv: list[str] | None = None) -> None:
         stats = reconcile(conn, goal=args.goal, limit=args.limit, skip=args.skip, max_usd=args.max_usd,
                           dry_run=args.dry_run, model=args.model, workers=args.workers,
                           residential=not args.datacenter, out_path=Path(args.out) if args.out else None,
-                          log=lambda m: print(m, flush=True))
+                          kinds=set(args.kind) if args.kind else None, log=lambda m: print(m, flush=True))
         print(json.dumps(stats, indent=1, default=str))
         return
     if args.cmd == "samples":

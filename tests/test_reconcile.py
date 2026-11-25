@@ -67,3 +67,31 @@ def test_value_in_quote():
     assert rc.value_in_quote("beds", 0, "Studio apartment", t) and not rc.value_in_quote("beds", 2, "12 bed", t)
     assert rc.value_in_quote("available_from", "2026-11-20", "Available Now", t)
     assert rc.value_in_quote("available_from", "2026-12-06", "Available Dec 6", t)
+
+
+def test_open_price_goes_to_the_current_page(conn):
+    two_sources(conn)
+    calls = []
+
+    def fake_fetch(urls, residential, max_usd):
+        calls.append((tuple(urls), residential))
+        return ({"https://z/1": {"text": "Price change: now $3,200/mo for this 2 bed", "title": "t", "status": 200,
+                                 "fetched": "2026-11-25"}} if not residential else {}), \
+               {"usd": 0.01, "read": 1, "failed": [], "statuses": {"https://zu/9": 404}, "items": []}
+
+    def fn(prompt):
+        if "### P1" in prompt:
+            return answer(3200, "now $3,200/mo for this 2 bed", evidence="P1")(prompt)
+        return [{"field": "price", "status": "undecided", "confidence": "low", "reason": "?", "need_page": True}], 0.01
+
+    import aptfinder.intake.apify as ap
+    ap_credit = ap.credit
+    ap.credit = lambda: {"left": 5.0}
+    try:
+        st = run(conn, fn, max_usd=0.5, fetch_fn=fake_fetch)
+    finally:
+        ap.credit = ap_credit
+    assert calls == [(("https://z/1", "https://zu/9"), False)]  # the 404 is not retried through residential
+    assert st["resolved"] == 1 and conflict_queue(conn) == []
+    note = conn.execute("SELECT note FROM checks LIMIT 1").fetchone()[0]
+    assert '"url": "https://z/1"' in note and '"evidence": "P1"' in note

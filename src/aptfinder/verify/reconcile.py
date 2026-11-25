@@ -129,8 +129,8 @@ def goal_relevance_map(conn, items: list[dict[str, Any]]) -> dict[int, list[str]
     return out
 
 
-def select(conn, goal: str | None = None, relevance: dict[int, list[str]] | None = None
-           ) -> tuple[list[dict[str, Any]], dict[str, int]]:
+def select(conn, goal: str | None = None, relevance: dict[int, list[str]] | None = None,
+           kinds: set[str] | None = None) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Open conflicts to reconcile, goal-relevant first (those of `goal` when given), then the rest by place.
     -> (items, skipped counts by reason). Each item gains `decide` (its fields) and `goals`."""
     items = all_conflicts(conn)
@@ -148,6 +148,8 @@ def select(conn, goal: str | None = None, relevance: dict[int, list[str]] | None
             continue
         if not fs:
             skipped["user_checked"] += 1
+            continue
+        if kinds and item_kind(it) not in kinds:
             continue
         out.append({**it, "decide": fs, "goals": rel.get(i, []), "kind_tag": item_kind(it)})
     first = (lambda c: goal not in c["goals"]) if goal else (lambda c: not c["goals"])
@@ -392,15 +394,19 @@ def fetch(urls: list[str], *, residential: bool, max_usd: float) -> tuple[dict[s
                     max_items=2 * n, max_charge_usd=max_usd, timeout_s=900, memory_mb=2048, clean=False,
                     est_usd=RESIDENTIAL_USD_PER_PAGE * n if residential else None)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    out = {}
+    out, statuses = {}, {}
     for it in res.items:
+        d = it.get("#debug") or {}
+        u = next((x for x in urls if any(same_url(x, y) for y in (it.get("requested"), it.get("url"),
+                                                                    d.get("url"), d.get("loadedUrl")) if y)), None)
+        if u:
+            statuses[u] = it.get("status") or d.get("statusCode")
         if it.get("#error") or not it.get("text"):
             continue
-        u = next((x for x in urls if same_url(x, it.get("requested")) or same_url(x, it.get("url"))), None)
         if u and len(it["text"].strip()) > 200 and (it.get("status") or 200) < 400:
             out[u] = {"text": it["text"], "title": it.get("title"), "status": it.get("status"),
                       "final_url": it.get("url"), "fetched": now}
-    info = {**run_record(res), "pages": n, "read": len(out), "residential": residential,
+    info = {**run_record(res), "pages": n, "read": len(out), "residential": residential, "statuses": statuses,
             "failed": [f"{f['url']}: {f['status']} {(f['messages'] or ['?'])[-1][:120]}" for f in
                        failed_requests(res.items)],
             "items": res.items}
@@ -472,43 +478,55 @@ def reconcile(conn, *, goal: str | None = None, limit: int = 10, max_usd: float 
               model: str = MODEL, workers: int = 4, residential: bool = True, skip: int = 0,
               ask_fn: Callable[[str], tuple[list, float]] | None = None, fetch_fn: Callable | None = None,
               relevance: dict[int, list[str]] | None = None, out_path: Path | None = None,
+              kinds: set[str] | None = None,
               log: Callable[[str], None] = print) -> dict[str, Any]:
     """Reconcile up to `limit` open conflicts (from `skip`). `max_usd`: Apify cap for current pages (0: stored
     evidence only). `dry_run`: decide and report, write nothing."""
     from ..intake.apify import RESIDENTIAL_USD_PER_PAGE, credit
 
     today = date.today().isoformat()
-    items, skipped = select(conn, goal, relevance)
+    items, skipped = select(conn, goal, relevance, kinds)
     todo = items[skip:skip + limit]
     ask_fn = ask_fn or (lambda p: ask(p, model))
     texts = Texts()
     run_id = None if dry_run else start_run(conn, "verify", "reconcile", {
         "model": model, "goal": goal, "limit": limit, "skip": skip, "max_apify_usd": max_usd,
-        "residential": residential})
+        "residential": residential, "kinds": sorted(kinds or [])})
     log(f"reconcile: {len(todo)} of {len(items)} open conflicts (skipped: {skipped}); Apify cap ${max_usd:.2f}")
     results = _decide(conn, todo, {}, texts, today, model, ask_fn, workers, log)
     # second pass: fields still open that a current page could settle
-    apify, pages_by_url = {"usd": 0.0, "runs": []}, {}
+    apify, pages_by_url, gone = {"usd": 0.0, "runs": []}, {}, set()
     want = [r for r in results if not r["error"] and any(
         not d["accepted"] and d.get("field") in FETCH_FIELDS for d in r["decisions"])]
     urls = list(dict.fromkeys(e["url"] for r in want for e in r["ev"] if e["url"]))
     if urls and max_usd > 0:
-        per = RESIDENTIAL_USD_PER_PAGE if residential else DC_USD_PER_PAGE
-        cr = credit()
-        room = min(max_usd, (cr["left"] or 0) - 0.30)
-        n = max(0, min(len(urls), int(room / per)))
-        log(f"fetch: {len(urls)} pages wanted, {n} within ${room:.2f} (credit left ${cr['left']}, "
-            f"{'residential' if residential else 'datacenter'} ~${per}/page)")
-        if n:
-            got, info = (fetch_fn or fetch)(urls[:n], residential=residential, max_usd=min(room, per * n + 0.05))
+        spent = 0.0
+        for proxy in (["datacenter", "residential"] if residential else ["datacenter"]):
+            left = [u for u in urls if u not in pages_by_url]
+            if proxy == "residential":  # not pages the datacenter fetch found gone (404 / 410)
+                left = [u for u in left if u not in gone]
+            per = RESIDENTIAL_USD_PER_PAGE if proxy == "residential" else DC_USD_PER_PAGE
+            cr = credit()
+            room = min(max_usd - spent, (cr["left"] or 0) - 0.30)
+            n = max(0, min(len(left), int(room / per)))
+            log(f"fetch ({proxy}): {len(left)} pages wanted, {n} within ${room:.2f} (credit left ${cr['left']}, "
+                f"~${per}/page)")
+            if not n:
+                continue
+            got, info = (fetch_fn or fetch)(left[:n], residential=proxy == "residential",
+                                            max_usd=min(room, per * n + 0.05))
             pages_by_url.update(got)
+            gone |= {u for u, st in info.get("statuses", {}).items() if st in (404, 410)}
             raw = settings.RAW_DIR / "reconcile"
             raw.mkdir(parents=True, exist_ok=True)
-            (raw / f"run{run_id or 'dry'}-{datetime.now():%H%M%S}.json").write_text(json.dumps(info))
-            apify["usd"] += (info.get("usd") or 0) + (per * n if residential else 0)
+            (raw / f"run{run_id or 'dry'}-{proxy}-{datetime.now():%H%M%S}.json").write_text(json.dumps(info))
+            cost = (info.get("usd") or 0) + (per * n if proxy == "residential" else 0)
+            spent += cost
+            apify["usd"] += cost
             apify["runs"].append({k: v for k, v in info.items() if k != "items"})
-            log(f"fetch: read {info['read']} of {n}; Apify charge ${info.get('usd') or 0:.3f} (+ residential traffic "
-                f"billed later, est ${per * n if residential else 0:.2f}); failed: {info['failed'][:5]}")
+            log(f"fetch ({proxy}): read {info['read']} of {n}; Apify charge ${info.get('usd') or 0:.3f}"
+                + (f" + residential traffic billed later, est ${per * n:.2f}" if proxy == "residential" else "")
+                + f"; failed: {info['failed'][:6]}")
         again = [r["item"] for r in want if any(e["url"] in pages_by_url for e in r["ev"])]
         if again:
             redo = {id(r["item"]): r for r in _decide(conn, again, pages_by_url, texts, today, model, ask_fn,
