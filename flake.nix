@@ -105,7 +105,16 @@
       };
       devShells.${system}.default = pkgs.mkShell {
         packages = [ pkgs.uv pkgs.python312 pkgs.cloudflared pkgs.claude-code ];
-        shellHook = "unset PYTHONPATH"; # a system PYTHONPATH (e.g. ROS) breaks pytest
+        # unset PYTHONPATH: a system PYTHONPATH (e.g. ROS) breaks pytest. On NixOS only: uv installs PyPI wheels,
+        # which find no libstdc++ / libz there (numpy, via imagehash) and no libcairo (cairocffi, via cairosvg), so
+        # `uv run aptf-media` could not decode an image. Not elsewhere: a venv on the host's Python (Ubuntu) has
+        # those libraries, and Nix's libstdc++ needs a newer glibc than the host's.
+        shellHook = ''
+          unset PYTHONPATH
+          if [ -e /etc/NIXOS ]; then
+            export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib pkgs.zlib pkgs.cairo ]}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+          fi
+        '';
       };
     };
 }

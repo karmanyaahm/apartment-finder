@@ -249,3 +249,35 @@ def test_curl_hosts_download_through_curl(place, monkeypatch):
     c = media.fetch(conn, log=lambda m: None)
     assert sorted(calls) == ["https://cdn2/a_small.jpg", "https://cdn2/gone.jpg"]  # only cdn2 went through curl
     assert not c.get("failed")
+
+
+def test_a_library_that_does_not_load_stops_the_run_before_anything_is_written(place, monkeypatch):
+    """run 400 (2026-11-25): numpy did not import in the dev shell and every download was recorded as 'not an image'."""
+    import builtins
+
+    real = builtins.__import__
+
+    def no_imagehash(name, *a, **kw):
+        if name == "imagehash":
+            raise ImportError("libstdc++.so.6: cannot open shared object file")
+        return real(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", no_imagehash)
+    runs = place.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+    with pytest.raises(SystemExit, match="libstdc"):
+        media.fetch(place, log=lambda m: None)
+    assert place.execute("SELECT COUNT(*) FROM media").fetchone()[0] == 0
+    assert place.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == runs
+
+
+def test_an_import_error_during_a_download_aborts_the_run_instead_of_failing_the_url(place, monkeypatch):
+    monkeypatch.setattr(media, "check_decoders", lambda: None)
+
+    def broken(content, kind):
+        raise ImportError("numpy")
+
+    monkeypatch.setattr(media, "encode", broken)
+    with pytest.raises(ImportError):
+        media.fetch(place, log=lambda m: None)
+    assert place.execute("SELECT COUNT(*) FROM media WHERE error LIKE 'not an image%'").fetchone()[0] == 0
+    assert place.execute("SELECT status FROM runs WHERE component = 'media'").fetchone()[0] == "aborted"

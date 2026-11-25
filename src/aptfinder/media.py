@@ -172,6 +172,25 @@ def encode(content: bytes, kind: str) -> dict[str, Any]:
             "width": w, "height": h, "bytes": len(content)}
 
 
+def check_decoders() -> None:
+    """Import the image libraries and encode a tiny PNG and SVG once, in the main thread, before any download.
+    A missing library (on NixOS the uv wheels of numpy and cairocffi need libstdc++ and libcairo, which the dev
+    shell's LD_LIBRARY_PATH provides) is the environment's fault, not the image's: it stops the run here instead
+    of being recorded as 'not an image' for every URL (run 400, 2026-11-25: 679 URLs). Raises SystemExit."""
+    try:
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new("RGB", (8, 8), "white").save(buf, "PNG")
+        encode(buf.getvalue(), "photo")
+        encode(b'<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8"/></svg>',
+               "plan")
+    except (ImportError, OSError) as e:
+        raise SystemExit(f"aptf-media: the image libraries do not load ({type(e).__name__}: {e}".strip()[:600]
+                         + "). Nothing was fetched. Run it with `nix run .#media` or inside `nix develop` (which "
+                           "sets LD_LIBRARY_PATH for the uv wheels).") from e
+
+
 def media_path(sha: str, root: Path | None = None) -> Path:
     return (root or settings.MEDIA_DIR) / sha[:2] / f"{sha}.jpg"
 
@@ -306,6 +325,8 @@ def _download(client: Any, job: dict[str, Any], sems: dict[str, threading.Semaph
         return {"status": code, "error": f"too large ({len(body)} bytes)"}
     try:
         return {"status": 200, **encode(body, job["kind"])}
+    except ImportError:  # a library that does not load is not a bad image: fail the run (check_decoders)
+        raise
     except Exception as e:
         return {"status": 200, "error": f"not an image: {type(e).__name__}: {e}"[:300]}
 
@@ -347,6 +368,7 @@ def fetch(conn: sqlite3.Connection, *, retry_failed: bool = False, limit: int | 
     if max_distance is not None:
         PHOTO_MAX_DISTANCE = max_distance
     root = root or settings.MEDIA_DIR
+    check_decoders()  # before the run row: a broken environment writes nothing
     jobs = photo_jobs(conn)
     files, failed = url_files(conn), _failed(conn)
     phash_of = {r[0]: r[1] for r in conn.execute(
