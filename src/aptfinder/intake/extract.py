@@ -20,7 +20,7 @@ left out, so a building's units send the same text and are read once. Answers ar
   not in the text is dropped (unknown). A RentCafe building under rentcafe.com/housing/ read as 'none' stays unknown:
   that section holds income-restricted and market-rate buildings alike (Alta Torre $880, 6tenEast $3,841);
 - parking (`parking`, `check_parking`): offered yes / no, kinds, spots, cost included / paid with a monthly price,
-  each backed by verbatim quotes (a number only if a quote holds it); street parking alone is offered 'no'.
+  each backed by verbatim quotes (a number only if a quote holds it); street parking alone is offered 'no' (every quote about the street).
 
 The result is a new observation of the same listing (append-only; run component `extract`): facts the source left
 empty are filled (address, name, furnished, private bath; website, minimum stay and utilities in `extra`), positive
@@ -136,7 +136,9 @@ PARKING = {
                    "home, only if a number is stated ('1 assigned space', '2-car garage'), else null. cost: included "
                    "when a space comes with the rent at no extra charge ('free parking', 'parking included'); paid "
                    "when a space costs extra ('garage $150/month', 'parking available for rent', 'reserved parking "
-                   "fee') and none is said to be included; null when the entry does not say. usd_month: the monthly "
+                   "fee') and none is said to be included; null when the entry does not say (a notice that prices "
+                   "exclude 'fees such as utilities, parking' says neither that parking is offered nor its cost: "
+                   "null). usd_month: the monthly "
                    "price of one space when paid and a number is stated (the lowest, if several), else null. "
                    "evidence: the exact words about parking, one or more short quotes copied character for "
                    "character.",
@@ -251,8 +253,8 @@ def check_parking(p: Any, text: str) -> dict[str, Any] | None:
     digits = re.sub(r"[^\d.]", " ", re.sub(r"(?<=\d),(?=\d{3})", "", " ".join(quotes))).split()
     kinds = sorted({k for k in p.get("kinds") or [] if k in PARKING_KINDS})
     offered = p.get("offered") if p.get("offered") in ("yes", "no") else None
-    if kinds == ["street"]:
-        offered = "no"  # 'street parking available' is no space of one's own
+    if kinds == ["street"] and all("street" in _norm(q).split() for q in quotes):
+        offered = "no"  # 'street parking available' is no space of one's own ('Free parking on premises' stays)
     spots = p.get("spots")
     if not (isinstance(spots, int) and not isinstance(spots, bool) and 0 <= spots <= 10
             and (str(spots) in digits or f" {_NUM_WORDS.get(spots, '#')} " in f" {qn} ")):

@@ -32,6 +32,11 @@ def test_garage_for_rent_is_paid_and_street_parking_is_no_space():
                          "evidence": ["Street parking available"]}, TEXT)
     assert got["offered"] == "no" and got["cost"] is None and got["spots"] == 0
     assert parking_amenity(got) == []
+    # Airbnb: a space on the premises beside street parking is no street-only home, whatever kinds Haiku tagged
+    text = "Free parking on premises. Free street parking."
+    got = check_parking({"offered": "yes", "kinds": ["street"], "cost": "included",
+                         "evidence": ["Free parking on premises", "Free street parking"]}, text)
+    assert got["offered"] == "yes" and got["cost"] == "included"
     assert parking_amenity({"offered": "yes", "kinds": ["garage", "street"]}) == ["Parking: garage (read from text)"]
 
 
