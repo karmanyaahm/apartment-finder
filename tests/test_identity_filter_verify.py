@@ -367,3 +367,32 @@ def test_own_site_without_prices_or_retired_does_not_win(conn):
     res = evaluate_all(conn, _lease_goals())
     (place,) = res["places"]["lease"].values()
     assert place["status"] == PASS and place["source"] == "zillow" and not place["own_site"]
+
+
+def test_cheap_listing_goes_to_verify_until_its_price_is_checked(conn):
+    from aptfinder.verify import all_conflicts, cheap_queue
+
+    r = start_run(conn, "intake", "zumper")
+    a = obs(conn, r, "zumper", "z1", 1600, address="425 Oak Ave #A, Redwood City", beds=5, baths=3.5, kind="house")
+    obs(conn, r, "zumper", "z2", 900, address="1 Studio St, Redwood City", beds=0)  # studio counts as 1 bed
+    obs(conn, r, "zumper", "ok", 3000, address="2 Fine St, Redwood City", beds=2)  # $1,500/bed
+    obs(conn, r, "zumper", "nb", 500, address="3 Nobeds St, Redwood City")  # beds unknown: never flagged
+    obs(conn, r, "airbnb", "s", 2000, address="4 Stay St, Redwood City", beds=3, term="short", furnished=True)
+    obs(conn, r, "craigslist", "rm", 1200, address="5 Room St, Redwood City", beds=4, kind="room")
+    obs(conn, r, "airbnb", "n", 50, "night", address="6 Night St, Redwood City", beds=3)  # not a monthly lease
+    obs(conn, r, "zumper", "fl", 1500, address="7 Long St, Redwood City", beds=2, furnished=True)  # furnished lease
+    identity.run(conn)
+    q = cheap_queue(conn, 1000)
+    assert [c["listings"][0]["source_id"] for c in q] == ["z1", "fl", "z2"]  # lowest $/bed first
+    z1 = q[0]
+    assert z1["per_bed"] == 320 and z1["kind"] == "conflict" and z1["fields"] == ["price_month", "beds"]
+    assert z1["reason"] == "price per bedroom $320 < $1,000: check for per-room or misread price"
+    assert any(c.get("cheap") for c in all_conflicts(conn))
+    # right (the price is real): off the list
+    append_check(conn, "user", "conflict", "price", "correct", observation_id=a, stored_value=1600)
+    assert "z1" not in [c["listings"][0]["source_id"] for c in cheap_queue(conn, 1000)]
+    # wrong with the true rent: off the list, and the corrected price is what the views show
+    z2 = conn.execute("SELECT obs_id FROM listings WHERE source_id = 'z2'").fetchone()[0]
+    append_check(conn, "user", "conflict", "price", "wrong", observation_id=z2, stored_value=900, true_value=2900)
+    assert [c["listings"][0]["source_id"] for c in cheap_queue(conn, 1000)] == ["fl"]
+    assert conn.execute("SELECT price FROM listings WHERE source_id = 'z2'").fetchone()[0] == 2900

@@ -559,7 +559,8 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
         out: dict[str, Any] = {"observations": [_obs_fields(i) for i in ids]}
         if item["kind"] == "conflict":
             # the queue's price_month conflicts are checked on the stored price
-            out["fields"] = sorted({verify.CHECK_FIELD.get(f, f) for f in item["fields"]})
+            out["fields"] = (["price", "beds"] if item.get("cheap")  # the price is the check that settles it
+                             else sorted({verify.CHECK_FIELD.get(f, f) for f in item["fields"]}))
         else:
             out["fields"] = load_goals().verify.sample_fields
         p = all_places().get(item["place_key"])
@@ -583,7 +584,7 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
             for o in e["observations"]:
                 o["checked"] = checked.get((o["source"], o["source_id"]), {})
         return {"kind": kind, "skip": skip, "n": n, "total": len(items), "actionable": len(items) - pending,
-                "pending": pending, "items": page}
+                "pending": pending, "cheap": sum(bool(c.get("cheap")) for c in items), "items": page}
 
     @app.get("/api/verify/own_sites")
     def verify_own_sites(skip: int = 0, n: int = 20) -> dict[str, Any]:

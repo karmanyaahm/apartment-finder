@@ -49,6 +49,7 @@ class VerifyConfig(BaseModel):
     min_samples: int = 5
     min_accuracy: float = 0.8
     sample_fields: list[str] = ["price", "beds", "baths", "sqft", "available_from", "address"]
+    min_price_per_bed: float = 1000  # a lease below this per bedroom (studio = 1) goes to Verify: per-room or misread?
 
 
 class GoalsConfig(BaseModel):

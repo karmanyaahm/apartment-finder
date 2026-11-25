@@ -15,6 +15,7 @@
 min_samples = 5      # a source/field needs at least this many hand checks before accuracy counts
 min_accuracy = 0.8   # below this, the field from that source is treated as needs_check
 sample_fields = ["price", "beds", "baths", "sqft", "available_from", "address"]
+min_price_per_bed = 1000  # a lease below this per bedroom (studio = 1) goes to Verify: per-room or misread price?
 
 [goals.temp]
 label = "Temp stay, 1 person, Dec 1 2026 - Jan 1 2027"

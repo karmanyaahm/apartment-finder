@@ -188,10 +188,40 @@ def conflict_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 
 def all_conflicts(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Every open conflict in Verify order: actionable cross-source ones, then text conflicts (a render does not
-    settle those), then cross-source ones waiting for an own-site render."""
+    settle those), listings priced too low per bedroom (cheap_queue), then cross-source ones waiting for an own-site
+    render."""
     cross = conflict_queue(conn)
-    return ([c for c in cross if not c["pending_render"]] + text_conflict_queue(conn)
+    return ([c for c in cross if not c["pending_render"]] + text_conflict_queue(conn) + cheap_queue(conn)
             + [c for c in cross if c["pending_render"]])
+
+
+def cheap_queue(conn: sqlite3.Connection, min_per_bed: float | None = None) -> list[dict[str, Any]]:
+    """Active, priced monthly lease listings (not furnished short stays, not rooms in shared housing) whose price
+    per bedroom is below `[verify] min_price_per_bed` (studios count as one bedroom): likely a per-room or misread
+    price. One-listing conflicts on price (beds shown beside it, a wrong beds corrects $/bed). Drops out once the
+    price has a current check; a listing with unknown beds is never flagged."""
+    if min_per_bed is None:
+        from ..config import load_goals
+
+        min_per_bed = load_goals().verify.min_price_per_bed
+    checked = current_checks(conn)
+    out = []
+    for r in conn.execute("SELECT source, source_id, obs_id, place_key, price_month, beds, url FROM listings "
+                          "WHERE active = 1 AND price_basis = 'month' AND price_month > 0 AND beds IS NOT NULL "
+                          "AND term IS NOT 'short' AND kind IS NOT 'room' AND kind IS NOT 'site_info' "
+                          "AND price_month < ? * MAX(beds, 1) ORDER BY price_month / MAX(beds, 1), source, source_id",
+                          (min_per_bed,)):
+        if "price" in checked.get((r["source"], r["source_id"]), {}):
+            continue
+        per_bed = math.floor(r["price_month"] / max(r["beds"], 1))  # floor: $999.50 reads $999, not $1,000
+        out.append({"kind": "conflict", "cheap": True, "unit_key": None, "place_key": r["place_key"],
+                    "fields": ["price_month", "beds"], "pending_render": False,
+                    "price_month": r["price_month"], "beds": r["beds"], "per_bed": per_bed,
+                    "min_per_bed": min_per_bed,
+                    "reason": f"price per bedroom ${per_bed:,.0f} < ${min_per_bed:,.0f}: "
+                              "check for per-room or misread price",
+                    "listings": [{"source": r["source"], "source_id": r["source_id"], "obs_id": r["obs_id"]}]})
+    return out
 
 
 def text_conflict_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:

@@ -1020,14 +1020,16 @@ function conflictBlock(e) {
   const tags = [
     it.pending_render ? `<span class="chip pending" title="${esc(it.pending_reason || "")}">own-site render pending: will update this</span>` : "",
     it.text ? `<span class="chip">source vs its own text</span>` : "",
+    it.cheap ? `<span class="chip needs_check">too cheap?</span>` : "",
   ].join("");
+  const cheap = it.cheap ? `<div class="small">${money(it.price_month)} for ${it.beds ? `${num(it.beds)} bd` : "a studio"} = <b>${money(it.per_bed)}/bed</b> · ${esc(it.reason)}</div>` : "";
   const textTh = it.text ? `<th>${esc(it.text_label)}<br><span class="muted">read from the text</span></th>` : "";
   const textTd = (f) => (it.text ? `<td>${fmtField(f, it.text[f])}</td>` : "");
   return `<div class="vconf${it.pending_render ? " pending" : ""}">
     <div class="vconf-head"><a href="#" data-goto="${esc(it.place_key)}">${esc(e.label || it.place_key)}</a>
-      ${unit ? `<span class="muted small">unit ${esc(unit)}</span>` : ""} ${tags}</div>
+      ${unit ? `<span class="muted small">unit ${esc(unit)}</span>` : ""} ${tags}</div>${cheap}
     <div class="scroll-x"><table class="vconf-t"><tr><th></th>${obs.map((o) => `<th><a href="${esc(o.url)}" target="_blank" rel="noopener noreferrer">${esc(o.source)} ↗</a> <span class="muted">${esc((o.observed_at || "").slice(0, 10))}</span></th>`).join("")}${textTh}</tr>
-    ${e.fields.map((f) => `<tr><th>${esc(f)}</th>${obs.map((o) => `<td><b>${fmtField(f, o.fields[f])}</b> ${vbtns({ observation_id: o.obs_id, field: f, queue: "conflict" }, (o.checked || {})[f])}</td>`).join("")}${textTd(f)}</tr>`).join("")}
+    ${e.fields.map((f) => `<tr><th>${esc(f)}</th>${obs.map((o) => `<td><b>${fmtField(f, o.fields[f])}</b> ${vbtns({ observation_id: o.obs_id, field: f, queue: "conflict" }, (o.checked || {})[f], it.cheap && f !== "price")}</td>`).join("")}${textTd(f)}</tr>`).join("")}
     </table></div></div>`;
 }
 
@@ -1039,8 +1041,8 @@ async function renderConflicts() {
   if (!d.items.length) { S.verifyMode = "dup"; S.dupSkip = 0; return renderVerify(); }
   const from = S.conflictSkip + 1, to = S.conflictSkip + d.items.length;
   const more = to < d.total;
-  body.innerHTML = `<h2>${d.total} conflicts: ${d.actionable} to check, ${d.pending} waiting for an own-site render</h2>
-    <p class="small">Sources disagree on these units. Open each listing, then mark every stored value: ✓ correct, ✗ wrong (type the true value), ? cannot tell. Conflicts tagged <i>own-site render pending</i> come last: the building's own site will be read again and will likely settle them.</p>
+  body.innerHTML = `<h2>${d.total} conflicts: ${d.actionable} to check (${d.cheap} priced too low per bedroom), ${d.pending} waiting for an own-site render</h2>
+    <p class="small">Sources disagree on these units. Open each listing, then mark every stored value: ✓ correct, ✗ wrong (type the true value), ? cannot tell. Listings tagged <i>too cheap?</i> are priced below the per-bedroom floor: a per-room or misread price? Mark the price ✓ if it is real, ✗ with the true monthly rent if not. Conflicts tagged <i>own-site render pending</i> come last: the building's own site will be read again and will likely settle them.</p>
     <p class="muted small">Showing ${from}–${to} of ${d.total} · <a href="#" id="v-dups">possible duplicate buildings (${S.status?.queues?.duplicates ?? "…"})</a></p>
     ${d.items.map(conflictBlock).join("")}
     <p style="margin-top:14px"><button id="v-prev" ${S.conflictSkip ? "" : "disabled"}>Previous ${CONFLICT_PAGE}</button>
@@ -1051,7 +1053,7 @@ async function renderConflicts() {
   $("#v-prev").addEventListener("click", () => { S.conflictSkip = Math.max(0, S.conflictSkip - CONFLICT_PAGE); renderConflicts(); loadStatus(); });
   $("#v-more")?.addEventListener("click", () => {
     // a conflict whose every value got a verdict has left the queue, so the next page starts that much earlier
-    const done = $$(".vconf", body).filter((b) => $$(".vbtns", b).every((v) => $("button.on", v))).length;
+    const done = $$(".vconf", body).filter((b) => $$(".vbtns:not(.opt)", b).every((v) => $("button.on", v))).length;
     S.conflictSkip += d.items.length - done; renderConflicts(); loadStatus();
   });
   const toDups = (ev) => { ev?.preventDefault(); S.verifyMode = "dup"; S.dupSkip = 0; renderVerify(); loadStatus(); };
@@ -1081,7 +1083,7 @@ async function renderVerify() {
       <table><tr><th>minutes</th><td>${num(t.minutes)}</td><td>${vbtns({ trip_id: t.id, field: "minutes", queue: "sample" })}</td></tr></table>${nav}`;
   } else {
     const obs = d.observations;
-    const title = it.kind === "conflict" ? (it.text ? `${obs[0].source} and its own text disagree on ${d.fields.join(", ")}`
+    const title = it.kind === "conflict" ? (it.cheap ? `${obs[0].source}: ${it.reason}` : it.text ? `${obs[0].source} and its own text disagree on ${d.fields.join(", ")}`
       : `Sources disagree on ${d.fields.join(", ")}`) : `Sample check: ${esc(obs[0].source)}`;
     // a text conflict: the listing's text (read by Haiku) as a second column; check the stored value against the page
     const textTh = it.text ? `<th>${esc(it.text_label)}<br><span class="muted">read from the listing text</span></th>` : "";
@@ -1205,10 +1207,10 @@ async function renderOwnSites() {
 
 function backToConflicts(e) { e.preventDefault(); S.verifyMode = "conflict"; S.conflictSkip = 0; renderVerify(); }
 
-function vbtns(ctx, verdict) {
-  // verdict: one already given (a current check), shown as pressed
+function vbtns(ctx, verdict, optional) {
+  // verdict: one already given (a current check), shown as pressed; optional: not needed to settle the item
   const on = (v) => (v === verdict ? " on" : "");
-  return `<span class="vbtns" data-ctx='${esc(JSON.stringify(ctx))}'>
+  return `<span class="vbtns${optional ? " opt" : ""}" data-ctx='${esc(JSON.stringify(ctx))}'>
     <button data-v="correct" class="correct${on("correct")}" title="correct">✓</button>
     <button data-v="wrong" class="wrong${on("wrong")}" title="wrong">✗</button>
     <button data-v="cannot_tell" class="cannot_tell${on("cannot_tell")}" title="cannot tell">?</button>
