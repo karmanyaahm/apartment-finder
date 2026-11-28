@@ -469,7 +469,7 @@ def evaluate_goal(inp: dict[str, Any], goal: Goal) -> tuple[dict[tuple[str, str]
 def goal_offer(rs: list[tuple[dict[str, Any], dict[str, Any]]]) -> dict[str, Any] | None:
     """The offer a place's card shows for a goal: among its deciding priced rows (active ones where any is active),
     the cheapest of the best status (a pass, else needs_check, else any): {price_month, price_per_bed, beds, baths,
-    source, source_id}. None without a priced row. Not the place's cheapest unit of any size (a 1bd's $3,799 under
+    sqft, source, source_id}. None without a priced row. Not the place's cheapest unit of any size (a 1bd's $3,799 under
     a 3bd goal)."""
     if any(res["active"] for res, _ in rs):
         rs = [(res, row) for res, row in rs if res["active"]]
@@ -478,7 +478,7 @@ def goal_offer(rs: list[tuple[dict[str, Any], dict[str, Any]]]) -> dict[str, Any
         return None
     res, row = min(priced_rows, key=lambda x: (RANK[x[0]["status"]], x[1]["price_month"]))
     return {"price_month": row["price_month"], "price_per_bed": row.get("price_per_bed"), "beds": row.get("beds"),
-            "baths": row.get("baths"), "source": row["source"], "source_id": row["source_id"]}
+            "baths": row.get("baths"), "sqft": row.get("sqft") or None, "source": row["source"], "source_id": row["source_id"]}
 
 
 NO_OFFERS = "no offers known"

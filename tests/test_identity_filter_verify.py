@@ -512,9 +512,9 @@ def _nl_goal():
         {"type": "max", "field": "price_per_person", "value": 2500}])
 
 
-def _nl_row(sid, pk, beds=None, baths=None, price=None, unavailable=None, source="x", active=1):
+def _nl_row(sid, pk, beds=None, baths=None, price=None, unavailable=None, source="x", active=1, sqft=None):
     return {"source": source, "source_id": sid, "place_key": pk, "unit_key": None, "active": active, "beds": beds,
-            "baths": baths, "price": price, "price_month": price, "unavailable": unavailable}
+            "baths": baths, "price": price, "price_month": price, "unavailable": unavailable, "sqft": sqft}
 
 
 def _nl_eval(listings, unpriced=(), places=None):
@@ -607,9 +607,10 @@ def test_goal_offer_is_the_cheapest_of_the_best_status_not_the_cheapest_unit():
     """Avalon Mountain View (2026-11-25): the lease card showed $3,799 (a 1bd) / 3 people. Under a goal the card
     prices the cheapest passing offer, else needs_check, else the cheapest overall (filter.goal_offer)."""
     _, places = _nl_eval([_nl_row("1bd", "p1", 1, 1, 3799), _nl_row("3a", "p1", 3, 2, 7400),
-                          _nl_row("3b", "p1", 3, 2, 7100), _nl_row("3c", "p1", 3, None, 6500)])
+                          _nl_row("3b", "p1", 3, 2, 7100, sqft=1100), _nl_row("3c", "p1", 3, None, 6500)])
     o = places["p1"]["offer"]
     assert (o["source_id"], o["price_month"], o["beds"], o["baths"]) == ("3b", 7100, 3, 2)
+    assert o["sqft"] == 1100  # the offer's own unit's sqft: the card and the sqft sort read it
     _, places = _nl_eval([_nl_row("1bd", "p1", 1, 1, 3799), _nl_row("3c", "p1", 3, None, 6500)])
     assert places["p1"]["offer"]["source_id"] == "3c"  # no pass: the needs_check one, though dearer
     _, places = _nl_eval([_nl_row("1bd", "p1", 1, 1, 3799), _nl_row("3x", "p1", 3, 2, 9500)])

@@ -27,6 +27,8 @@ def test_places_and_detail(client):
     assert showers["goals"]["lease"]["status"] == "pass"
     rwc = next(p for p in places if "Brewster" in (p["address"] or ""))
     assert rwc["goals"]["lease"]["status"] == "fail" and rwc["goals"]["temp"]["status"] == "fail"
+    # the sqft sort: the place's largest stated unit (All) and the goal offer's own sqft (seed: 900 sqft at Brewster)
+    assert rwc["max_sqft"] == 900 and rwc["goals"]["lease"]["offer"]["sqft"] == 900
     assert any(p["goals"]["temp"]["status"] == "pass" for p in places)
     d = c.get(f"/api/places/{showers['place_key']}").json()
     assert {l["source"] for l in d["listings"]} == {"zillow", "apartments_com"}

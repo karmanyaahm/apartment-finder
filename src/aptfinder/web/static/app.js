@@ -854,6 +854,10 @@ function sorted(list) {
     price: (p) => [nil(month(p))],
     ppb: (p) => [nil(per(p))],
     beds: (p) => [-(p.max_beds || 0)],
+    // under a goal its offer's sqft (the unit the card prices), under All the largest known unit; unknown last.
+    // Per person divides by the goal's people (no people: plain sqft)
+    sqft: (p) => [-((goalOffer(p) ? goalOffer(p).sqft : S.goal === "all" ? p.max_sqft : null) || 0)],
+    sqftpp: (p) => [-((goalOffer(p)?.sqft || 0) / (ppl || 1))],
     // complete sums first, then those with unknown terms (by what is known), then none
     // complete, then partial (mean / median of the known trips), then a total missing a time, then no time at all
     net: (p) => { const n = netCommute(p); return n && n.v != null ? [n.known < n.n ? 1 : 0, n.v] : [n && n.known ? 2 : 3, 0]; },
@@ -886,7 +890,8 @@ function priceFacts(p, fails = []) {
     const title = ` title="${esc(`the cheapest ${STATUS_LABEL[p.goals[S.goal].status] || ""} offer for this goal (${o.source})`)}"`;
     const per = ppl ? `<span${mk("price_per_person") || ' title="the price shared by the goal\'s people"'}><b>${money(o.price_month / ppl)}</b>/person (÷${ppl})</span>`
       : o.price_per_bed != null ? `<span${mk("price_per_bed") || ' title="per bedroom; a studio counts as one"'}><b>${money(o.price_per_bed)}</b>/bed</span>` : "";
-    return `<span${mk("price_month") || title}><b>${money(o.price_month)}</b>/mo</span>${per}${size ? `<span${title}>${esc(size)}</span>` : ""}`;
+    const sq = o.sqft ? `<span${title}>${num(o.sqft)} sqft</span>` : "";
+    return `<span${mk("price_month") || title}><b>${money(o.price_month)}</b>/mo</span>${per}${size ? `<span${title}>${esc(size)}</span>` : ""}${sq}`;
   }
   const term = goalTerm(S.goal);
   const showLease = p.min_lease_month != null && term !== "short";
@@ -990,6 +995,10 @@ function renderList() {
   // "price / bed" sorts by $/person under a goal with people, as its cards show
   const ppbOpt = $('#sort option[value="ppb"]');
   if (ppbOpt) ppbOpt.textContent = S.goal !== "all" && goalPeople(S.goal) ? "price / person" : "price / bed";
+  // "sqft per person" only under a goal with people; elsewhere it falls back to plain sqft
+  const sqppOpt = $('#sort option[value="sqftpp"]');
+  if (sqppOpt) sqppOpt.hidden = !(S.goal !== "all" && goalPeople(S.goal));
+  if (sqppOpt?.hidden && $("#sort").value === "sqftpp") $("#sort").value = "sqft";
   const list = sorted(filtered());
   drawMarkers(list);
   // totals by status for the selected goal (All: each place's best), then how many the list shows if some are hidden

@@ -104,6 +104,38 @@ def test_price_sort_is_per_person_under_a_goal_with_people():
     assert _sort_order({**goal, "people": None}) == ["3BED & 2BATH", "227 Church St", "Palmetto"]
 
 
+def _sqft_order(goal_id: str, key: str, people=None) -> list[str]:
+    """app.js sorted() by sqft: under a goal the offer's sqft (the unit the card prices), under All max_sqft."""
+    if not shutil.which("node"):
+        pytest.skip("node not installed")
+    places = [
+        {"label": "small offer, big unit", "max_sqft": 2400, "goals": {"lease": {"offer": {"price_month": 3000, "sqft": 700}}}},
+        {"label": "no sqft", "max_sqft": None, "goals": {"lease": {"offer": {"price_month": 3100, "sqft": None}}}},
+        {"label": "big offer", "max_sqft": 1279, "goals": {"lease": {"offer": {"price_month": 5000, "sqft": 1279}}}},
+        {"label": "no offer", "max_sqft": 900, "goals": {"lease": {}}},
+    ]
+    goal = {"id": "lease", "rules": [], "nice": [], "people": people}
+    script = (f"const S = {{ goal: {json.dumps(goal_id)}, draft: {json.dumps(goal)}, goalsData: {{ goals: [] }} }};\n"
+              f"const $ = () => ({{ value: {json.dumps(key)} }});\nconst RANK = {{}};\n"
+              "const goalOffer = (p) => (S.goal !== 'all' && p.goals[S.goal]?.offer) || null;\n"
+              "const savedGoal = () => null;\n"
+              f"{_function(APP_JS.read_text(), 'goalPeople')}\n{_function(APP_JS.read_text(), 'goalTerm')}\n"
+              f"{_function(APP_JS.read_text(), 'sorted')}\n"
+              f"console.log(JSON.stringify(sorted({json.dumps(places)}).map((p) => p.label)));")
+    return json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout)
+
+
+def test_sqft_sort_reads_the_goals_offer_and_puts_unknown_last():
+    # under a goal: the offer's sqft (1,279 > 700), not the place's largest unit; no sqft or no offer last
+    assert _sqft_order("lease", "sqft")[:2] == ["big offer", "small offer, big unit"]
+    assert set(_sqft_order("lease", "sqft")[2:]) == {"no sqft", "no offer"}
+    # sqft per person with people 3: the same unit's sqft ÷ 3; no people falls back to plain sqft
+    assert _sqft_order("lease", "sqftpp", people=3)[:2] == ["big offer", "small offer, big unit"]
+    assert _sqft_order("lease", "sqftpp")[:2] == ["big offer", "small offer, big unit"]
+    # All: the place's largest known unit
+    assert _sqft_order("all", "sqft") == ["small offer, big unit", "big offer", "no offer", "no sqft"]
+
+
 def test_reload_keeps_showing_the_draft_preview():
     # the X-Updating re-poll (loadPlaces every 5 s) once rendered the saved goal's results and then the draft's again
     # when the preview answered, so the counts flipped each poll; now every render after a reload shows the draft

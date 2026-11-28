@@ -745,6 +745,8 @@ def create_app(db_path: str | Path | None = None, redact: dict[str, str] | None 
                 "photo": cover[0]["url"] if cover else None,  # map hover
                 "beds": sorted({x["beds"] for x in rows if x["beds"] is not None}),
                 "baths": sorted({x["baths"] for x in rows if x["baths"] is not None}),
+                # the largest unit's sqft any listing here states: the sqft sort under All (a goal sorts by its offer's)
+                "max_sqft": max((x["sqft"] for x in rows if x.get("sqft")), default=None),
                 "nearest": nearest_all.get(pk, {}),
                 # a limit on who may rent that any listing here states (income, senior, ...): the card's badge
                 "restriction": place_restriction(parsed, a),
