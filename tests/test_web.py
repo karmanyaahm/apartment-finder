@@ -396,9 +396,9 @@ def test_api_goals_lists_the_operators(client):
     assert "Blueground" in names and "MidPen Housing" in names
 
 
-def test_a_place_with_nothing_for_rent_is_no_listings_in_list_and_preview(client):
+def test_a_place_with_nothing_for_rent_is_incomplete_in_list_and_preview(client):
     """A place whose only row is a site_info row (a community website, nothing for rent) has a result for every goal:
-    no_listings, why 'none', with its reason, in /api/places and in a draft preview; never a missing goal that the
+    incomplete (no plan, beds or price known), with its reason, in /api/places and in a draft preview; never a missing goal that the
     page would count as needs check."""
     from aptfinder.store import finish_run, start_run
     from aptfinder.store import append_observation
@@ -412,13 +412,13 @@ def test_a_place_with_nothing_for_rent_is_no_listings_in_list_and_preview(client
     identity.run(conn)
     places = c.get("/api/places").json()
     p = next(p for p in places if p["label"] == "Empty Towers")
-    assert {g: (v["status"], v["why"]) for g, v in p["goals"].items()} == \
-        {g: ("no_listings", "none") for g in p["goals"]} and p["goals"]
-    assert p["goals"]["lease"]["reasons"] == ["no offers known"]
+    assert {g: (v["status"], v.get("why")) for g, v in p["goals"].items()} == \
+        {g: ("incomplete", None) for g in p["goals"]} and p["goals"]
+    assert p["goals"]["lease"]["reasons"] == ["no plan, beds or price known"]
     assert all(set(x["goals"]) == set(p["goals"]) for x in places)  # every place, every goal
     goal = next(g for g in c.get("/api/goals").json()["goals"] if g["id"] == "lease")
     prev = c.post("/api/goals/preview", json={k: goal[k] for k in ("label", "rules", "nice", "people")}).json()
-    assert prev["places"][p["place_key"]]["status"] == "no_listings"
+    assert prev["places"][p["place_key"]]["status"] == "incomplete"
     assert set(prev["places"]) == {x["place_key"] for x in places}
 
 

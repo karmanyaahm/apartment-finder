@@ -160,20 +160,27 @@ def pending_render(conn: sqlite3.Connection) -> dict[str, str]:
     return out
 
 
+def ask_for_pricing(r: sqlite3.Row) -> bool:
+    """A RentCafe plan without a price ("Ask for pricing"): a plan, not an offer (filter.goal_inputs `unpriced`), so
+    it opens no Verify item; its beds, baths, sqft and the property's text reading stay stored and shown."""
+    return r["source"] == "rentcafe" and r["price"] is None and r["kind"] != "site_info"
+
+
 def conflict_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Units with active listings from more than one source that disagree on a field (a retired listing never
     makes a conflict). A conflict drops out once every disagreeing field has a current check on every listing
     (see the current_checks view). Conflicts at a place whose own site awaits a render carry
     `pending_render: True` and a `pending_reason`, and come after the actionable ones. A place whose own website
     prices an offer has no conflicts: the own site is the truth there, and disagreements among other sources
-    decide nothing (`plans.own_site_places`)."""
+    decide nothing (`plans.own_site_places`). A RentCafe plan without a price takes no part (ask_for_pricing)."""
     from ..plans import own_site_places
 
     own = own_site_places(conn)
     by_unit: dict[str, list[sqlite3.Row]] = defaultdict(list)
     for r in conn.execute("SELECT * FROM listings WHERE unit_key IS NOT NULL AND active = 1 "
                           "AND kind IS NOT 'site_info'"):
-        by_unit[r["unit_key"]].append(r)
+        if not ask_for_pricing(r):
+            by_unit[r["unit_key"]].append(r)
     checked = current_checks(conn)
     pending = pending_render(conn)
     out = []
@@ -269,7 +276,7 @@ def text_conflict_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Listings whose text (read by `aptf-intake extract`) contradicts a value the source stated: the source's
     value is stored, the text's is shown beside it as '<source> (text)'. Drops out once each such field has a
     current check on the listing. None at a place whose own website prices an offer: there other sources'
-    listings decide nothing, so their text is moot."""
+    listings decide nothing, so their text is moot. None on a RentCafe plan without a price (ask_for_pricing)."""
     from ..plans import own_site_places
 
     from ..store.keys import same_street
@@ -277,10 +284,10 @@ def text_conflict_queue(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     own = own_site_places(conn)
     checked = current_checks(conn)
     out = []
-    for r in conn.execute("SELECT source, source_id, obs_id, place_key, address, "
+    for r in conn.execute("SELECT source, source_id, obs_id, place_key, address, price, kind, "
                           "json_extract(data, '$.extra.extracted.conflicts') AS c FROM listings "
                           "WHERE json_extract(data, '$.extra.extracted.conflicts') IS NOT NULL ORDER BY source_id"):
-        if r["place_key"] in own and r["source"] != "direct":
+        if (r["place_key"] in own and r["source"] != "direct") or ask_for_pricing(r):
             continue
         text = json.loads(r["c"])
         if "address" in text and same_street(r["address"], text["address"]):  # stored before same_street: a

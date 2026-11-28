@@ -25,7 +25,7 @@ MARI_COURT = {
     ],
 }
 
-GREENWOOD = {  # every plan "Ask for pricing": a building, not an offer
+GREENWOOD = {  # every plan "Ask for pricing": plans without an offer
     "name": "Greenwood", "url": "https://www.rentcafe.com/apartments/ca/mountain-view/greenwood/default.aspx",
     "street": "1797 California Street", "city": "Mountain View", "state": "CA", "zip": "94041",
     "latitude": 37.3956, "longitude": -122.0926, "rentMin": None, "rentMax": None, "petRent": 100,
@@ -48,10 +48,8 @@ VERONA = {  # the Mountain View search spills into Sunnyvale (plan made up: the 
 }
 
 
-def test_priced_plans_are_offers_and_ask_for_pricing_is_not():
-    out = ADAPTERS["rentcafe"].parse(MARI_COURT, {})
-    assert len(out) == 1  # the 1x1 has no rent
-    p = out[0]
+def test_priced_plans_are_offers_and_ask_for_pricing_is_a_plan_without_price():
+    p, ask = ADAPTERS["rentcafe"].parse(MARI_COURT, {})
     assert (p.source_id, p.price, p.price_basis) == ("plan:4114487", 2895, "month")
     d = p.data
     assert (d.beds, d.baths, d.sqft, d.floor_plan, d.kind, d.term) == (2, 1, 688, "2-Bed, 1-Bath", "apartment", "long")
@@ -59,17 +57,40 @@ def test_priced_plans_are_offers_and_ask_for_pricing_is_not():
     assert (d.lat, d.lon) == (37.3928, -122.0912)
     assert d.extra["website"] is None  # rentcafe.com is an aggregator page, never the building's own site
     assert d.extra["plan_available"] is True and d.extra["application_fee"] == 30 and d.extra["vertical"] == "apartments"
+    # the 1x1 says "Ask for pricing": its beds, baths and sqft are kept, no price is invented
+    assert (ask.source_id, ask.price, ask.price_basis) == ("plan:4114486", None, None)
+    assert (ask.data.beds, ask.data.baths, ask.data.sqft, ask.data.kind) == (1, 1, 600, "apartment")
+    assert ask.data.extra["rent_text"] == "Ask for pricing" and ask.data.extra["plan_price_max"] is None
 
 
-def test_building_without_a_priced_plan_is_site_info():
-    s, = ADAPTERS["rentcafe"].parse(GREENWOOD, {})
+def test_building_whose_plans_all_ask_for_pricing_gives_its_plans():
+    out = ADAPTERS["rentcafe"].parse(GREENWOOD, {})
+    assert [(p.source_id, p.price, p.data.beds, p.data.baths, p.data.sqft) for p in out] == [
+        ("plan:3128053", None, 1, 1, 600), ("plan:1046323", None, 2, 1, 807)]
+
+
+def test_a_plan_that_is_no_home_is_dropped():
+    """Real plans (Carriage House 'RV Storage' $300, Mathilda Development 'Office' $1,500): 0 beds, no baths."""
+    plans = [{"floorPlanId": "2132126", "name": "RV Storage", "beds": 0, "baths": None, "sqft": None,
+              "rentMin": 300, "rentText": "$300"},
+             {"floorPlanId": "4277368", "name": "Office", "beds": 0, "baths": None, "sqft": 637, "rentMin": 1500},
+             {"floorPlanId": "1", "name": "SRO", "beds": 0, "baths": None, "sqft": 104, "rentMin": None},
+             {"floorPlanId": "2", "name": "2 Bed with Office", "beds": 2, "baths": 2, "sqft": 1100, "rentMin": 4000}]
+    out = ADAPTERS["rentcafe"].parse({**GREENWOOD, "floorPlans": plans}, {})
+    assert [p.source_id for p in out] == ["plan:1", "plan:2"]
+    s, = ADAPTERS["rentcafe"].parse({**GREENWOOD, "floorPlans": plans[:2]}, {})
+    assert s.source_id == "building:221177" and s.data.kind == "site_info"
+
+
+def test_building_without_a_floor_plan_is_site_info():
+    s, = ADAPTERS["rentcafe"].parse({**GREENWOOD, "floorPlans": [], "floorPlanCount": 0}, {})
     assert s.source_id == "building:221177" and s.price is None and s.data.kind == "site_info"
-    assert s.data.extra["plan_count"] == 2
+    assert s.data.extra["plan_count"] == 0
 
 
 def test_own_site_link_is_kept_as_website():
     own = {**GREENWOOD, "url": "https://www.rentcafewebsite.com/greenwood/default.aspx?x=1"}
-    s, = ADAPTERS["rentcafe"].parse(own, {})
+    s, _ = ADAPTERS["rentcafe"].parse(own, {})
     assert s.data.extra["website"] == "https://www.rentcafewebsite.com/greenwood/default.aspx"
 
 
@@ -78,8 +99,9 @@ def test_items_count_for_the_city_they_state(conn, tmp_path):
     raw.write_text(json.dumps({"actor": "benthepythondev/rentcafe-apartments-scraper", "areas": ["Mountain View"],
                                "items": [MARI_COURT, GREENWOOD, VERONA]}))
     res = reparse(conn, ADAPTERS["rentcafe"], str(raw), covers="complete")
-    assert res["observations"] == 3
+    assert res["observations"] == 5
     tags = dict(conn.execute("SELECT source_id, json_extract(data, '$.extra.area') FROM observations "
                              "WHERE source = 'rentcafe'").fetchall())
-    assert tags == {"plan:4114487": "Mountain View", "building:221177": "Mountain View", "plan:9": None}
+    assert tags == {"plan:4114487": "Mountain View", "plan:4114486": "Mountain View", "plan:3128053": "Mountain View",
+                    "plan:1046323": "Mountain View", "plan:9": None}
     assert coverage(conn)[("rentcafe", "Mountain View")]["state"] == "complete"

@@ -221,6 +221,24 @@ def test_conflict_detection_and_resolution(conn):
     assert conn.execute("SELECT price FROM listings WHERE source='apartments' AND source_id='9'").fetchone()[0] == 5000
 
 
+def test_ask_for_pricing_rentcafe_plan_opens_no_verify_item(conn):
+    """A RentCafe plan without a price is a plan, not an offer: no cross-source conflict (Parker Palo Alto's 3bd
+    sqft against Apartments.com) and no text conflict (the property's reading repeated on each plan row)."""
+    from aptfinder.verify import text_conflict_queue
+
+    r = start_run(conn, "intake", "zillow")
+    ex = {"extracted": {"conflicts": {"address": "415 - 425 S Bernardo Avenue"}}}
+    obs(conn, r, "apartments", "9", 5400, address="49 Showers Drive, Mountain View", beds=3, baths=2, sqft=1043)
+    obs(conn, r, "rentcafe", "plan:1", None, None, address="49 Showers Dr, Mountain View", beds=3, baths=2,
+        sqft=1180, extra=ex)
+    identity.run(conn)
+    assert conflict_queue(conn) == [] and text_conflict_queue(conn) == []
+    obs(conn, r, "rentcafe", "plan:1", 5400, address="49 Showers Dr, Mountain View", beds=3, baths=2, sqft=1180,
+        extra=ex)  # priced: an offer, compared as before
+    identity.run(conn)
+    assert conflict_queue(conn)[0]["fields"] == ["sqft"] and len(text_conflict_queue(conn)) == 1
+
+
 def test_retired_listing_never_makes_a_conflict(conn):
     """A plan the own site no longer offers (absent from a later complete run) is not compared. (The own site
     gives no prices here; a priced one would settle every conflict at the place: own website wins.)"""
@@ -525,13 +543,13 @@ def _nl_eval(listings, unpriced=(), places=None):
     return evaluate_goal(inp, _nl_goal())
 
 
-def test_no_listings_when_nothing_is_known_for_rent():
-    """Case 1: a place with no offer at all (only site_info rows, or a building row with no beds and no price) is
-    'no listings: no offers known', not needs_check."""
+def test_incomplete_when_nothing_usable_is_known():
+    """Case 1: a place with no plan at all (only site_info rows, or a building row with no beds and no price) is
+    'incomplete data: no plan, beds or price known', neither no listings nor needs_check."""
     lres, places = _nl_eval([_nl_row("bldg", "p1")], places={"p1", "p2"})
     for pk in ("p1", "p2"):  # p2 has no row a goal reads at all (site_info only)
-        assert places[pk]["status"] == "no_listings" and places[pk]["why"] == "none"
-        assert places[pk]["reasons"][0][1] == "no offers known"
+        assert places[pk]["status"] == "incomplete" and "why" not in places[pk]
+        assert places[pk]["reasons"][0][1] == "no plan, beds or price known"
     assert lres[("x", "bldg")]["status"] == "needs_check"  # listings keep pass / needs_check / fail
 
 
@@ -631,3 +649,45 @@ def test_dates_cover_fails_on_a_stated_minimum_stay_longer_than_the_goals_stay()
     assert evaluate(rule, {**row, "min_stay_days": None}, Ctx())[0] == PASS
     assert min_stay(None, 180, None, None) == (180.0, "minimum_stay_days")
     assert min_stay(None, None, None, 1) == (30.0, "min_lease_months") and min_stay(None, None, None, None) is None
+
+
+def test_rentcafe_ask_for_pricing_plan_is_a_plan_without_an_offer():
+    """A RentCafe "Ask for pricing" plan (goal_inputs' `unpriced`) makes a place no listings when it fits and a fail
+    when not, like an own site's price-less plan; it has no listing result (so no routing or Verify). Where the own
+    site prices offers it decides nothing (The Marc, Palo Alto: own-site plans priced, RentCafe Plan C 3bd/3ba
+    without a price)."""
+    from aptfinder.filter import evaluate_goal
+
+    lres, places = _nl_eval([], unpriced=[_nl_row("plan:1", "p1", 3, 2, source="rentcafe")])
+    assert (places["p1"]["status"], places["p1"]["why"]) == ("no_listings", "no_price") and not lres
+    _, places = _nl_eval([], unpriced=[_nl_row("plan:1", "p1", 1, 1, source="rentcafe")])
+    assert places["p1"]["status"] == "fail"
+    own = _nl_row("o1", "p1", 2, 1, 4000, source="direct")
+    inp = {"listings": [own], "unpriced": [_nl_row("plan:1", "p1", 3, 3, source="rentcafe")], "trips": {},
+           "anns": {}, "low": set(), "own": {"p1"}, "places": {"p1"}}
+    _, places = evaluate_goal(inp, _nl_goal())
+    assert places["p1"]["status"] == "fail"  # the own site's 2bd decides; RentCafe's unpriced 3bd does not
+    inp["unpriced"][0]["source"] = "direct"
+    _, places = evaluate_goal(inp, _nl_goal())
+    assert places["p1"]["status"] == "no_listings"  # an own site's unpriced plan still decides
+
+
+def test_goal_inputs_keeps_rentcafe_price_less_plans_aside(conn):
+    from aptfinder.filter import goal_inputs
+    from aptfinder.intake import ADAPTERS
+    from aptfinder.store import append_observation, start_run
+
+    run = start_run(conn, "intake", "rentcafe", {})
+    item = {"propertyId": "7", "name": "Greenwood", "street": "1797 California Street", "city": "Mountain View",
+            "zip": "94041", "latitude": 37.3956, "longitude": -122.0926,
+            "floorPlans": [{"floorPlanId": "1", "name": "One Bedroom", "beds": 1, "baths": 1, "sqft": 600,
+                            "rentMin": None, "rentText": "Ask for pricing"},
+                           {"floorPlanId": "2", "name": "Two Bedroom", "beds": 2, "baths": 1, "sqft": 800,
+                            "rentMin": 3000, "rentText": "$3,000"}]}
+    for p in ADAPTERS["rentcafe"].parse(item, {}):
+        append_observation(conn, run, "rentcafe", p.source_id, p.data, url=p.url, price=p.price,
+                           price_basis=p.price_basis)
+    conn.commit()
+    inp = goal_inputs(conn)
+    assert [r["source_id"] for r in inp["listings"]] == ["plan:2"]
+    assert [r["source_id"] for r in inp["unpriced"]] == ["plan:1"]

@@ -9,9 +9,11 @@ from typing import Any
 from ..plans import baths_note
 
 PASS, FAIL, CHECK = "pass", "fail", "needs_check"
-# a place-level outcome only (filter.place_outcome): nothing known for rent that fits; never a listing's status
+# place-level outcomes only (filter.place_outcome), never a listing's status: no_listings, plans known but none of the
+# fitting ones is an offer (no price, unavailable); incomplete, nothing usable known (no plan, beds or price)
 NO_LISTINGS = "no_listings"
-RANK = {PASS: 0, CHECK: 1, NO_LISTINGS: 2, FAIL: 3}
+INCOMPLETE = "incomplete"
+RANK = {PASS: 0, CHECK: 1, NO_LISTINGS: 2, FAIL: 3, INCOMPLETE: 4}
 
 # A straight-line estimate decides a commute rule only when clearly on one side of the threshold.
 EST_PASS_RATIO = 0.67

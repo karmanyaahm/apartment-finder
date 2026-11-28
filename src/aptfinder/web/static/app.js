@@ -13,9 +13,10 @@ const money = (v) => (v == null ? "?" : "$" + Math.round(v).toLocaleString());
 const num = (v) => (v == null ? "?" : (+v).toLocaleString(undefined, { maximumFractionDigits: 1 }));
 // commute times are shown in whole minutes (user, 2026-11-25); the database and the rules keep full precision
 const mins = (v) => (v == null ? "?" : String(Math.round(+v)));
-// no_listings (a place only, filter.place_outcome): nothing known for rent that fits the goal; sorts after needs check
-const RANK = { pass: 0, needs_check: 1, no_listings: 2, fail: 3 };
-const STATUS_LABEL = { pass: "pass", needs_check: "needs check", no_listings: "no listings", fail: "fail" };
+// no_listings (a place only, filter.place_outcome): plans known, but none that fits the goal is an offer (no price,
+// unavailable); sorts after needs check. incomplete (a place only): nothing usable known (no plan, beds or price)
+const RANK = { pass: 0, needs_check: 1, no_listings: 2, fail: 3, incomplete: 4 };
+const STATUS_LABEL = { pass: "pass", needs_check: "needs check", no_listings: "no listings", fail: "fail", incomplete: "incomplete data" };
 const MODE_LABEL = { walk: "walk", bike: "bike", transit: "transit", drive: "drive", bike_train_bike: "bike+train", bike_bus_bike: "bike+bus" };
 
 // Errors always name the request and its HTTP status: over HTTP/2 (Cloudflare) statusText is empty, and an
@@ -105,6 +106,7 @@ const COLORS = () => {
   const cs = getComputedStyle(document.documentElement);
   return { pass: cs.getPropertyValue("--pass").trim(), needs_check: cs.getPropertyValue("--check").trim(),
     no_listings: cs.getPropertyValue("--none").trim(), fail: cs.getPropertyValue("--fail").trim(),
+    incomplete: cs.getPropertyValue("--incomplete").trim(),
     cut: cs.getPropertyValue("--cut").trim(), added: cs.getPropertyValue("--added").trim() };
 };
 
@@ -126,7 +128,7 @@ function initMap() {
   legend.onAdd = () => {
     const d = L.DomUtil.create("div", "legend");
     const c = COLORS();
-    d.innerHTML = `<i style="background:${c.pass}"></i>pass<br><i style="background:${c.needs_check}"></i>needs check<br><i style="background:${c.no_listings};opacity:.6"></i>no listings<br><i style="background:${c.fail};opacity:.5"></i>fail<br><i style="background:${c.cut}"></i>cut by the draft<br><i style="background:${c.added}"></i>added by the draft`;
+    d.innerHTML = `<i style="background:${c.pass}"></i>pass<br><i style="background:${c.needs_check}"></i>needs check<br><i style="background:${c.no_listings};opacity:.6"></i>no listings<br><i style="background:${c.fail};opacity:.5"></i>fail<br><i style="background:${c.incomplete};opacity:.4"></i>incomplete data<br><i style="background:${c.cut}"></i>cut by the draft<br><i style="background:${c.added}"></i>added by the draft`;
     return d;
   };
   legend.addTo(map);
@@ -203,10 +205,10 @@ function drawMarkers(list) {
     if (p.lat == null) continue;
     const st = placeStatus(p);
     const kind = S.diff?.kinds[p.place_key];  // cut / added by the unsaved draft
-    const dim = (st === "fail" || st === "no_listings") && !kind;  // muted: nothing to rent here (yet)
+    const dim = (st === "fail" || st === "no_listings" || st === "incomplete") && !kind;  // muted: nothing to rent here (yet)
     const m = L.circleMarker([p.lat, p.lon], {
       radius: dim ? 6 : 9, color: "#fff", weight: kind ? 3 : 2, fillColor: kind ? c[kind] : c[st],
-      fillOpacity: kind ? 0.95 : st === "fail" ? 0.45 : st === "no_listings" ? 0.6 : 0.95, opacity: dim ? 0.5 : 1,
+      fillOpacity: kind ? 0.95 : st === "fail" ? 0.45 : st === "no_listings" ? 0.6 : st === "incomplete" ? 0.4 : 0.95, opacity: dim ? 0.5 : 1,
     }).bindTooltip(() => (p.photo ? `<img class="tip-photo" src="${esc(p.photo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : "")
       + `${esc(p.label)}<br>${esc(STATUS_LABEL[st])}${kind === "cut" ? " · cut by the draft" : kind === "added" ? " · added by the draft" : ""}`);
     m.baseStyle = { radius: m.options.radius, weight: m.options.weight, color: m.options.color,
@@ -829,8 +831,9 @@ function filtered() {
     // summary's counts are the cards shown
     const st = placeStatus(p);
     if (!kind && !sts.has(st)) return false;
-    // most no-listings places have no active listing at all: their own tick shows them, inactive or not
-    if (!kind && !showInactive && !p.n_active && st !== "no_listings") return false;
+    // most no-listings and incomplete-data places have no active listing at all: their own tick shows them,
+    // inactive or not
+    if (!kind && !showInactive && !p.n_active && st !== "no_listings" && st !== "incomplete") return false;
     if (q) {
       const hay = [p.label, p.address, p.city, p.sources, p.title, p.operator].join(" ").toLowerCase();
       if (!hay.includes(q)) return false;
@@ -1002,11 +1005,12 @@ function renderList() {
   const list = sorted(filtered());
   drawMarkers(list);
   // totals by status for the selected goal (All: each place's best), then how many the list shows if some are hidden
-  const tot = { pass: 0, needs_check: 0, fail: 0, no_listings: 0 };
+  const tot = { pass: 0, needs_check: 0, fail: 0, no_listings: 0, incomplete: 0 };
   S.places.forEach((p) => { tot[placeStatus(p)]++; });
   $("#count").innerHTML = `${num(S.places.length)} places · <b class="n-pass">${num(tot.pass)}</b> pass · `
     + `<b class="n-check">${num(tot.needs_check)}</b> check · <b class="n-fail">${num(tot.fail)}</b> fail`
     + ` · <b class="n-none">${num(tot.no_listings)}</b> no listings`
+    + ` · <b class="n-incomplete">${num(tot.incomplete)}</b> incomplete data`
     + (list.length < S.places.length ? ` · showing ${num(list.length)}` : "");
   renderDiffLine();
   $("#cards").innerHTML = list.map((p) => {
@@ -1023,7 +1027,7 @@ function renderList() {
     const extra = rxb + fails.filter((x) => !x.used).map(failChip).join("");
     const kind = S.diff?.kinds[p.place_key];
     const cutBy = kind ? `<div class="diff-why ${kind}">${kind === "cut" ? "cut by" : "added by (failed under the saved goal)"}: ${esc(S.diff.why[p.place_key].join(" · "))}</div>` : "";
-    return `<div class="card ${st === "fail" && !kind ? "dim" : ""} ${kind || ""} ${S.selected === p.place_key ? "sel" : ""}" data-pk="${esc(p.place_key)}">
+    return `<div class="card ${(st === "fail" || st === "incomplete") && !kind ? "dim" : ""} ${kind || ""} ${S.selected === p.place_key ? "sel" : ""}" data-pk="${esc(p.place_key)}">
       <h4>${esc(p.label)} ${stars(p.rating)}</h4>
       <div class="facts">
         ${facts}
@@ -1171,7 +1175,7 @@ async function openPlace(pk) {
     const ntTip = nt.length ? ` title="${esc(`trips in the net commute:\n${nt.join("\n")}`)}"` : "";
     return `
     <div><span class="chip ${r.status}">${esc(g)}: ${esc(STATUS_LABEL[r.status])}</span>${r.parking_cost ? ` <span class="small">${parkingCostFact(r.parking_cost)}</span>` : ""}${r.own_site ? ' <span class="small muted" title="The building\'s own website prices offers here, so only its listings decide the goals; other sources are shown as \'also listed\'.">judged on the own website</span>' : ""}
-      ${r.reasons.map(([s, t, ty]) => `<div class="reason ${s}"${ty === "net_commute" ? ntTip : ""}>${s === "pass" ? "✓" : s === "fail" ? "✗" : s === "no_listings" ? "–" : "?"} ${esc(t)}</div>`).join("")}
+      ${r.reasons.map(([s, t, ty]) => `<div class="reason ${s}"${ty === "net_commute" ? ntTip : ""}>${s === "pass" ? "✓" : s === "fail" ? "✗" : s === "no_listings" || s === "incomplete" ? "–" : "?"} ${esc(t)}</div>`).join("")}
       ${nt.length ? `<details class="net-trips small"><summary>net commute: ${nc.length} trip${nc.length > 1 ? "s" : ""}</summary>${nt.map((x) => `<div>${esc(x)}</div>`).join("")}</details>` : ""}
       ${r.nice.length ? `<div class="small muted">nice to have: ${r.nice.map(([s, t]) => `${s === "pass" ? "✓" : s === "fail" ? "✗" : "?"} ${esc(t)}`).join(" · ")}</div>` : ""}
     </div>`;

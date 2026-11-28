@@ -12,7 +12,7 @@ from ..config import Goal, GoalsConfig, load_goals, match_operators, operator_re
 from ..plans import inherit_baths, inherit_prices, is_own_priced
 from ..verify import accuracy, low_accuracy
 from .building import building_note, building_units_by_place, place_building_units
-from .rules import (CHECK, FAIL, NO_LISTINGS, PASS, RANK, Ctx, combine, commute_trips, evaluate, fact, in_net,
+from .rules import (CHECK, FAIL, INCOMPLETE, NO_LISTINGS, PASS, RANK, Ctx, combine, commute_trips, evaluate, fact, in_net,
                     row_parking_cost)
 
 PROVIDER_PREF = {"google": 0, "knn": 1, "estimate": 9}
@@ -91,6 +91,11 @@ def place_annotations(conn: sqlite3.Connection) -> dict[str, dict[str, dict[str,
     return out
 
 
+# sources whose price-less plan rows are plans without an offer (goal_inputs' `unpriced`): the own site's plan list,
+# RentCafe's "Ask for pricing" plans
+UNPRICED_PLAN_SOURCES = ("direct", "rentcafe")
+
+
 def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None, trips: dict | None = None) -> dict[str, Any]:
     """Everything a goal is judged on, read once: the offer rows (amenities pooled per place), trips, place
     annotations, low-accuracy source fields and the places whose own site prices offers. Reused by evaluate_all
@@ -104,10 +109,11 @@ def goal_inputs(conn: sqlite3.Connection, cfg: GoalsConfig | None = None, trips:
     # nor are a community site's plans without a price (Prometheus plan drawings, Landsby's plan list): the plan
     # exists, but no unit in it is known to be offered, so it shows in the drawer and does not count for goals
     # (those unpriced own-site plans are kept aside as `unpriced`: they decide nothing, but a plan that fits the goal
-    # there makes the place 'no listings' rather than a fail; place_outcome)
+    # there makes the place 'no listings' rather than a fail; place_outcome). RentCafe's "Ask for pricing" plans are
+    # kept aside the same way: a plan with beds, baths and sqft, no offer, so no listing result (routing, Verify)
     listings, unpriced = [], []
     for r in conn.execute("SELECT * FROM listings WHERE kind IS NOT 'site_info'"):
-        (unpriced if r["source"] == "direct" and r["price"] is None else listings).append(dict(r))
+        (unpriced if r["source"] in UNPRICED_PLAN_SOURCES and r["price"] is None else listings).append(dict(r))
     inherit_prices(listings)  # a price-less plan row takes the same plan's price from another source
     # an own-site plan row without baths borrows them from the same plan on another source, else from its own
     # floor-plan drawing as read by aptfinder.planread (lower trust: the reason names where they came from)
@@ -421,7 +427,7 @@ def place_restriction(rows: list[dict[str, Any]], anns: dict[str, dict[str, Any]
 
 def evaluate_goal(inp: dict[str, Any], goal: Goal) -> tuple[dict[tuple[str, str], Any], dict[str, Any]]:
     """(listing results, place results) of one goal over goal_inputs. A listing is pass, needs_check or fail; a place
-    is that too, or `no_listings` (place_outcome)."""
+    is that too, or `no_listings` or `incomplete` (place_outcome)."""
     listings, trips, anns, low, own = inp["listings"], inp["trips"], inp["anns"], inp["low"], inp["own"]
     commute = net_rules(goal)[0]  # the terms of a net_commute rule
     # a parking_cost rule (must or nice): each result carries its cost for the cards and the sort
@@ -439,9 +445,10 @@ def evaluate_goal(inp: dict[str, Any], goal: Goal) -> tuple[dict[tuple[str, str]
         reasons = [(*evaluate(r, row, ctx), r["type"]) for r in goal.rules]
         nice = [(*evaluate(r, row, ctx), r["type"]) for r in goal.nice]
         # an unpriced own-site plan (goal_inputs) is an own-site row: it decides wherever it is, but only whether the
-        # place is 'no listings' or a fail (place_outcome); it has no listing result
+        # place is 'no listings' or a fail (place_outcome); it has no listing result. An unpriced RentCafe plan
+        # decides only where the own site prices nothing, like any other source's row
         feed = inp.get("feed") or set()
-        decides = ((pk not in own or is_own_priced(row) or i >= len(listings))
+        decides = ((pk not in own or is_own_priced(row) or (i >= len(listings) and row["source"] == "direct"))
                    and (pk not in feed or row["source"] == "blueground"))
         # the attribute each non-pass rule judges (rules.fact), in reasons order: cards mark it red or amber; `i` is
         # the rule's index in goal.rules (the goal editor names the edited rule that cuts a place)
@@ -481,7 +488,7 @@ def goal_offer(rs: list[tuple[dict[str, Any], dict[str, Any]]]) -> dict[str, Any
             "baths": row.get("baths"), "sqft": row.get("sqft") or None, "source": row["source"], "source_id": row["source_id"]}
 
 
-NO_OFFERS = "no offers known"
+NO_OFFERS = "no plan, beds or price known"
 
 
 def place_outcome(rs: list[tuple[dict[str, Any], dict[str, Any]]], pk: str) -> dict[str, Any]:
@@ -490,8 +497,9 @@ def place_outcome(rs: list[tuple[dict[str, Any], dict[str, Any]]], pk: str) -> d
     a price that its source does not mark unavailable. Some offer does not fail: the best offer (pass, then
     needs_check, then the most nice-to-haves). Only active rows count where any is active. Else some plan does not fail (beds/baths pass or unknown and no other
     rule fails) but none of those is an offer: `no_listings`, `why` 'no_price' or 'unavailable' (every fitting plan
-    is marked unavailable). Else plans that all fail: the best of them, a fail. No plan at all: `no_listings`,
-    `why` 'none' (nothing known for rent). Never a rejection: the place stays, in its own bucket."""
+    is marked unavailable). Else plans that all fail: the best of them, a fail. No plan at all: `incomplete`
+    (nothing usable known: no plan, beds or price; e.g. a RentCafe property that lists no floor plan, a community
+    website read for nothing). Never a rejection: the place stays, in its own bucket."""
     def best(xs: list[dict[str, Any]]) -> dict[str, Any]:
         return min(xs, key=lambda r: (RANK[r["status"]], -r["nice_score"]))
 
@@ -512,7 +520,7 @@ def place_outcome(rs: list[tuple[dict[str, Any], dict[str, Any]]], pk: str) -> d
                 "reasons": [(NO_LISTINGS, text, "listings"), *b["reasons"]]}
     if plans:
         return best([res for res, _ in plans])
-    return {"status": NO_LISTINGS, "why": "none", "reasons": [(NO_LISTINGS, NO_OFFERS, "listings")], "fails": [],
+    return {"status": INCOMPLETE, "reasons": [(INCOMPLETE, NO_OFFERS, "listings")], "fails": [],
             "nice": [], "nice_score": 0, "source": None, "source_id": None, "unit_key": None, "place_key": pk,
             "decides": True, "own_site": False}
 
@@ -588,4 +596,4 @@ def routing_candidates(conn: sqlite3.Connection, cfg: GoalsConfig | None = None,
     return out
 
 
-__all__ = ["place_building_units", "evaluate_all", "evaluate_goal", "goal_inputs", "place_restriction", "place_parking", "routing_candidates", "AMENITY_FLAGS", "best_trips", "nearest_by_set", "PASS", "FAIL", "CHECK", "NO_LISTINGS"]
+__all__ = ["place_building_units", "evaluate_all", "evaluate_goal", "goal_inputs", "place_restriction", "place_parking", "routing_candidates", "AMENITY_FLAGS", "best_trips", "nearest_by_set", "PASS", "FAIL", "CHECK", "NO_LISTINGS", "INCOMPLETE"]

@@ -13,7 +13,7 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="aptf-filter")
     ap.add_argument("--db", default=str(settings.DB_PATH))
     ap.add_argument("--goal", help="only this goal")
-    ap.add_argument("--status", choices=["pass", "fail", "needs_check", "no_listings"])
+    ap.add_argument("--status", choices=["pass", "fail", "needs_check", "no_listings", "incomplete"])
     args = ap.parse_args(argv)
     conn = connect(args.db)
     init_db(conn)

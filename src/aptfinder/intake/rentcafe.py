@@ -3,8 +3,10 @@ with property details (chosen 2026-11-25, see design.md). The actor pages throug
 is the site's own count) and, per property, gives its floor plans: id, name, beds (0 = studio), baths, sqft, rent
 from/to, whether units are available now.
 
-One row per floor plan with a rent (`plan:<floorPlanId>`); a property with no priced plan ("Ask for pricing"
-everywhere) is one `site_info` row `building:<propertyId>`, never an offer with an invented price. Every item's url is
+One row per floor plan (`plan:<floorPlanId>`), priced or not: a plan that says "Ask for pricing" is a row with its
+beds, baths and sqft and no price (a plan, not an offer; goals judge it for fit only). A plan that is no dwelling
+('Office', 'RV Storage', 'Warehouse with Office', which the actor gives as 0 beds, i.e. a studio) is dropped. A
+property with no floor plan left is one `site_info` row `building:<propertyId>`. Every item's url is
 its rentcafe.com page, which is an aggregator page, not the building's own site, so `extra.website` stays empty unless
 the actor ever links elsewhere (`clean_url` refuses rentcafe.com, keeps rentcafewebsite.com).
 The search spills into neighbouring cities: an item counts for the city it states.
@@ -12,6 +14,7 @@ The search spills into neighbouring cities: an item counts for the city it state
 
 from __future__ import annotations
 
+import re
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -20,6 +23,15 @@ from .base import Adapter, Parsed
 from .direct import SITE_INFO
 from .discover import clean_url
 from .zumper import city_of
+
+
+# a floor plan that is not a home: RentCafe lists offices, storage and parking among some properties' plans, with 0
+# beds (read as a studio) and no baths. Only a plan without bedrooms is dropped ('2 Bed with Office' is a home).
+NOT_A_HOME = re.compile(r"\b(office|storage|warehouse|parking|garage|retail|commercial)\b", re.I)
+
+
+def is_home(f: dict[str, Any]) -> bool:
+    return bool(f.get("beds")) or not NOT_A_HOME.search(f.get("name") or "")
 
 
 def rentcafe_input(cfg: dict[str, Any], areas: list) -> dict[str, Any]:
@@ -57,15 +69,16 @@ def rentcafe_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] | 
     # whenever the city's count moves
     out = []
     for f in item.get("floorPlans") or []:
-        if not f.get("rentMin"):  # "Ask for pricing": not an offer
+        if not is_home(f):
             continue
+        rent = f.get("rentMin") or None  # None: "Ask for pricing", a plan without an offer
         out.append(Parsed(
             source_id=f"plan:{f.get('floorPlanId') or pid + ':' + str(f.get('name'))}", url=url,
-            price=f["rentMin"], price_basis="month",
+            price=rent, price_basis="month" if rent else None,
             data=ObservationData(**base, kind="apartment", term="long", floor_plan=f.get("name"), beds=f.get("beds"),
                                  baths=f.get("baths"), sqft=f.get("sqft") or None,
                                  extra={**extra, "floor_plan_id": f.get("floorPlanId"), "rent_text": f.get("rentText"),
-                                        "plan_price_max": f.get("rentMax") if f.get("rentMax") != f["rentMin"] else None,
+                                        "plan_price_max": f.get("rentMax") if rent and f.get("rentMax") != rent else None,
                                         "plan_available": f.get("hasAvailableUnits"),
                                         "price_drop": f.get("priceDrop")})))
     if out:
@@ -73,7 +86,7 @@ def rentcafe_parse(item: dict[str, Any], cfg: dict[str, Any]) -> list[Parsed] | 
     return [Parsed(source_id=f"building:{pid}", url=url, price=None, price_basis=None,
                    data=ObservationData(**base, kind=SITE_INFO,
                                         extra={**extra, "plan_count": item.get("floorPlanCount"),
-                                               "note": "no floor plan with a rent: not an offer"}))]
+                                               "note": "no floor plan listed: not an offer"}))]
 
 
 ADAPTER = Adapter(name="rentcafe", build_input=rentcafe_input, parse=rentcafe_parse, area_kind="city",
